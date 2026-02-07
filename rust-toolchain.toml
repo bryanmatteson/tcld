@@ -1,0 +1,5 @@
+[toolchain]
+# Stable is sufficient: edition 2024 is stable since Rust 1.85 and the
+# workspace uses no nightly feature gates. CI reads this same pin.
+channel = "stable"
+components = ["rustfmt", "clippy"]

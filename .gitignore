@@ -1,0 +1,14 @@
+/target
+node_modules
+.next
+dist
+.DS_Store
+*.tsbuildinfo
+apps/tcld-gui/.design-parity/
+apps/tcld-gui/next-env.d.ts
+
+# Outputs of scripts/build_tcl9_opcode_runtime.sh (cloned Tcl source + build tree).
+# Only the patch under third_party/tcl/patches/ is tracked.
+third_party/tcl/src/
+third_party/tcl/build/
+third_party/tcl/runtime/

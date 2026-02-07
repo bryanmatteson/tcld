@@ -1,0 +1,17 @@
+[workspace]
+    members  = [ "crates/*" ]
+    exclude  = [ "apps/tcld-gui", "testing/fuzz" ]
+    resolver = "2"
+
+[workspace.package]
+    version = "0.1.0"
+    edition = "2024"
+    license = "MIT"
+    repository = "https://github.com/bryanmatteson/tcld"
+    authors = [ "Bryan <bryan@matteson.dev>" ]
+
+[profile.dev]
+    incremental = false
+
+[profile.test]
+    incremental = false
