@@ -1,0 +1,13 @@
+[package]
+name = "tcld-decompile"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+pretty = "0.12"
+tcld-core = { path = "../tcld-core" }
+tcld-syntax = { path = "../tcld-syntax" }
+tcld-ir = { path = "../tcld-ir" }
