@@ -1,0 +1,18 @@
+[package]
+name = "tcl-sys"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+links = "tcl"
+
+[features]
+default = ["tcl9"]
+tcl8_5 = []
+tcl8_6 = []
+tcl9 = []
+loadable-extension = []
+
+[build-dependencies]
+cc = "1"
