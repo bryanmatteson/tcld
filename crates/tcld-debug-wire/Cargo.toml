@@ -1,0 +1,14 @@
+[package]
+name = "tcld-debug-wire"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# Pulls in real-tclsh integration tests; CI must enable.
+integration_tclsh = []
+
+[dependencies]
+tcld-debug-state = { path = "../tcld-debug-state" }
