@@ -1,0 +1,6 @@
+The seed files in this directory that reproduce the TclPro compiler test
+corpus are redistributed under the terms in:
+
+    ../../../apps/tcld/tests/fixtures/license.terms
+
+The referenced notice is part of this distribution and applies verbatim.

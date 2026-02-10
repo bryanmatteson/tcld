@@ -1,0 +1,29 @@
+[package]
+name = "tcld-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tcld-core = { path = "../../crates/tcld-core" }
+tcld-decompile = { path = "../../crates/tcld-decompile" }
+tcld-syntax = { path = "../../crates/tcld-syntax" }
+
+[[bin]]
+name = "fuzz_bytecode_parse"
+path = "fuzz_targets/fuzz_bytecode_parse.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_decompile"
+path = "fuzz_targets/fuzz_decompile.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_syntax_extract"
+path = "fuzz_targets/fuzz_syntax_extract.rs"
+doc = false
