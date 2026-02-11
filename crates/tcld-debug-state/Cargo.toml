@@ -1,0 +1,12 @@
+[package]
+name = "tcld-debug-state"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+arc-swap = "1"
+tcld-decompile = { path = "../tcld-decompile" }
+tcld-syntax = { path = "../tcld-syntax" }
