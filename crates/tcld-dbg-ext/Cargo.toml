@@ -1,0 +1,31 @@
+[package]
+name = "tcld-dbg-ext"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["tcl9"]
+tcl8_5 = ["tcl-sys/tcl8_5"]
+tcl8_6 = ["tcl-sys/tcl8_6"]
+tcl9 = ["tcl-sys/tcl9"]
+loadable-extension = ["tcl-sys/loadable-extension"]
+# Phase 4-D: spawn a real tclsh subprocess in tests. Requires `tclsh`
+# (Tcl 9) on PATH or via TCLD_TCLSH env var, plus the dylib built.
+integration_tclsh = []
+
+[lib]
+name = "tcld_dbg"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+arc-swap = "1"
+tcl-sys = { path = "../tcl-sys", default-features = false }
+tcld-debug-state = { path = "../tcld-debug-state" }
+tcld-debug-wire = { path = "../tcld-debug-wire" }
+tcld-syntax = { path = "../tcld-syntax" }
+
+[build-dependencies]
+cc = "1"
