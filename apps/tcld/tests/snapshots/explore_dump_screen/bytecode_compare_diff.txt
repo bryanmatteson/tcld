@@ -1,0 +1,32 @@
+ tcld explore │ expr.tbc  │  [b] Browse  [C] Compare  │  tcl 8.0 · source: generated from tests/fixtures/expr.tbc
+┌ Left Source / Decompile ───────────────────────────────┐┌ Diff Report ───────────────────────────────────────────────┐
+│set result [expr int(10 * [expr sqrt(16)])]             ││Semantic diff                                               │
+│set result                                              ││Left: tests/fixtures/expr.tbc | artifact RawBytecode |      │
+│                                                        ││source GeneratedDecompiled | reconstruction Strict          │
+│                                                        ││Right: tests/fixtures/proc.tbc | artifact RawBytecode |     │
+│                                                        ││source GeneratedDecompiled | reconstruction Strict          │
+│                                                        ││Mode: bytecode vs bytecode | groups: left 4, right 5        │
+│                                                        ││Summary: 1 changed, 2 added, 1 removed                      │
+│                                                        ││Exceptions: 0 changed, 0 added, 1 removed                   │
+│                                                        ││Change c000 -> c000: 20 ops -> 6 ops | jumps 1 -> 0         │
+│                                                        ││  Left source: set result [expr int(10 * [expr sqrt(16)])]  │
+│                                                        ││  Right source: proc a { x } {return "$x : $x"}             │
+│                                                        ││  Left ops: push1, push1, push1, push1, push1, beginCatch4, │
+│                                                        ││push1, callBuiltinFunc1, tryCvtToNumeric, endCatch, jump1,  │
+│                                                        ││endCatch, push1, exprStk, push1, concat1, concat1, exprStk, │
+│                                                        ││storeScalarStk, pop                                         │
+│                                                        ││  Right ops: push1, push1, push1, push1, invokeStk1, pop    │
+│                                                        ││Added c001: 6 ops                                           │
+│                                                        ││  Source: proc b { x } {return "$x > $x"}                   │
+│                                                        ││  Ops: push1, push1, push1, push1, invokeStk1, pop          │
+│                                                        ││Added c002: 8 ops                                           │
+│                                                        ││  Source: list [a TEST] [b TEST]                            │
+│                                                        ││  Ops: push1, push1, push1, invokeStk1, push1, push1,       │
+│                                                        ││invokeStk1, invokeStk1                                      │
+│                                                        ││Removed c003: 2 ops                                         │
+│                                                        ││  Source: set result                                        │
+│                                                        ││  Ops: push1, loadScalarStk                                 │
+│                                                        ││Removed exception e000: Catch nest=1 code=15..20 break=-1   │
+│                                                        ││continue=-1 catch=23                                        │
+└────────────────────────────────────────────────────────┘└────────────────────────────────────────────────────────────┘
+ Compare  │  Target: tests/fixtures/proc.tbc  sync on       :diff Open | Q/Esc Close | ] Next change | [ Previous change

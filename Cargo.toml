@@ -1,5 +1,5 @@
 [workspace]
-    members  = [ "crates/*" ]
+    members  = [ "apps/*", "crates/*" ]
     exclude  = [ "apps/tcld-gui", "testing/fuzz" ]
     resolver = "2"
 

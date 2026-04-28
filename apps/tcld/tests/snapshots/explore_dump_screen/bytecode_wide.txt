@@ -1,0 +1,32 @@
+ tcld explore │ expr.tbc  │  [b] Browse  [C] Compare  │  tcl 8.0 · source: generated from tests/fixtures/expr.tbc
+┌ Workspace ───────────────┐┌ Canvas - Instructions (23) ────────────────────────────┐┌ Inspector Trace ───────────────┐
+│> ⊞ Instructions       [i]││▎▸      (0) push1 0             # result ◂              ││instruction: 0                  │
+│  ◈ Literals           [l]││        (2) push1 1             # int(10                ││pc: 0                           │
+│  ⚡  Exceptions        [e]││        (4) push1 2             #                       ││opcode: push1                   │
+│  ☰  Source            [c]││        (6) push1 3             # *                     ││argc: 0                         │
+│  ◇ Decompile          [d]││        (8) push1 2             #                       ││delta: 1                        │
+│  ◊ Summary            [s]││       (10) beginCatch4 0       # 0                     ││stack: 0 -> 1                   │
+└──────────────────────────┘│       (15) push1 4             # 16                    ││pop: []                         │
+                            │       (17) callBuiltinFunc1 16 # 16                    ││push: ["result"]                │
+                            │       (19) tryCvtToNumeric                             ││next: [2]                       │
+                            │       (20) endCatch                                    ││                                │
+                            │       (21) jump1 6             # pc 27                 ││                                │
+                            │       (23) endCatch                                    ││                                │
+                            │       (24) push1 5             # sqrt(16)              ││                                │
+                            │       (26) exprStk                                     ││                                │
+                            │       (27) push1 6             # )                     ││                                │
+                            │       (29) concat1 2           # 2                     ││                                │
+                            │       (31) concat1 5           # 5                     ││                                │
+                            │       (33) exprStk                                     ││                                │
+                            │       (34) storeScalarStk                              ││                                │
+                            │       (35) pop                                         ││                                │
+                            │ ▸     (36) push1 0             # result                ││                                │
+                            │       (38) loadScalarStk                               ││                                │
+                            │ ▸     (39) done                                        ││                                │
+                            │                                                        ││                                │
+                            │                                                        ││                                │
+                            │                                                        ││                                │
+                            │                                                        ││                                │
+                            │                                                        ││                                │
+                            └────────────────────────────────────────────────────────┘└────────────────────────────────┘
+ Instructions  #1/23  search 1/1 expr  trace on #0              : Cmd | Ctrl-P | ? | / Search | t Trace | :export Export

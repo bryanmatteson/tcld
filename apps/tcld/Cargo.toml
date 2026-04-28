@@ -1,0 +1,39 @@
+[package]
+name = "tcld"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+default-run = "tcld"
+
+[features]
+# Production default keeps the CLI free of an embedded Tcl link (batch
+# decompile/explore/host-nub debug work without hybrid). The hybrid TEBC
+# preview is **opt-in**:
+#   cargo build -p tcld --features hybrid
+#   scripts/verify-hybrid-gates.sh
+default = []
+integration_tclsh = []
+# In-process TEBC VM + embedded Tcl 9 WorldHost (requires Tcl 9 headers/libs).
+# Enables `tcld run` hybrid path and hybrid `tcld debug` for `.tbc`.
+
+[dependencies]
+tcld-core = { path = "../../crates/tcld-core" }
+tcld-debug-wire = { path = "../../crates/tcld-debug-wire" }
+tcld-decompile = { path = "../../crates/tcld-decompile" }
+tcld-explore = { path = "../../crates/tcld-explore" }
+tcld-syntax = { path = "../../crates/tcld-syntax" }
+termosaic = { version = "0.3", path = "../../../termosaic/crates/termosaic", default-features = false }
+tcld-tui = { path = "../../crates/tcld-tui" }
+crossterm = "0.29"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
+clap = { version = "4", features = ["derive", "env"] }
+tempfile = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+portable-pty = "0.9"
+vt100 = "=0.15.2"

@@ -1,0 +1,32 @@
+ tcld explore │ expr.tcl  │  [b] Browse  [C] Compare  │  source: existing tests/fixtures/expr.tcl
+┌ Workspace ───────────┐┌ Canvas - Source ───────────────────────────────────────────┐┌ Inspector ─────────────────────┐
+│> ☰  Source        [c]││# expr.tcl --                                               ││line: 1                         │
+│  ◇ Decompile      [d]││#                                                           ││origin: Original                │
+│  ◊ Summary        [s]││#  Test script for the compiler.                            ││                                │
+│                      ││#  Under some conditions, the expr command is emitted as in…││text: # expr.tcl --             │
+│22 lines              ││#  inside a catch staement, with the catch retrying the ope…││search: expr                    │
+└──────────────────────┘│#  to (non-inlined) expr.                                   ││                                │
+                        │#  This file is expected to generate a CATCH_EXCEPTION_RANG…││                                │
+                        │#                                                           ││                                │
+                        │# Copyright (c) 1998-2000 by Ajuba Solutions.               ││                                │
+                        │# Copyright (c) 2000, 2017 ActiveState Software Inc.        ││                                │
+                        │#                                                           ││                                │
+                        │# See the file "license.terms" for information on usage and…││                                │
+                        │# of this file, and for a DISCLAIMER OF ALL WARRANTIES.     ││                                │
+                        │#                                                           ││                                │
+                        │# RCS: @(#) $Id: expr.tcl,v 1.2 2000/05/30 22:19:11 wart Ex…││                                │
+                        │                                                            ││                                │
+                        │# the "expr sqrt(16)" part generates the exception range, b…││                                │
+                        │# can be inlined. The outer expr call does not, because of… ││                                │
+                        │# inner expr                                                ││                                │
+                        │                                                            ││                                │
+                        │set result [expr int(10 * [expr sqrt(16)])]                 ││                                │
+                        │set result                                                  ││                                │
+                        │                                                            ││                                │
+                        │                                                            ││                                │
+                        │                                                            ││                                │
+                        │                                                            ││                                │
+                        │                                                            ││                                │
+                        │                                                            ││                                │
+                        └────────────────────────────────────────────────────────────┘└────────────────────────────────┘
+ Source  ln 1/22  search 1/1 expr                                         : Command | Ctrl-P Palette | ? Help | / Search
