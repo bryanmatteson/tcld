@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "TCLD",
+  "version": "0.3.1",
+  "identifier": "dev.matteson.tcld",
+  "build": {
+    "beforeDevCommand": "npm run dev --prefix ../tcld-gui",
+    "beforeBuildCommand": "npm run build --prefix ../tcld-gui",
+    "devUrl": "http://localhost:6175",
+    "frontendDist": "../tcld-gui/dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "TCLD",
+        "width": 1400,
+        "height": 900,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 16
+        }
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "icon": ["icons/icon.icns"],
+    "macOS": {
+      "bundleName": "TCLD",
+      "minimumSystemVersion": "10.13"
+    }
+  }
+}

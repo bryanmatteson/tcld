@@ -1,0 +1,5 @@
+resources/**
+dist/**
+target/**
+node_modules/**
+*.log
