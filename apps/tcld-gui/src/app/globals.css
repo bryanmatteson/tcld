@@ -1,0 +1,5711 @@
+@import "tailwindcss";
+
+/*
+ * ─── Theme color tokens ─────────────────────────────────────────
+ * Color values are the Graphite default palette (sourced from
+ * lib/themes.ts → DESIGN_THEME_TOKENS.graphite). They live here so Tailwind's
+ * static class generator (`bg-tcld-bg`, `text-tcld-fg`, etc.) compiles to
+ * resolved values for SSR and first paint.
+ *
+ * Theme switching at runtime is still owned by lib/themes.ts: the
+ * FOUC-prevention <script> in app/layout.tsx writes the active theme's
+ * tokens to documentElement.style as inline declarations, which override
+ * these defaults. lib/themes.ts is the single source of truth for any
+ * theme other than Graphite.
+ */
+@theme {
+  --color-tcld-bg: #0b0d0c;
+  --color-tcld-bg-1: #15191a;
+  --color-tcld-bg-2: #1a1f20;
+  --color-tcld-bg-3: #20262a;
+  --color-tcld-bg-highlight: #262d2f;
+
+  --color-tcld-border: #3a4347;
+  --color-tcld-border-focus: #7adfb6;
+  --color-tcld-border-dim: #2c3437;
+
+  --color-tcld-fg: #e6e8e6;
+  /* Legacy fg-dim alias now points at text-inactive (AA-passing). */
+  --color-tcld-fg-dim: #bcc3bf;
+  --color-tcld-fg-muted: #a8b0ad;
+  --color-tcld-fg-bright: #e6e8e6;
+
+  --color-tcld-text-inactive: #bcc3bf;
+  --color-tcld-text-keyhint: #a4ada9;
+  --color-tcld-text-placeholder: #7e8884;
+  --color-tcld-text-comment: #7e8884;
+
+  --color-tcld-accent: #7adfb6;
+  --color-tcld-accent-dim: #5cc8a0;
+  --color-tcld-keyword: #b59cf0;
+  --color-tcld-string: #9fd285;
+  --color-tcld-number: #f3c469;
+  --color-tcld-comment: #7e8884;
+  --color-tcld-variable: #88b8e6;
+  --color-tcld-group: #b59cf0;
+  --color-tcld-group-dim: rgba(122, 223, 182, 0.12);
+  --color-tcld-error: #f47174;
+  --color-tcld-warning: #f3c469;
+  --color-tcld-success: #7adfb6;
+
+  --spacing: 0.25rem;
+  --ui: "Geist", "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mono: "Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+  --font-ui: var(--ui);
+  --font-mono: var(--mono);
+  --type-tracking: 0;
+  --type-weight-bias: 500;
+  --type-ui: 13px;
+  --type-label: 10.5px;
+  --type-status: 11px;
+  --type-code: 12px;
+  --type-disassembly: 11.5px;
+  --radius-window: 12px;
+  --radius-card: 8px;
+  --radius-panel: 6px;
+  --radius-button: 5px;
+  --radius-tab-top: 6px 6px 0 0;
+  --radius-chip: 11px;
+  --radius-badge: 3px;
+  --row-py: 5px;
+  --row-px: 10px;
+  --row-gap: 6px;
+  --panel-pad: 10px;
+  --panel-gap: 8px;
+  --header-h: 30px;
+  --row-h: 22px;
+  --disasm-row-py: 1px;
+  --disassembly-row-height: 22px;
+  --rail-display: block;
+  --variable-sparklines: block;
+  --font-size-base: 12.5px;
+  --code-line-height: calc(var(--font-size-base) * 1.5);
+  --code-row-height: max(20px, var(--code-line-height));
+  --panel-header-height: 30px;
+
+  /*
+   * ─── Shadows / overlays ────────────────────────────────────────
+   * Single source of truth for elevation. Consumers should reference
+   * these tokens (via `shadow-[var(--shadow-panel)]` or .tcld-overlay)
+   * instead of inlining `rgba(0,0,0,X)` values per surface.
+   */
+  --shadow-flat: 0 0 0 1px var(--color-tcld-border-dim);
+  --shadow-panel: 0 10px 30px rgba(0, 0, 0, 0.18);
+  --shadow-popover: 0 8px 24px rgba(0, 0, 0, 0.32);
+  --shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.42), 0 0 0 1px var(--color-tcld-border);
+  --overlay-scrim: rgba(0, 0, 0, 0.45);
+  --overlay-blur: 8px;
+
+  /*
+   * ─── Semantic typography utilities ────────────────────────────
+   * One named size per role. Consumers must reference these (via
+   * `text-meta`, `text-label`, etc.) instead of `text-[Npx]`. This
+   * lets us re-tune density in one place and keeps the panel chrome
+   * consistent across screens.
+   */
+  --text-ui: 13px;
+  --text-meta: 11px;
+  --text-label: 10.5px;
+  --text-tag: 9.5px;       /* tag/keyhint chips on welcome-screen tiles */
+  --text-code: 12px;
+  --text-disasm: 11.5px;
+  --text-section-h1: 22px; /* settings dialog section title */
+  --text-welcome: 40px;    /* welcome-screen hero copy */
+
+  /*
+   * ─── Z-index scale ─────────────────────────────────────────────
+   * Single source of truth for stacking. Use these instead of inline
+   * z-[9999] / z-50 so overlay → modal → toast ordering stays sane.
+   * The scale leaves room (10/20/30/…) for one-off insertions inside
+   * a layer without collision.
+   */
+  --z-base: 1;
+  --z-panel-focus: 5;
+  --z-tab-active: 10;
+  --z-popover: 50;
+  --z-overlay: 100;
+  --z-modal: 200;
+  --z-toast: 300;
+  --z-context-menu: 400;
+  --z-drag-overlay: 500;
+
+  /*
+   * ─── Status glow tokens ────────────────────────────────────────
+   * Used by the debug toolbar / status indicators where a soft halo
+   * conveys "live state" (paused, breakpoint hit, error). Each token
+   * is a single drop-shadow string so consumers never inline rgba.
+   */
+  --shadow-glow-accent: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
+  --shadow-glow-warn:   0 0 6px color-mix(in srgb, var(--warn)   70%, transparent);
+  --shadow-glow-err:    0 0 6px color-mix(in srgb, var(--err)    70%, transparent);
+  --shadow-glow-info:   0 0 6px color-mix(in srgb, var(--info)   70%, transparent);
+
+  /* Animations */
+  --animate-panel-in: panel-in 0.12s ease-out;
+  --animate-panel-out: panel-out 0.1s ease-in;
+  --animate-focus-glow: none;
+  --animate-fade-in: fade-in 0.08s ease-out;
+  --animate-slide-up: slide-up 0.12s ease-out;
+  --animate-pulse-subtle: none;
+  --animate-shimmer: none;
+  --animate-stagger-1: none;
+  --animate-stagger-2: none;
+  --animate-stagger-3: none;
+  --animate-stagger-4: none;
+  --animate-stagger-5: none;
+}
+
+/*
+ * ─── SSR / pre-hydration fallbacks ─────────────────────────────
+ * The runtime FOUC script in app/layout.tsx and the SettingsProvider apply
+ * the active theme's tokens to documentElement.style. These :root fallbacks
+ * cover SSR, the very first paint, and any token reader that runs before
+ * hydration. They mirror the Graphite default from DESIGN_THEME_TOKENS.
+ */
+:root {
+  --color-tcld-bg: #0b0d0c;
+  --color-tcld-bg-1: #15191a;
+  --color-tcld-bg-2: #1a1f20;
+  --color-tcld-bg-3: #20262a;
+  --color-tcld-bg-highlight: #262d2f;
+  --color-tcld-border: #3a4347;
+  --color-tcld-border-focus: #7adfb6;
+  --color-tcld-border-dim: #2c3437;
+  --color-tcld-fg: #e6e8e6;
+  --color-tcld-fg-dim: #bcc3bf;
+  --color-tcld-fg-muted: #a8b0ad;
+  --color-tcld-fg-bright: #e6e8e6;
+  --color-tcld-text-inactive: #bcc3bf;
+  --color-tcld-text-keyhint: #a4ada9;
+  --color-tcld-text-placeholder: #7e8884;
+  --color-tcld-text-comment: #7e8884;
+  --color-tcld-accent: #7adfb6;
+  --color-tcld-accent-dim: #5cc8a0;
+  --color-tcld-keyword: #b59cf0;
+  --color-tcld-string: #9fd285;
+  --color-tcld-number: #f3c469;
+  --color-tcld-comment: #7e8884;
+  --color-tcld-variable: #88b8e6;
+  --color-tcld-group: #b59cf0;
+  --color-tcld-group-dim: rgba(122, 223, 182, 0.12);
+  --color-tcld-error: #f47174;
+  --color-tcld-warning: #f3c469;
+  --color-tcld-success: #7adfb6;
+
+  /* Short-name aliases used by the named .tcld-* CSS classes below. */
+  --bg-canvas: var(--color-tcld-bg);
+  --bg-window: var(--color-tcld-bg-1);
+  --bg-panel: var(--color-tcld-bg-2);
+  --bg-panel-2: var(--color-tcld-bg-3);
+  --bg-elev: var(--color-tcld-bg-highlight);
+  --bg-input: var(--color-tcld-bg);
+  --bg-highlight: var(--color-tcld-bg-highlight);
+  --line: var(--color-tcld-border);
+  --line-2: var(--color-tcld-border-dim);
+  --fg: var(--color-tcld-fg);
+  --fg-2: var(--color-tcld-fg-muted);
+  --fg-3: var(--color-tcld-text-inactive);
+  --fg-4: var(--color-tcld-text-comment);
+  --accent: var(--color-tcld-accent);
+  --accent-2: var(--color-tcld-accent-dim);
+  --accent-bg: rgba(122, 223, 182, 0.12);
+  --accent-bg-strong: rgba(122, 223, 182, 0.18);
+  --accent-fg-on: #0c1411;
+  --warn: var(--color-tcld-warning);
+  --err: var(--color-tcld-error);
+  --info: var(--color-tcld-variable);
+  --violet: var(--color-tcld-group);
+  --pink: #e89bb8;
+  --kw: var(--color-tcld-keyword);
+  --str: var(--color-tcld-string);
+  --var: var(--color-tcld-variable);
+  --num: var(--color-tcld-number);
+  --group: var(--color-tcld-group);
+  --ok: var(--color-tcld-success);
+  --success: var(--color-tcld-success);
+  --border-focus: var(--color-tcld-border-focus);
+
+  /* Semantic text-emphasis tokens (single owner per use-case). */
+  --text-inactive: var(--color-tcld-text-inactive);
+  --text-keyhint: var(--color-tcld-text-keyhint);
+  --text-placeholder: var(--color-tcld-text-placeholder);
+  --text-comment: var(--color-tcld-text-comment);
+}
+
+/* ─── Animation Keyframes ─────────────────────────────────────── */
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes panel-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+@keyframes focus-glow {
+
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(122, 162, 247, 0);
+  }
+
+  50% {
+    box-shadow: 0 0 0 3px rgba(122, 162, 247, 0.15);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/*
+ * Workspace flyout drawer slide-in. Used by [data-flyout-drawer] when the
+ * workspace narrows past WORKSPACE_COLLAPSE_AT_PX and a leaf is promoted
+ * out of the mosaic. Translates in from the right edge with a slight ease
+ * so the gesture matches the WindowEdgeDrop overlay vocabulary used during
+ * cross-leaf drag.
+ */
+@keyframes flyout-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes pulse-subtle {
+
+  0%,
+  100% {
+    opacity: 0.7;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes fade-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scanline {
+  0% {
+    transform: translateY(-100%);
+  }
+
+  100% {
+    transform: translateY(100vh);
+  }
+}
+
+/* ─── Base ────────────────────────────────────────────────────── */
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  /* Pinned to --bg-canvas so theme switches actually paint the body.
+     Previously hardcoded to #070908, which broke the tokyolight theme —
+     the only light theme in the system rendered dark because the body
+     ignored the active theme's canvas token. */
+  background: var(--bg-canvas);
+  color: var(--color-tcld-fg);
+  font-family: var(--ui);
+  letter-spacing: var(--type-tracking);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.tcld-drop-affordance {
+  margin-inline: auto;
+  max-width: 34rem;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--bg-input);
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: var(--type-status);
+  padding: 10px 14px;
+}
+
+.tcld-pref-section {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--bg-panel);
+  padding: 16px;
+}
+
+.tcld-pref-section h2 {
+  margin: 0 0 12px;
+  color: var(--fg);
+  font-family: var(--ui);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tcld-pref-card {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--bg-panel-2);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 12px;
+  text-align: left;
+}
+
+.tcld-pref-card.is-active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.tcld-segment-button.is-active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.tcld-pref-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding-block: 4px;
+}
+
+/* ─── Scrollbar Styling ───────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+  transition: background 0.2s ease;
+}
+
+*:hover> ::-webkit-scrollbar-thumb,
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-tcld-bg-3);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-tcld-border);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-tcld-bg-3) transparent;
+}
+
+/* ─── Selection ───────────────────────────────────────────────── */
+::selection {
+  background: color-mix(in srgb, var(--color-tcld-accent) 20%, transparent);
+  color: var(--color-tcld-fg);
+}
+
+/* ─── Focus ───────────────────────────────────────────────────── */
+:focus {
+  outline: none;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/*
+ * One focus ring spec for the whole app.
+ *
+ * outline-offset: 0 keeps the ring sitting on the element edge so it never
+ * bleeds outside its parent — this is what was making focused panel-header
+ * descendants paint a halo around the entire panel-root. 1.5px outline at
+ * 70% accent opacity is bright enough for a11y but doesn't read as a glow.
+ */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[role="button"]:focus-visible,
+[role="menuitem"]:focus-visible,
+[role="menuitemradio"]:focus-visible,
+[role="tab"]:focus-visible,
+[role="option"]:focus-visible {
+  outline: 1.5px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 0;
+  border-radius: 4px;
+}
+
+/*
+ * Container surfaces and "label-proxy" buttons shouldn't draw their own ring.
+ * Spelled out aggressively to defeat any wrapper that grew a role="button"
+ * / tabindex attribute via dnd-kit or react-mosaic and ended up matching the
+ * generic [role="button"] focus rule.
+ */
+.panel-root:focus-visible,
+.panel-root:focus-within,
+.panel-header:focus-visible,
+[data-panel-id]:focus-visible,
+[data-design-surface]:focus-visible,
+[data-design-surface="panel-header"]:focus-visible,
+[data-design-surface="panel-header-actions"]:focus-visible,
+[data-design-surface="adaptive-tab-bar"]:focus-visible,
+[data-design-surface="workspace-mosaic"]:focus-visible,
+.tcld-panel-body:focus-visible,
+.mosaic-tile:focus-visible,
+.mosaic-window:focus-visible,
+.tcld-view-tab [data-panel-interactive="true"]:focus-visible {
+  outline: none;
+}
+
+/* When the visible tab body owns focus, draw the ring on the tab itself
+ * (subtle background lift instead of an outline). */
+.tcld-view-tab:focus-within {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* ─── App Shell ───────────────────────────────────────────────── */
+.tcld-app-shell {
+  background: var(--bg-window);
+}
+
+.tcld-file-header,
+.tcld-main-toolbar,
+.tcld-status-bar,
+.tcld-command-line {
+  backdrop-filter: blur(14px);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--color-tcld-bg-1) 92%, #fff 3%), var(--color-tcld-bg-1));
+}
+
+.tcld-file-header {
+  background: var(--bg-window);
+}
+
+.tcld-titlebar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* 28px controls + 8px breathing room → matches WCAG 2.5.8 with comfortable hit-area */
+  min-height: 40px;
+  padding: 0 10px 0 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-window);
+}
+
+.tcld-titlebar-spacer {
+  flex: 1;
+  min-width: 16px;
+  align-self: stretch;
+}
+
+.tcld-titlebar-chrome {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font: 11px var(--mono);
+}
+
+.tcld-titlebar-trail {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+}
+
+/* Header-mounted icon controls — 28×28 floor (WCAG 2.2 SC 2.5.8 ≥24×24). */
+.tcld-titlebar-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-inactive);
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.tcld-titlebar-icon:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--fg);
+}
+
+.tcld-tabbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-window);
+}
+
+/* macOS overlay title bar: reserve traffic-light gutter on the left */
+.tcld-titlebar-gap {
+  width: 72px;
+  height: 1px;
+  flex: 0 0 72px;
+}
+
+/* Inline mode: MainToolbar lives inside the titlebar row */
+.tcld-main-toolbar.tcld-main-toolbar-inline {
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.tcld-main-toolbar.tcld-main-toolbar-inline .tcld-actionbar-divider {
+  display: none;
+}
+
+/*
+ * Compact nav-history controls (back / forward) docked in the titlebar trail.
+ * The historic breadcrumb crumb classes (.tcld-nav-crumb, -group, -active)
+ * and the .tcld-titlebar-nav wrapper were removed when the global
+ * breadcrumb row collapsed into NavHistoryControls + the StatusBar position
+ * counter. Only the icon button styling survives because the back/forward
+ * arrows live on.
+ */
+.tcld-nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-inactive);
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.tcld-nav-icon:hover:not(.is-disabled) {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--fg);
+}
+
+.tcld-nav-icon.is-disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.tcld-product-tab,
+.tcld-open-file-tab,
+.tcld-no-file-tab,
+.tcld-tab-open-button,
+.tcld-search-command,
+.tcld-command-icon {
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-panel) 82%, transparent);
+}
+
+.tcld-product-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg);
+  font: 700 12px var(--mono);
+}
+
+.tcld-product-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--accent-fg-on);
+  background: var(--accent);
+}
+
+.tcld-file-tabs {
+  display: flex;
+  min-width: 0;
+  align-self: stretch;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.tcld-open-file-tab,
+.tcld-no-file-tab,
+.tcld-tab-open-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  border-bottom-color: var(--line);
+  border-radius: var(--radius-tab-top);
+  color: var(--fg-3);
+  font: 500 11.5px var(--mono);
+}
+
+.tcld-open-file-tab {
+  max-width: min(34rem, 40vw);
+  padding: 0 12px;
+}
+
+.tcld-open-file-tab-active {
+  border-bottom-color: var(--bg-panel);
+  background: var(--bg-panel);
+  color: var(--fg);
+}
+
+.tcld-open-file-tab-muted {
+  background: transparent;
+}
+
+/*
+ * In-panel view tabs (Disassembly / Symbols / Source Map / etc.) share the
+ * browser-tab vocabulary with the top file-tab strip: 28px height, bottom-
+ * edge active state, no rounded card. Pill chips are reserved for secondary
+ * segmentation (filters, modes), not primary view-switching.
+ */
+.tcld-view-tab {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-inactive);
+  font: 500 11.5px var(--mono);
+  white-space: nowrap;
+  /* Tabs are draggable — show the open-hand cursor at rest, the closed-hand
+   * during the drag, and disable native text-selection so the label doesn't
+   * highlight as the user starts a pointer drag. */
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.tcld-view-tab:active,
+.tcld-view-tab[data-tab-dragging="true"] {
+  cursor: grabbing;
+}
+
+/*
+ * Force grab/grabbing across every descendant so child <button> elements
+ * (label proxy, etc.) don't steal the cursor via UA stylesheets / Tailwind
+ * arbitrary-value utilities — except the close-X, which needs a real
+ * pointer cursor since it IS clickable independently of the drag handle.
+ *
+ * !important here defeats any utility-layer cursor a child might inherit;
+ * the WebKit-derived webview that ships with Tauri otherwise resolves
+ * cursor on `role="button"` / `<button>` descendants to its own default
+ * before the inherited grab takes effect.
+ */
+.tcld-view-tab,
+.tcld-view-tab *:not([data-panel-close]):not([data-panel-close] *) {
+  cursor: grab !important;
+}
+
+.tcld-view-tab:active,
+.tcld-view-tab:active *:not([data-panel-close]):not([data-panel-close] *),
+.tcld-view-tab[data-tab-dragging="true"],
+.tcld-view-tab[data-tab-dragging="true"] *:not([data-panel-close]):not([data-panel-close] *) {
+  cursor: grabbing !important;
+}
+
+.tcld-view-tab [data-panel-close],
+.tcld-view-tab [data-panel-close] * {
+  cursor: pointer !important;
+}
+
+.tcld-view-tab:hover {
+  color: var(--fg-2);
+}
+
+.tcld-view-tab-active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.tcld-no-file-tab,
+.tcld-tab-open-button {
+  border-style: dashed;
+  background: transparent;
+}
+
+.tcld-no-file-tab {
+  max-width: min(32rem, 44vw);
+  padding: 0 10px;
+}
+
+.tcld-no-file-tab:hover,
+.tcld-tab-open-button:hover {
+  border-color: var(--accent);
+  color: var(--fg);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.tcld-no-file-tab:disabled,
+.tcld-tab-open-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.tcld-no-file-tab-separator {
+  width: 3px;
+  height: 3px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--fg-4);
+}
+
+.tcld-tab-open-button {
+  justify-content: center;
+  width: 30px;
+  padding: 0;
+}
+
+.tcld-tab-status-dot {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.tcld-tab-status-dot-muted {
+  background: var(--fg-4);
+}
+
+.tcld-tab-status-dot-warn {
+  background: var(--warn);
+}
+
+.tcld-tab-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tcld-tab-meta {
+  color: var(--fg-4);
+  font-size: 10.5px;
+}
+
+.tcld-tabbar-spacer {
+  flex: 1 1 auto;
+}
+
+.tcld-search-command,
+.tcld-command-icon {
+  color: var(--fg-3);
+}
+
+.tcld-search-command kbd {
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--bg-input);
+  padding: 1px 5px;
+  color: var(--fg-3);
+  font-size: 10px;
+}
+
+.tcld-command-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-inactive);
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.tcld-command-icon:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--fg);
+}
+
+/* Override the shared tab-pill background rule for the title-bar palette icon */
+.tcld-titlebar-trail .tcld-command-icon {
+  border: 0;
+  background: transparent;
+}
+
+.tcld-workspace-shell {
+  padding: 4px;
+  background: var(--bg-window);
+}
+
+.tcld-brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: var(--color-tcld-bg);
+  background: linear-gradient(135deg, var(--color-tcld-accent), var(--color-tcld-warning));
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--color-tcld-accent) 16%, transparent);
+}
+
+.tcld-brand-mark-large {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+}
+
+.tcld-file-chip,
+.tcld-meta-chip,
+.tcld-hook-status,
+.tcld-toolbar-section-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--color-tcld-border-dim);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-tcld-bg-2) 84%, transparent);
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+
+.tcld-meta-chip,
+.tcld-hook-status,
+.tcld-toolbar-section-label,
+.tcld-topbar-command {
+  color: var(--color-tcld-fg-muted);
+}
+
+.tcld-file-context {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tcld-file-metrics {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  font: 11px var(--font-mono);
+}
+
+.tcld-topbar-command kbd {
+  border-radius: 5px;
+  border: 1px solid var(--color-tcld-border-dim);
+  background: color-mix(in srgb, var(--color-tcld-bg-3) 74%, transparent);
+  padding: 1px 5px;
+  color: var(--color-tcld-fg-dim);
+  font-size: 10px;
+}
+
+.tcld-topbar-command {
+  border: 1px solid var(--color-tcld-border-dim);
+  background: color-mix(in srgb, var(--color-tcld-bg-2) 84%, transparent);
+}
+
+.tcld-toolbar-button,
+.tcld-control-button,
+.tcld-control-field {
+  border: 1px solid color-mix(in srgb, var(--color-tcld-border) 62%, transparent);
+  background: color-mix(in srgb, var(--color-tcld-bg-2) 90%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 5%, transparent);
+}
+
+/*
+ * Hover-only emphasis for toolbar surfaces. Focus visibility is owned by the
+ * single global :focus-visible rule near the top of this file — do not
+ * re-introduce per-component :focus shadow rules.
+ */
+.tcld-toolbar-button:hover,
+.tcld-control-button:hover {
+  border-color: color-mix(in srgb, var(--color-tcld-border-focus) 70%, transparent);
+}
+
+.tcld-toolbar-button-primary,
+.tcld-hero-action-primary {
+  color: var(--color-tcld-bg);
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--color-tcld-accent), color-mix(in srgb, var(--color-tcld-success) 72%, var(--color-tcld-accent)));
+}
+
+.tcld-main-toolbar {
+  position: relative;
+  z-index: 60;
+  min-height: 38px;
+  overflow: visible;
+  background: var(--bg-window);
+}
+
+.tcld-actionbar-left,
+.tcld-actionbar-launch {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.tcld-actionbar-label {
+  color: var(--fg-3);
+  font: 700 10px var(--mono);
+  text-transform: uppercase;
+}
+
+.tcld-layout-select {
+  min-width: 206px;
+}
+
+.tcld-layout-menu-trigger {
+  height: 28px;
+  border-radius: var(--radius-button);
+  font-family: var(--mono);
+}
+
+.tcld-layout-menu-label {
+  color: var(--fg-3);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.tcld-layout-menu-separator {
+  width: 3px;
+  height: 3px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--fg-4);
+}
+
+.tcld-layout-dirty-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.tcld-layout-menu {
+  box-shadow: 0 14px 34px color-mix(in srgb, #000 28%, transparent);
+}
+
+.tcld-layout-menu-heading {
+  padding: 7px 10px 5px;
+  color: var(--fg-4);
+  font: 700 10px var(--mono);
+  text-transform: uppercase;
+}
+
+.tcld-layout-menu-item {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 8px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 7px 10px;
+  color: var(--fg);
+  font: 12px var(--mono);
+  text-align: left;
+}
+
+.tcld-layout-menu-item:hover,
+.tcld-layout-menu-item:focus-visible {
+  background: var(--bg-highlight);
+}
+
+.tcld-layout-menu-active-dot {
+  width: 6px;
+  height: 6px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.tcld-layout-menu-active-dot[data-active="true"] {
+  background: var(--accent);
+}
+
+.tcld-toolbar-button-muted {
+  color: var(--fg-2);
+}
+
+.tcld-toolbar-button-muted:hover {
+  color: var(--fg);
+  background: var(--bg-elev);
+}
+
+.tcld-toolbar-button-accent {
+  border-color: color-mix(in srgb, var(--accent) 68%, transparent);
+  color: var(--accent);
+}
+
+.tcld-actionbar-divider {
+  width: 1px;
+  height: 22px;
+  background: var(--line);
+}
+
+.tcld-toolbar-section {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border-right: 1px solid var(--color-tcld-border-dim);
+  padding-right: 12px;
+}
+
+.tcld-toolbar-section:last-child {
+  border-right: 0;
+  padding-right: 0;
+}
+
+.tcld-toolbar-section-label {
+  padding: 3px 8px;
+  font: 700 10px var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.tcld-toolbar-section-run {
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.tcld-segmented-control {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-tcld-border) 62%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-tcld-bg-2) 76%, transparent);
+}
+
+.tcld-segment-button {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.tcld-segment-button + .tcld-segment-button {
+  border-left: 1px solid var(--color-tcld-border-dim);
+}
+
+.tcld-launch-controls {
+  display: flex;
+  min-width: 0;
+  flex: 0 1 auto;
+  gap: 6px;
+  align-items: center;
+  overflow: visible;
+  scrollbar-width: none;
+}
+
+.tcld-launch-controls::-webkit-scrollbar {
+  display: none;
+}
+
+.tcld-profile-select {
+  width: 136px;
+  height: 28px;
+  flex: 0 0 136px;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font: 12px var(--mono);
+  outline: none;
+}
+
+.tcld-launch-profile-stack {
+  display: flex;
+  min-width: 132px;
+  max-width: 240px;
+  flex: 0 1 200px;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.tcld-launch-profile-stack .tcld-launch-profile-token {
+  flex: 0 1 auto;
+}
+
+.tcld-launch-profile-stack .tcld-hook-status {
+  display: none;
+}
+
+@media (min-width: 1100px) {
+  .tcld-launch-profile-stack .tcld-hook-status {
+    display: inline-block;
+    flex: 0 1 auto;
+    max-width: 18ch;
+    font-size: 9.5px;
+  }
+}
+
+.tcld-launch-profile-token {
+  display: flex;
+  height: 28px;
+  align-items: center;
+  gap: 6px;
+  border-radius: var(--radius-button);
+  padding: 0 7px;
+}
+
+.tcld-launch-profile-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.tcld-launch-profile-chevron {
+  margin-left: auto;
+  color: var(--fg-4);
+}
+
+.tcld-hook-status {
+  max-width: 210px;
+  overflow: hidden;
+  color: var(--fg-4);
+  font: 10px var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tcld-launch-controls .tcld-control-field:not(.tcld-profile-select):not(.tcld-launch-profile-token) {
+  width: 88px;
+  flex: 0 0 88px;
+}
+
+.tcld-launch-controls .tcld-control-field[placeholder^="env"] {
+  width: 128px;
+  flex-basis: 128px;
+}
+
+.tcld-launch-profile-token {
+  width: auto;
+  flex: 1 1 auto;
+  border: 1px solid var(--line);
+  background: var(--bg-input);
+}
+
+.tcld-launch-profile-token:hover {
+  border-color: var(--border-focus);
+}
+
+/* Launch split control: [Run | Profile ▼] with Configure… in menu */
+
+.tcld-launch-split {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  height: 28px;
+  border-radius: var(--radius-button);
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-input));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  overflow: hidden;
+  font: 12px var(--mono);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.tcld-launch-split:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+
+.tcld-launch-split-run {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.tcld-launch-split-run:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.tcld-launch-split-run-label {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.tcld-launch-split-profile {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 0;
+  border-left: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease;
+  max-width: 180px;
+  min-width: 0;
+}
+
+.tcld-launch-split-profile:hover,
+.tcld-launch-split-profile.is-open {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.tcld-launch-split-profile-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tcld-launch-split-profile-chevron {
+  flex: 0 0 auto;
+  color: var(--fg-3);
+  transition: transform 0.12s ease;
+}
+
+.tcld-launch-split-profile.is-open .tcld-launch-split-profile-chevron {
+  transform: rotate(180deg);
+  color: var(--accent);
+}
+
+.tcld-launch-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 220px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--bg-panel);
+  /* Token-driven popover elevation. */
+  box-shadow: var(--shadow-popover);
+  font: 12px var(--mono);
+  color: var(--fg);
+}
+
+.tcld-launch-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-2);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.tcld-launch-menu-item:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--fg);
+}
+
+.tcld-launch-menu-item.is-active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.tcld-launch-menu-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.6;
+  flex: 0 0 auto;
+}
+
+.tcld-launch-menu-item.is-active .tcld-launch-menu-dot {
+  opacity: 1;
+}
+
+.tcld-launch-menu-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tcld-launch-menu-detail {
+  flex: 0 0 auto;
+  color: var(--fg-4);
+  font-size: 10px;
+  letter-spacing: 0.01em;
+}
+
+.tcld-launch-menu-status {
+  margin: 2px 4px 0;
+  padding: 4px 6px;
+  font-size: 10px;
+  color: var(--fg-4);
+  border-top: 1px dashed var(--line-2);
+  letter-spacing: 0.01em;
+}
+
+.tcld-launch-menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line);
+}
+
+.tcld-launch-menu-configure {
+  color: var(--fg-3);
+}
+
+.tcld-launch-menu-configure:hover {
+  color: var(--accent);
+}
+
+.tcld-control-button,
+.tcld-control-field {
+  border-radius: 7px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.tcld-control-button {
+  color: var(--color-tcld-fg-muted);
+  padding: 4px 9px;
+  white-space: nowrap;
+}
+
+.tcld-hook-status {
+  display: block;
+  justify-content: initial;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 210px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+@media (max-width: 760px) {
+  .tcld-hook-status {
+    display: none;
+  }
+}
+
+.tcld-welcome {
+  display: grid;
+  grid-template-columns: minmax(420px, 1fr) 380px;
+  min-height: 0;
+  background:
+    radial-gradient(1200px 600px at 30% 0%, color-mix(in srgb, var(--accent-bg) 45%, transparent) 0%, transparent 60%),
+    var(--bg-window);
+}
+
+.tcld-welcome-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: 0;
+  padding: 0 60px 40px 80px;
+  border-right: 1px solid var(--line-2);
+  transition: background 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease;
+}
+
+.tcld-welcome-kicker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 28px;
+  color: var(--fg-3);
+  font: 600 11px var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.tcld-welcome-title {
+  margin: 0;
+  color: var(--fg);
+  /* Pinned to --text-welcome (40px) — the canonical hero size from the
+     tcld-design-system. The previous hardcoded 40px duplicated that. */
+  font-family: var(--mono);
+  font-size: var(--text-welcome);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.tcld-welcome-copy {
+  margin: 16px 0 32px;
+  max-width: 460px;
+  color: var(--fg-2);
+  font: 14px/1.55 var(--font-ui);
+}
+
+.tcld-welcome-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tcld-hero-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 16px;
+  font: 600 13px var(--font-ui);
+  cursor: pointer;
+  transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+
+.tcld-hero-action-primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-fg-on);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.15) inset, 0 6px 16px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.tcld-hero-action-secondary {
+  background: transparent;
+  color: var(--fg-2);
+}
+
+.tcld-hero-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.tcld-hero-action:not(:disabled):hover {
+  transform: translateY(-1px);
+  border-color: var(--border-focus);
+}
+
+.tcld-welcome .tcld-drop-affordance,
+.tcld-drop-affordance[data-drop-affordance="welcome"] {
+  margin: 32px 0 0;
+  padding: 0;
+  max-width: none;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--fg-4);
+  font: 11px var(--mono);
+  letter-spacing: 0.01em;
+  transition: color 0.14s ease;
+}
+
+.tcld-welcome .tcld-drop-affordance strong,
+.tcld-drop-affordance[data-drop-affordance="welcome"] strong {
+  color: var(--fg-3);
+  font-weight: 500;
+}
+
+.tcld-welcome-drop-active .tcld-welcome-hero {
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 9%, transparent), transparent 78%),
+    color-mix(in srgb, var(--bg-highlight) 48%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border-focus) 78%, transparent);
+}
+
+.tcld-welcome-drop-active .tcld-drop-affordance {
+  color: var(--accent);
+}
+
+.tcld-recent-column {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.tcld-recent-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 48px;
+  border-bottom: 1px solid var(--line-2);
+  padding: 0 24px;
+  color: var(--fg-3);
+  font: 700 11px var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.tcld-recent-clear {
+  border: 0;
+  background: none;
+  color: var(--fg-3);
+  font: 11px var(--mono);
+  cursor: pointer;
+}
+
+.tcld-recent-list {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 6px 12px;
+}
+
+.tcld-recent-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-bottom: 2px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  padding: 8px 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.tcld-recent-row:hover,
+.tcld-recent-row-active {
+  border-color: var(--line-2);
+  background: color-mix(in srgb, var(--bg-panel) 55%, transparent);
+}
+
+.tcld-recent-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--fg-4);
+}
+
+.tcld-recent-dot[data-mode="debug"] {
+  background: var(--success);
+}
+
+.tcld-recent-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.tcld-recent-name {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--fg);
+  font: 600 12.5px var(--mono);
+}
+
+.tcld-recent-name span {
+  color: var(--fg-4);
+  font: 400 10px var(--mono);
+}
+
+.tcld-recent-path {
+  display: block;
+  overflow: hidden;
+  margin-top: 2px;
+  color: var(--fg-3);
+  font: 11px var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tcld-recent-meta {
+  flex-shrink: 0;
+  color: var(--fg-4);
+  font: 10.5px var(--mono);
+  text-align: right;
+}
+
+.tcld-recent-meta span {
+  display: block;
+  margin-top: 2px;
+}
+
+.tcld-recent-empty {
+  padding: 24px 12px;
+  color: var(--fg-4);
+  font: 12px var(--mono);
+}
+
+.tcld-welcome-tips {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--line-2);
+  background: color-mix(in srgb, var(--bg-input) 40%, transparent);
+  padding: 14px 18px;
+}
+
+.tcld-welcome-tip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--fg-3);
+  font: 11px var(--mono);
+}
+
+.tcld-welcome-tip span {
+  min-width: 28px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--bg-input);
+  color: var(--fg-2);
+  padding: 2px 6px;
+  font: 10.5px var(--mono);
+  text-align: center;
+}
+
+@media (max-width: 820px) {
+  .tcld-welcome {
+    grid-template-columns: 1fr;
+  }
+
+  .tcld-welcome-hero {
+    padding: 48px 28px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line-2);
+  }
+
+  .tcld-recent-column {
+    min-height: 260px;
+  }
+}
+
+.panel-root {
+  container-type: inline-size;
+}
+
+/*
+ * Focused-panel indicator: three reinforcing cues so the active panel is
+ * unmistakable in a 4-panel workspace where a single hairline border swap
+ * Focus uses a left rail, header tint, title color, and the border applied in
+ * Panel.tsx. The pseudo-element does not affect layout or hit-testing.
+ */
+.panel-root.is-focused::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.panel-root.is-focused .panel-header {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-window));
+}
+
+/*
+ * Title accents toward the accent color while the icon stays at full
+ * foreground. This keeps the icon legible (some icons have low chroma and
+ * lose contrast against an accent tint) while the title — which is the
+ * primary identity of the panel — picks up the focus signal.
+ */
+.panel-root.is-focused .panel-title {
+  color: color-mix(in srgb, var(--accent) 70%, var(--fg));
+}
+
+.panel-root.is-focused .panel-icon {
+  color: var(--fg);
+}
+
+/*
+ * ─── Overlay surfaces ─────────────────────────────────────────
+ * Single class for every modal/popover scrim so that CommandPalette,
+ * HelpOverlay, WelcomeScreen modal, ContextMenu, and the preferences
+ * dialogs share one elevation contract. Consumers add layout-only
+ * classes (positioning, padding) and let the token govern colour.
+ */
+.tcld-overlay-scrim {
+  background: var(--overlay-scrim);
+  backdrop-filter: blur(var(--overlay-blur));
+  -webkit-backdrop-filter: blur(var(--overlay-blur));
+}
+
+.tcld-overlay-surface {
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-overlay);
+}
+
+.tcld-popover-surface {
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-popover);
+}
+
+.panel-header-actions,
+.tcld-panel-header-actions-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tcld-panel-header-action {
+  display: inline-flex;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--bg-input) 58%, transparent);
+  color: var(--fg-3);
+  padding: 0 7px;
+  font: 10.5px var(--mono);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.tcld-panel-header-action[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.tcld-panel-header-action:not(:disabled):hover {
+  border-color: var(--border-focus);
+  background: var(--bg-highlight);
+  color: var(--fg);
+}
+
+.tcld-panel-header-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+@container (max-width: 280px) {
+  .panel-header {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+
+  .panel-header-actions,
+  .tcld-panel-header-actions-inner,
+  .panel-header > [data-design-surface="panel-header-actions"] {
+    gap: 2px;
+  }
+
+  .tcld-panel-header-action {
+    width: 18px;
+    min-width: 18px;
+    height: 20px;
+    padding: 0;
+    gap: 0;
+  }
+
+  .tcld-panel-header-action svg {
+    width: 11px;
+    height: 11px;
+  }
+
+  .tcld-panel-header-action span,
+  .tcld-panel-view-menu-wrap .tcld-panel-header-action svg + svg {
+    display: none;
+  }
+
+  .panel-chrome-action {
+    width: 18px;
+    height: 18px;
+    padding: 2px;
+  }
+
+  .panel-subtitle {
+    display: none;
+  }
+
+  .panel-chrome-action svg {
+    width: 11px;
+    height: 11px;
+  }
+}
+
+@container (max-width: 230px) {
+  .panel-chrome-action[aria-label="Maximize panel"],
+  .panel-chrome-action[aria-label="Restore panel"] {
+    display: none;
+  }
+}
+
+.tcld-panel-view-menu-wrap {
+  position: relative;
+}
+
+.tcld-panel-view-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+}
+
+.tcld-panel-view-menu {
+  position: fixed;
+  z-index: 9999;
+  width: 214px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--bg-elev);
+  /* Single source of truth for popover elevation. See --shadow-popover. */
+  box-shadow: var(--shadow-popover);
+  padding: 4px;
+  overflow-y: auto;
+}
+
+.tcld-panel-view-menu-label {
+  padding: 6px 7px 4px;
+  color: var(--fg-4);
+  font: 700 9.5px var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.tcld-panel-view-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-2);
+  padding: 6px 7px;
+  font: 11px var(--mono);
+  text-align: left;
+  cursor: pointer;
+}
+
+.tcld-panel-view-menu-item:hover {
+  background: var(--bg-highlight);
+  color: var(--fg);
+}
+
+.tcld-panel-view-menu-empty {
+  padding: 12px 7px 14px;
+  color: var(--fg-4);
+  font: 11px var(--mono);
+  text-align: center;
+}
+
+.tcld-panel-view-menu-icon {
+  width: 14px;
+  color: var(--fg-4);
+  text-align: center;
+}
+
+.tcld-panel-view-menu-state {
+  margin-left: auto;
+  color: var(--fg-4);
+  font-size: 9.5px;
+}
+
+@media (max-width: 1500px) {
+  .tcld-panel-header-action span {
+    display: none;
+  }
+}
+
+/* ─── Design-Parity View Bodies ───────────────────────────────── */
+.tcld-source-editor,
+.tcld-console-view,
+.tcld-variables-view,
+.tcld-breakpoints-view {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+  background: var(--bg-window);
+  color: var(--fg);
+  font-family: var(--mono);
+}
+
+.tcld-source-tabs {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--line-2);
+  background: var(--bg-panel);
+  padding: 0 10px;
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+.tcld-source-file {
+  max-width: 14rem;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: var(--fg);
+  padding: 5px 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tcld-source-crumb::before {
+  content: "›";
+  color: var(--fg-4);
+  margin-right: 8px;
+}
+
+.tcld-source-engine {
+  margin-left: auto;
+  color: var(--fg-4);
+}
+
+.tcld-source-toolbar,
+.tcld-console-toolbar,
+.tcld-variables-toolbar,
+.tcld-breakpoints-toolbar,
+.tcld-flow-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  min-height: 26px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line-2) 70%, transparent);
+  background: color-mix(in srgb, var(--bg-window) 60%, transparent);
+  padding: 4px 8px;
+}
+
+.tcld-source-toolbar button,
+.tcld-console-action,
+.tcld-breakpoint-add,
+.tcld-breakpoint-clear,
+.tcld-flow-icon-button,
+.tcld-flow-segment {
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-3);
+  font: 10.5px var(--mono);
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.tcld-source-toolbar button:hover,
+.tcld-console-action:hover,
+.tcld-breakpoint-add:hover,
+.tcld-breakpoint-clear:hover,
+.tcld-flow-icon-button:hover,
+.tcld-flow-segment:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--fg);
+}
+
+.tcld-source-toolbar button,
+.tcld-console-action,
+.tcld-breakpoint-add,
+.tcld-breakpoint-clear {
+  height: 20px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tcld-source-toolbar span,
+.tcld-flow-toolbar-label {
+  color: var(--fg-4);
+  font: 10px var(--mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.tcld-source-toolbar-spacer,
+.tcld-source-status-spacer,
+.tcld-console-toolbar-spacer {
+  flex: 1;
+}
+
+.tcld-source-body {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  overflow: auto;
+  padding: 8px 0 12px;
+}
+
+.tcld-source-line,
+.tcld-source-fold-row {
+  display: grid;
+  grid-template-columns: 4px 20px 42px minmax(0, 1fr);
+  column-gap: 8px;
+  min-height: var(--row-h);
+  align-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--fg-2);
+  font: 12px var(--mono);
+  text-align: left;
+  /* Lock the row to the full body width so the selection highlight spans
+     the entire line — not just the text — and so a click anywhere on the
+     row reaches the row's onClick handler instead of falling through the
+     trailing empty space. */
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.tcld-source-line {
+  padding: 0 10px;
+}
+
+.tcld-source-line:hover {
+  background: color-mix(in srgb, var(--accent-bg) 55%, transparent);
+}
+
+.tcld-source-line-selected {
+  background: var(--accent-bg-strong);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/*
+ * Focused + selected: when the panel that owns this row also has keyboard
+ * focus, strengthen the selection treatment so debug stepping is unambiguous.
+ * This is the "you're stopped here AND you're holding focus here" state.
+ */
+.panel-root:focus-within .tcld-source-line-selected,
+[data-panel-id]:focus-within .tcld-source-line-selected {
+  background: var(--accent-bg-strong);
+  box-shadow: inset 3px 0 0 var(--accent), 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent) inset;
+}
+
+.tcld-source-fold-row {
+  width: 100%;
+  grid-template-columns: 4px 20px auto auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 3px 10px;
+  color: var(--fg-3);
+  cursor: pointer;
+}
+
+.tcld-source-line::before,
+.tcld-source-fold-row::before {
+  content: "";
+  display: block;
+  width: 3px;
+  align-self: stretch;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 34%, transparent);
+  opacity: 0.18;
+}
+
+.tcld-source-line[data-foldable="true"]::before,
+.tcld-source-fold-row::before {
+  opacity: 0.85;
+}
+
+.tcld-source-fold-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fg-4);
+  line-height: 16px;
+}
+
+.tcld-source-fold-button:hover {
+  background: var(--bg-highlight);
+  color: var(--accent);
+}
+
+.tcld-source-line-number {
+  color: var(--fg-4);
+  text-align: right;
+}
+
+.tcld-source-code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tcld-source-status {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  background: var(--accent);
+  color: var(--accent-fg-on);
+  padding: 0 10px;
+  font: 11px var(--mono);
+}
+
+.tcld-source-map-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent-fg-on) 12%, transparent);
+  color: var(--accent-fg-on);
+  font: 10.5px var(--mono);
+}
+
+.tcld-source-empty,
+.tcld-console-empty {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-4);
+  font: 12px var(--mono);
+}
+
+.tcld-console-chip {
+  display: inline-flex;
+  height: 20px;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-4);
+  padding: 0 6px;
+  font: 10.5px var(--mono);
+  cursor: pointer;
+  opacity: 0.6;
+  transition: background 0.1s ease, color 0.1s ease, opacity 0.1s ease;
+}
+
+.tcld-console-chip:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--fg);
+  opacity: 0.85;
+}
+
+.tcld-console-chip span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.tcld-console-chip-active {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  background: var(--accent-bg);
+  color: var(--accent);
+  opacity: 1;
+}
+
+.tcld-console-chip[data-stream="stderr"].tcld-console-chip-active,
+.tcld-console-chip[data-stream="error"].tcld-console-chip-active {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 35%, var(--line));
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+}
+
+.tcld-console-chip[data-stream="system"].tcld-console-chip-active {
+  color: var(--info);
+  border-color: color-mix(in srgb, var(--info) 35%, var(--line));
+  background: color-mix(in srgb, var(--info) 12%, transparent);
+}
+
+.tcld-console-chip[data-stream="diag"].tcld-console-chip-active {
+  color: var(--color-tcld-keyword);
+  border-color: color-mix(in srgb, var(--color-tcld-keyword) 38%, var(--line));
+  background: color-mix(in srgb, var(--color-tcld-keyword) 12%, transparent);
+}
+
+.tcld-console-filter {
+  display: flex;
+  min-width: 170px;
+  height: 22px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-input);
+  padding: 0 6px;
+  color: var(--fg-4);
+}
+
+.tcld-console-filter input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--fg);
+  font: 11px var(--mono);
+}
+
+.tcld-console-filter span,
+.tcld-console-footer {
+  color: var(--fg-4);
+  font: 10.5px var(--mono);
+}
+
+.tcld-console-action-active {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.tcld-console-output {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  background: var(--bg-window);
+}
+
+.tcld-console-row {
+  display: grid;
+  grid-template-columns: 90px 50px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  border-left: 2px solid transparent;
+  padding: 2px 12px;
+  font: 11.5px/1.55 var(--mono);
+}
+
+.tcld-console-row-error {
+  border-left-color: var(--err);
+  background: rgba(244, 113, 116, 0.04);
+}
+
+.tcld-console-time {
+  color: var(--fg-4);
+  font-size: 10.5px;
+}
+
+.tcld-console-channel {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.tcld-console-message {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tcld-console-latest {
+  position: absolute;
+  right: 12px;
+  bottom: 72px;
+  z-index: 10;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  color: var(--fg-3);
+  padding: 2px 8px;
+  font: 10px var(--mono);
+}
+
+.tcld-console-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  border-top: 1px solid var(--line-2);
+  background: var(--bg-panel);
+  padding: 8px 12px;
+}
+
+.tcld-console-input-paused {
+  background: var(--accent-bg);
+}
+
+.tcld-console-input > span:first-child {
+  font: 700 12px var(--mono);
+}
+
+.tcld-console-input input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--fg);
+  font: 12px var(--mono);
+}
+
+.tcld-console-enter {
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  background: var(--bg-input);
+  color: var(--fg-4);
+  padding: 1px 5px;
+  font: 10px var(--mono);
+}
+
+.tcld-console-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  border-top: 1px solid var(--line-2);
+  background: var(--bg-panel);
+  padding: 4px 12px;
+}
+
+.tcld-stack-list {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 6px;
+}
+
+.tcld-stack-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 5px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: transparent;
+  padding: 9px 10px 9px 26px;
+  cursor: pointer;
+}
+
+.tcld-stack-card-active {
+  border-color: var(--accent-bg-strong);
+  background: var(--accent-bg);
+}
+
+/* Focused + selected stack frame — strengthens the cue when the call-stack
+ * panel itself has keyboard focus (the user is actively stepping). */
+.panel-root:focus-within .tcld-stack-card-active,
+[data-panel-id]:focus-within .tcld-stack-card-active {
+  border-color: var(--accent);
+  background: var(--accent-bg-strong);
+}
+
+.tcld-stack-depth-line {
+  position: absolute;
+  left: 9px;
+  top: 10px;
+  bottom: 10px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--line);
+}
+
+.tcld-stack-card-active .tcld-stack-depth-line,
+.tcld-stack-card-active .tcld-stack-depth-dot {
+  background: var(--accent);
+}
+
+.tcld-stack-depth-dot {
+  position: absolute;
+  left: 5px;
+  top: 10px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--bg-panel);
+  border-radius: 50%;
+  background: var(--line);
+}
+
+.tcld-stack-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-family: var(--mono);
+}
+
+.tcld-stack-index {
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  background: var(--bg-input);
+  color: var(--fg-4);
+  padding: 1px 5px;
+  font-size: 9.5px;
+}
+
+.tcld-stack-name {
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tcld-stack-card-active .tcld-stack-name {
+  color: var(--accent);
+}
+
+.tcld-stack-args,
+.tcld-stack-location {
+  color: var(--fg-3);
+  font-size: 10.5px;
+}
+
+.tcld-stack-location {
+  margin-left: auto;
+}
+
+.tcld-stack-preview {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  gap: 8px;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: var(--fg-3);
+  padding: 4px 8px;
+  font: 10.5px var(--mono);
+}
+
+.tcld-stack-preview span:nth-child(2) {
+  overflow: hidden;
+  color: var(--fg-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tcld-breakpoints-toolbar {
+  color: var(--fg-3);
+  font: 11px var(--mono);
+}
+
+.tcld-breakpoint-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.tcld-breakpoint-clear {
+  color: var(--fg-4);
+}
+
+.tcld-breakpoint-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--bg-input);
+  padding: 8px 10px;
+  font-family: var(--mono);
+}
+
+.tcld-breakpoint-card-disabled {
+  opacity: 0.55;
+}
+
+.tcld-breakpoint-toggle {
+  display: flex;
+  width: 32px;
+  height: 18px;
+  align-items: center;
+  justify-content: flex-start;
+  border: 0;
+  border-radius: 999px;
+  background: var(--line);
+  padding: 2px;
+  cursor: pointer;
+}
+
+.tcld-breakpoint-toggle-on {
+  justify-content: flex-end;
+  background: var(--err);
+}
+
+.tcld-breakpoint-toggle span {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+}
+
+.tcld-breakpoint-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.tcld-breakpoint-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg);
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.tcld-breakpoint-title span:nth-child(3) {
+  color: var(--fg-3);
+  font-weight: 400;
+}
+
+.tcld-breakpoint-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--err);
+}
+
+.tcld-breakpoint-cond-pill {
+  border: 1px solid rgba(243, 196, 105, 0.22);
+  border-radius: 3px;
+  background: rgba(243, 196, 105, 0.1);
+  color: var(--warn);
+  padding: 1px 5px;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.tcld-breakpoint-condition,
+.tcld-breakpoint-add-condition,
+.tcld-breakpoint-condition-input {
+  margin-top: 4px;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  background: var(--bg-window);
+  color: var(--str);
+  padding: 2px 6px;
+  font: 10.5px var(--mono);
+}
+
+.tcld-breakpoint-add-condition {
+  color: var(--fg-4);
+}
+
+.tcld-breakpoint-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-4);
+}
+
+.tcld-breakpoint-meta strong {
+  display: block;
+  color: var(--fg);
+  font-size: 13px;
+}
+
+.tcld-breakpoint-meta span {
+  font-size: 10px;
+}
+
+.tcld-breakpoint-meta button {
+  border: 0;
+  background: transparent;
+  color: var(--fg-4);
+  cursor: pointer;
+}
+
+.tcld-variables-toolbar {
+  height: 30px;
+  color: var(--fg-4);
+}
+
+.tcld-variables-toolbar input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--fg);
+  font: 11px var(--mono);
+}
+
+.tcld-variables-toolbar button,
+.tcld-variable-scope-badge {
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  padding: 1px 6px;
+  font: 9.5px var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.tcld-variables-toolbar button {
+  cursor: pointer;
+}
+
+.tcld-variables-toolbar button[data-scope-active="false"] {
+  background: transparent;
+  color: var(--fg-4);
+}
+
+.tcld-variables-list {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+
+.tcld-variable-scope {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-block: 1px solid var(--line-2);
+  background: var(--bg-panel-2);
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.tcld-variable-scope-count {
+  color: var(--fg-4);
+  font: 10.5px var(--mono);
+}
+
+.tcld-variable-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--line-2);
+  padding-block: var(--row-py);
+  padding-right: var(--row-px);
+  color: var(--fg-2);
+  font: 11.5px var(--mono);
+}
+
+.tcld-variable-row:hover {
+  background: var(--accent-bg);
+}
+
+.tcld-variable-row-changed {
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 16%, transparent), transparent 36%),
+    var(--bg-panel);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.tcld-variable-name {
+  min-width: 72px;
+  overflow: hidden;
+  color: var(--fg);
+  font-weight: 600;
+  text-overflow: ellipsis;
+}
+
+.tcld-variable-value {
+  max-width: 55%;
+  overflow: hidden;
+  color: var(--fg-3);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tcld-variable-sparkline {
+  width: 26px;
+  height: 8px;
+  border-bottom: 1px solid var(--accent);
+  border-radius: 999px;
+  opacity: 0.45;
+}
+
+.tcld-variable-type {
+  margin-left: 4px;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 10px;
+}
+
+.tcld-flow-toolbar {
+  flex-wrap: wrap;
+}
+
+.tcld-flow-segment {
+  height: 22px;
+  padding: 0 8px;
+}
+
+.tcld-flow-segment-active,
+.tcld-flow-chip-accent {
+  border-color: var(--accent-bg-strong);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.tcld-flow-chip-warn {
+  border-color: color-mix(in srgb, var(--warn) 42%, var(--line));
+  background: color-mix(in srgb, var(--warn) 12%, var(--bg-input));
+  color: var(--warn);
+}
+
+.tcld-flow-divider {
+  width: 1px;
+  height: 14px;
+  background: var(--line-2);
+  margin: 0 4px;
+}
+
+.tcld-flow-chip {
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--bg-input);
+  color: var(--fg-3);
+  padding: 2px 7px;
+  font: 10.5px var(--mono);
+}
+
+.tcld-flow-icon-button {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.tcld-flow-icon-button-disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.tcld-flow-zoom {
+  min-width: 34px;
+  color: var(--fg-3);
+  font: 10.5px var(--mono);
+  text-align: center;
+}
+
+.tcld-flow-inline-legend,
+.tcld-flow-legend-item,
+.tcld-flow-status {
+  display: inline-flex;
+  align-items: center;
+}
+
+.tcld-flow-inline-legend {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tcld-flow-legend-item {
+  gap: 4px;
+  font: 9px var(--mono);
+}
+
+.tcld-flow-status {
+  min-height: 26px;
+  flex-wrap: wrap;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-panel);
+  color: var(--fg-3);
+  padding: 5px 10px;
+  font: 10.5px var(--mono);
+}
+
+.tcld-flow-status span:first-child {
+  color: var(--fg);
+  font-weight: 650;
+}
+
+/* Trace view */
+
+.tcld-trace-shell {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  grid-template-rows: 100%;
+  gap: 0;
+  height: 100%;
+  min-height: 0;
+  font: 11px var(--mono);
+  color: var(--fg);
+}
+
+@media (max-width: 720px) {
+  .tcld-trace-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+}
+
+.tcld-trace-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-panel);
+}
+
+.tcld-trace-pane-left {
+  border-right: 1px solid var(--line);
+}
+
+.tcld-trace-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-3);
+  font-size: 10px;
+}
+
+.tcld-trace-meta {
+  color: var(--fg-3);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.tcld-trace-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-input);
+  color: var(--fg-3);
+}
+
+.tcld-trace-filter input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  font: 11px var(--mono);
+  color: var(--fg);
+}
+
+.tcld-trace-command-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.tcld-trace-empty {
+  padding: 12px;
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+.tcld-trace-command-row {
+  display: grid;
+  grid-template-columns: 52px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line-2);
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}
+
+.tcld-trace-command-row:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.tcld-trace-command-row.is-active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-left-color: var(--accent);
+}
+
+.tcld-trace-command-id {
+  color: var(--accent);
+  font-weight: 650;
+}
+
+.tcld-trace-command-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tcld-trace-command-label {
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tcld-trace-command-meta {
+  color: var(--fg-3);
+  font-size: 10px;
+}
+
+.tcld-trace-command-trail {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tcld-trace-hot-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  display: inline-block;
+}
+
+.tcld-trace-pass-pill {
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  font-size: 10px;
+  color: var(--fg-3);
+  background: var(--bg-input);
+}
+
+.tcld-trace-pass-pill[data-trace-pass-pill="changed"] {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 50%, var(--line));
+  background: color-mix(in srgb, var(--success) 10%, var(--bg-input));
+}
+
+.tcld-trace-pane-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-panel);
+  color: var(--fg-3);
+  font-size: 10px;
+}
+
+.tcld-trace-pane-footer [data-trace-footer-changed="true"] {
+  color: var(--success);
+}
+
+.tcld-trace-pane-footer [data-trace-footer-hot="true"] {
+  color: var(--accent);
+}
+
+.tcld-trace-pane-right {
+  overflow-y: auto;
+  padding: 10px 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tcld-trace-detail-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tcld-trace-detail-id {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.tcld-trace-detail-label {
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tcld-trace-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.tcld-trace-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-input);
+}
+
+.tcld-trace-stat dt {
+  color: var(--fg-3);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.tcld-trace-stat dd {
+  margin: 0;
+  font-size: 11px;
+  color: var(--fg);
+}
+
+.tcld-trace-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tcld-trace-detail-section-title {
+  margin: 0;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-3);
+}
+
+.tcld-trace-source-pre {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-input);
+  white-space: pre-wrap;
+  font: 11px/1.4 var(--mono);
+  color: var(--fg);
+}
+
+.tcld-trace-chain {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.tcld-trace-chain-row {
+  display: grid;
+  grid-template-columns: 22px 140px 70px 70px 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line-2);
+  background: transparent;
+  font-size: 10.5px;
+  color: var(--fg);
+}
+
+.tcld-trace-chain-row:last-child {
+  border-bottom: none;
+}
+
+.tcld-trace-chain-row[data-trace-pass-changed="true"] {
+  background: color-mix(in srgb, var(--success) 9%, transparent);
+}
+
+.tcld-trace-chain-status {
+  text-transform: uppercase;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+}
+
+.tcld-trace-chain-matched .tcld-trace-chain-status {
+  color: var(--success);
+}
+
+.tcld-trace-chain-fixed .tcld-trace-chain-status {
+  color: var(--accent);
+}
+
+.tcld-trace-chain-unmapped .tcld-trace-chain-status {
+  color: var(--info);
+}
+
+.tcld-trace-chain-skipped .tcld-trace-chain-status {
+  color: var(--fg-3);
+  font-style: italic;
+}
+
+.tcld-trace-chain-index {
+  color: var(--fg-3);
+  text-align: right;
+}
+
+.tcld-trace-chain-pass {
+  color: var(--fg);
+}
+
+.tcld-trace-chain-iter {
+  color: var(--fg-3);
+  font-size: 10px;
+}
+
+.tcld-trace-chain-note {
+  color: var(--fg-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tcld-trace-evidence {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tcld-trace-evidence-row {
+  display: grid;
+  grid-template-columns: 36px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  font: 10.5px var(--mono);
+}
+
+.tcld-trace-evidence-row[disabled] {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.tcld-trace-evidence-row:hover:not([disabled]) {
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-input));
+}
+
+.tcld-trace-evidence-badge {
+  text-align: center;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 2px 0;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+}
+
+.tcld-trace-evidence-badge-opcode {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-input));
+}
+
+.tcld-trace-evidence-badge-literal {
+  color: var(--info);
+  border-color: color-mix(in srgb, var(--info) 40%, var(--line));
+  background: color-mix(in srgb, var(--info) 12%, var(--bg-input));
+}
+
+.tcld-trace-evidence-badge-source {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 40%, var(--line));
+  background: color-mix(in srgb, var(--success) 12%, var(--bg-input));
+}
+
+.tcld-trace-evidence-detail {
+  color: var(--fg-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+.tcld-trace-decisions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tcld-trace-decision {
+  display: grid;
+  grid-template-columns: 14px 1fr;
+  gap: 6px;
+  padding: 2px 4px;
+  font-size: 10.5px;
+}
+
+.tcld-trace-decision-yes {
+  color: var(--success);
+}
+
+.tcld-trace-decision-no {
+  color: var(--fg-3);
+}
+
+/* Symbols view */
+
+.tcld-symbols-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-input);
+  font: 11px var(--mono);
+  color: var(--fg-3);
+}
+
+.tcld-symbols-toolbar input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  font: inherit;
+  color: var(--fg);
+}
+
+.tcld-symbols-toolbar input::placeholder {
+  color: var(--fg-4);
+}
+
+.tcld-symbols-toolbar [data-symbol-count="true"] {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-3);
+}
+
+.tcld-symbols-header {
+  display: grid;
+  grid-template-columns: 44px minmax(120px, 1fr) 56px 50px 44px;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--line-2);
+  font: 9.5px var(--mono);
+  letter-spacing: 0.06em;
+  color: var(--fg-3);
+}
+
+.tcld-symbols-header [data-symbol-column="size"],
+.tcld-symbols-header [data-symbol-column="refs"] {
+  text-align: right;
+}
+
+.tcld-symbols-table {
+  overflow-y: auto;
+  padding: 2px 0 6px;
+}
+
+.tcld-symbols-row {
+  display: grid;
+  grid-template-columns: 44px minmax(120px, 1fr) 56px 50px 44px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 10px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  font: 11px var(--mono);
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 0.08s ease;
+}
+
+.tcld-symbols-row:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.tcld-symbols-row.is-selected {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.tcld-symbols-row.is-disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.tcld-symbols-pill {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 16px;
+  min-width: 36px;
+  padding: 0 6px;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+  background: var(--bg-input);
+}
+
+.tcld-symbols-pill-ns {
+  color: var(--color-tcld-keyword);
+  border-color: color-mix(in srgb, var(--color-tcld-keyword) 40%, var(--line));
+  background: color-mix(in srgb, var(--color-tcld-keyword) 12%, var(--bg-input));
+}
+
+.tcld-symbols-pill-proc {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-input));
+}
+
+.tcld-symbols-pill-var {
+  color: var(--color-tcld-warning);
+  border-color: color-mix(in srgb, var(--color-tcld-warning) 40%, var(--line));
+  background: color-mix(in srgb, var(--color-tcld-warning) 12%, var(--bg-input));
+}
+
+.tcld-symbols-name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg);
+}
+
+.tcld-symbols-row[data-symbol-kind="proc"] .tcld-symbols-name {
+  font-weight: 600;
+}
+
+.tcld-symbols-row[data-symbol-kind="ns"] .tcld-symbols-name,
+.tcld-symbols-row[data-symbol-kind="var"] .tcld-symbols-name {
+  color: var(--fg-2);
+}
+
+.tcld-symbols-addr {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tcld-symbols-size,
+.tcld-symbols-refs {
+  text-align: right;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.tcld-symbols-empty {
+  padding: 24px;
+  text-align: center;
+  font: 11px var(--mono);
+  color: var(--fg-3);
+}
+
+.tcld-symbols-substitute {
+  border-top: 1px solid var(--line-2);
+  padding: 6px 10px;
+  font: 10px var(--mono);
+  color: var(--fg-4);
+}
+
+/* Polish: consistent disassembly toolbar */
+
+.tcld-disasm-toolbar {
+  scrollbar-width: none;
+  min-height: 26px;
+  background: color-mix(in srgb, var(--bg-window) 60%, transparent) !important;
+  border-bottom: 1px solid color-mix(in srgb, var(--line-2) 70%, transparent) !important;
+}
+
+.tcld-disasm-toolbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Polish: align decompile editor toolbar with rest */
+.decompile-editor-toolbar {
+  min-height: 26px;
+  background: color-mix(in srgb, var(--color-tcld-bg-1) 55%, transparent) !important;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-tcld-border-dim) 50%, transparent) !important;
+}
+
+/* Reusable sub-toolbar primitives (groups, icons, dividers, pills, meta) */
+
+.tcld-toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.tcld-toolbar-divider {
+  display: inline-block;
+  width: 1px;
+  height: 14px;
+  margin: 0 2px;
+  background: color-mix(in srgb, var(--line) 60%, transparent);
+  flex-shrink: 0;
+}
+
+.tcld-toolbar-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-3);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.tcld-toolbar-icon:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--fg);
+}
+
+.tcld-toolbar-icon.is-active {
+  color: var(--accent);
+}
+
+.tcld-toolbar-icon.is-active:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.tcld-toolbar-icon-badge {
+  font: 9px var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: inherit;
+  padding-right: 2px;
+}
+
+.tcld-toolbar-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-3);
+  font: 10px var(--mono);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.1s ease, border-color 0.1s ease, color 0.1s ease;
+}
+
+.tcld-toolbar-pill:hover:not(.is-disabled) {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+}
+
+.tcld-toolbar-pill.is-active {
+  background: var(--accent-bg);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+}
+
+.tcld-toolbar-pill.is-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.tcld-toolbar-meta {
+  flex-shrink: 0;
+  font: 10px var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-4);
+  padding: 0 2px;
+}
+
+/* Polish: refine panel dividers and inspector spacing */
+
+[data-design-surface^="view-"] [data-inspector-section]:not(:last-child) {
+  border-bottom-color: var(--line-2);
+}
+
+/*
+ * Focus rings are owned exclusively by the global :focus-visible rule near
+ * the top of this file. Keep :focus-within only for composite controls
+ * where the outer container needs to track an inner input's focus.
+ */
+.tcld-launch-profile-token:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Polish: gentle hover hint on row-style controls */
+
+.tcld-trace-command-row,
+.tcld-symbols-row,
+.tcld-trace-evidence-row {
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+/* Polish: action bar visual tightening */
+
+.tcld-main-toolbar {
+  gap: 10px;
+}
+
+.tcld-main-toolbar .tcld-actionbar-left {
+  gap: 8px;
+}
+
+.tcld-launch-controls {
+  gap: 10px;
+}
+
+/* Polish: status pill harmonization */
+
+.tcld-flow-chip,
+.tcld-flow-chip-accent,
+.tcld-flow-chip-warn,
+.tcld-trace-pass-pill,
+.tcld-symbols-pill {
+  font-feature-settings: "tnum" 1;
+}
+
+@container (max-width: 280px) {
+  .tcld-symbols-header,
+  .tcld-symbols-row {
+    grid-template-columns: 44px minmax(100px, 1fr) 56px;
+  }
+  .tcld-symbols-header [data-symbol-column="size"],
+  .tcld-symbols-header [data-symbol-column="refs"],
+  .tcld-symbols-size,
+  .tcld-symbols-refs {
+    display: none;
+  }
+}
+
+.tcld-flow-canvas {
+  position: relative;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+  background-color: var(--bg-window);
+  background-image: radial-gradient(circle, var(--line-2) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.tcld-flow-source-board {
+  height: 100%;
+  overflow: auto;
+  padding: 18px 24px 32px;
+}
+
+.tcld-flow-source-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 260px));
+  align-content: start;
+  gap: 18px 34px;
+  min-width: min-content;
+}
+
+.tcld-flow-source-node {
+  position: relative;
+  display: grid;
+  grid-template-columns: 4px minmax(0, 1fr);
+  grid-template-rows: auto auto auto;
+  column-gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
+  color: var(--fg);
+  padding: 9px 10px 8px;
+  text-align: left;
+  cursor: pointer;
+  /* Pinned to --shadow-panel — the canonical "floating panel" elevation
+     token so flow source nodes sit on the same elevation plane as every
+     other panel. */
+  box-shadow: var(--shadow-panel);
+  transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+}
+
+.tcld-flow-source-node::after {
+  content: "";
+  position: absolute;
+  top: calc(50% - 1px);
+  right: -35px;
+  width: 34px;
+  height: 1px;
+  background: linear-gradient(90deg, var(--line), transparent);
+  opacity: 0.5;
+}
+
+.tcld-flow-source-node:nth-child(3n)::after,
+.tcld-flow-source-node:last-child::after {
+  display: none;
+}
+
+.tcld-flow-source-node:hover,
+.tcld-flow-source-node:focus-visible {
+  transform: translateY(-1px);
+  border-color: var(--border-focus);
+  background: var(--bg-highlight);
+  outline: none;
+}
+
+.tcld-flow-source-node-rail {
+  grid-row: 1 / span 3;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.tcld-flow-source-node-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--fg);
+  font: 700 11px var(--mono);
+}
+
+.tcld-flow-source-node-header span:first-child,
+.tcld-flow-source-node-snippet {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tcld-flow-source-node-header span:last-child,
+.tcld-flow-source-node-detail {
+  flex-shrink: 0;
+  color: var(--fg-4);
+  font-weight: 400;
+}
+
+.tcld-flow-source-node-snippet {
+  color: var(--fg-2);
+  margin-top: 5px;
+  font: 12px var(--mono);
+}
+
+.tcld-flow-source-node-detail {
+  margin-top: 7px;
+  font: 10px var(--mono);
+}
+
+@media (max-width: 760px) {
+  .tcld-file-header,
+  .tcld-main-toolbar {
+    padding-inline: 12px;
+    overflow-x: auto;
+  }
+
+  .tcld-file-context {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .tcld-file-metrics,
+  .tcld-parser-chip {
+    display: none;
+  }
+
+  .tcld-toolbar-label {
+    display: none;
+  }
+
+  .tcld-toolbar-button {
+    width: 38px;
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  .tcld-toolbar-section {
+    flex-shrink: 0;
+    padding-right: 10px;
+  }
+
+  .tcld-toolbar-section-run {
+    min-width: 620px;
+  }
+
+  .tcld-launch-controls {
+    overflow: visible;
+  }
+
+  .tcld-hook-status {
+    display: none;
+  }
+
+  .tcld-toolbar-section-label {
+    display: none;
+  }
+
+  .tcld-welcome {
+    overflow-y: auto;
+  }
+}
+
+/* ─── react-mosaic Theme ─────────────────────────────────────── */
+
+/* Root mosaic fills its container */
+.mosaic-tcld-theme.mosaic {
+  background: transparent;
+}
+
+.mosaic-tcld-theme .mosaic-root {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+}
+
+/* Tiles — tight gaps for dense workspace feel */
+.mosaic-tcld-theme .mosaic-tile {
+  margin: 4px;
+}
+
+/* Split dividers — invisible by default, reveal on hover */
+/* Note: .mosaic-split is position:absolute by default (set by react-mosaic) — do NOT override */
+.mosaic-tcld-theme .mosaic-split {
+  z-index: 10;
+  transition: background 0.12s ease;
+}
+
+.mosaic-tcld-theme .mosaic-split.-row {
+  margin-left: -4px;
+  width: 8px;
+  cursor: col-resize;
+}
+
+.mosaic-tcld-theme .mosaic-split.-column {
+  margin-top: -4px;
+  height: 8px;
+  cursor: row-resize;
+}
+
+/* Centered hairline indicator */
+.mosaic-tcld-theme .mosaic-split::after {
+  content: "";
+  position: absolute;
+  border-radius: 1px;
+  background: var(--color-tcld-border-dim);
+  transition: background 0.12s ease, transform 0.12s ease;
+  pointer-events: none;
+}
+
+.mosaic-tcld-theme .mosaic-split.-row::after {
+  top: 50%;
+  left: 50%;
+  width: 2px;
+  height: 32px;
+  transform: translate(-50%, -50%);
+}
+
+.mosaic-tcld-theme .mosaic-split.-column::after {
+  top: 50%;
+  left: 50%;
+  width: 32px;
+  height: 2px;
+  transform: translate(-50%, -50%);
+}
+
+/* Divider hover */
+.mosaic-tcld-theme .mosaic-split:hover::after {
+  background: var(--color-tcld-border);
+}
+
+/* Divider active / resizing */
+.mosaic-tcld-theme .mosaic-split:active::after,
+.mosaic-tcld-theme .mosaic-split.-is-resizing::after {
+  background: var(--color-tcld-border-focus);
+}
+
+/* Zero state (no panels) */
+.mosaic-tcld-theme .mosaic-zero-state {
+  background: transparent;
+}
+
+/* MosaicWindow: we don't use MosaicWindow but Mosaic still renders wrapper divs */
+.mosaic-tcld-theme .mosaic-window {
+  box-shadow: none;
+}
+
+.mosaic-tcld-theme .mosaic-window .mosaic-window-toolbar {
+  display: none;
+}
+
+.mosaic-tcld-theme .mosaic-window .mosaic-window-body {
+  background: transparent;
+  overflow: visible;
+}
+
+/* ─── Drag Handle ─────────────────────────────────────────────── */
+.drag-handle {
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+/* ─── Settings: user font size override ──────────────────────── */
+.tcld-panel-body .font-mono {
+  font-size: var(--font-size-base) !important;
+}
+
+/* ─── Density-aware panel chrome ─────────────────────────────── */
+html[data-density="compact"] .panel-keyhint,
+html[data-density="ultra"] .panel-keyhint {
+  display: none;
+}
+
+html[data-density="ultra"] .panel-title {
+  max-width: 14ch;
+}
+
+html[data-density="ultra"] .panel-subtitle {
+  display: none;
+}
+
+html[data-density="compact"] .panel-chrome-action,
+html[data-density="ultra"] .panel-chrome-action {
+  opacity: 0;
+  pointer-events: none;
+}
+
+html[data-density="compact"] .panel-root:hover .panel-chrome-action,
+html[data-density="compact"] .panel-root:focus-within .panel-chrome-action,
+html[data-density="ultra"] .panel-root:hover .panel-chrome-action,
+html[data-density="ultra"] .panel-root:focus-within .panel-chrome-action {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/*
+ * ─── Narrow-workspace responsive contract ─────────────────────
+ * `data-narrow="true"` lands on [data-design-surface="workspace-mosaic"]
+ * when the workspace container drops below WORKSPACE_COLLAPSE_AT_PX
+ * (1280px, defined in lib/layout-constraints.ts). Below the threshold:
+ *
+ *   - Panel headers tighten horizontal padding so 3-pane layouts can still
+ *     show every header element (icon + title + badge + keyhint + ⋯).
+ *   - The proc-scope subtitle hides — it duplicates information the panel
+ *     badge already carries (i142) and is the lowest-value text in the
+ *     header on a narrow window.
+ *   - The persistent keyhint chip hides — the keyboard model still works,
+ *     but the visual reminder gets out of the way.
+ *
+ * The ResizeObserver in MosaicWorkspace toggles the attribute, so these
+ * rules respond to actual container width, not viewport width — sidebars
+ * and other parent chrome are accounted for automatically.
+ */
+[data-design-surface="workspace-mosaic"][data-narrow="true"] .panel-header {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+[data-design-surface="workspace-mosaic"][data-narrow="true"] .panel-subtitle,
+[data-design-surface="workspace-mosaic"][data-narrow="true"] .panel-keyhint {
+  display: none;
+}
+
+/* ─── Debug-mode condensed chrome ────────────────────────────── */
+html[data-debug] {
+  --panel-header-height: 20px;
+  --code-row-height: 20px;
+}
+
+html[data-debug] .panel-header {
+  padding-top: 1px;
+  padding-bottom: 1px;
+  min-height: 20px;
+}
+
+html[data-debug] .panel-title {
+  font-size: 10px;
+}
+
+html[data-debug] .panel-keyhint,
+html[data-debug] .panel-subtitle {
+  display: none;
+}
+
+html[data-debug] .panel-icon {
+  font-size: 10px;
+}
+
+html[data-debug] .panel-chrome-action {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s ease;
+  padding: 2px;
+}
+
+html[data-debug] .panel-root:hover .panel-chrome-action,
+html[data-debug] .panel-root:focus-within .panel-chrome-action {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+html[data-debug] [data-debug-rail="true"] .panel-root {
+  border-color: color-mix(in srgb, var(--accent) 18%, var(--line));
+  background: color-mix(in srgb, var(--bg-panel) 92%, black);
+}
+
+html[data-debug] [data-debug-rail="true"] .panel-header {
+  background: var(--bg-panel);
+}
+
+html[data-debug] [data-debug-rail="true"] .tcld-panel-body {
+  background: var(--bg-window);
+}
+
+html[data-debug] [data-debug-rail="true"] [data-design-surface="adaptive-tab-bar"] > div {
+  min-height: 22px;
+}
+
+html[data-debug] .decompile-editor-tabs {
+  min-height: 22px;
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+
+html[data-debug] .decompile-editor-toolbar {
+  min-height: 16px;
+  padding-top: 0;
+  padding-bottom: 0;
+  font-size: 10px;
+}
+
+html[data-debug] .decompile-editor-status {
+  min-height: 16px;
+}
+
+html[data-debug] .decompile-editor-tab {
+  font-size: 10px;
+  padding: 2px 6px;
+}
+
+html[data-debug] .decompile-editor-crumbs {
+  font-size: 9px;
+}
+
+/* File header */
+html[data-debug] .tcld-file-header {
+  padding-top: 3px;
+  padding-bottom: 3px;
+  gap: 6px;
+  font-size: 10px;
+}
+
+html[data-debug] .tcld-file-header span {
+  font-size: 10px !important;
+}
+
+/* Main toolbar */
+html[data-debug] .tcld-main-toolbar {
+  min-height: 22px !important;
+  padding-top: 1px;
+  padding-bottom: 1px;
+  font-size: 10px;
+}
+
+html[data-debug] .tcld-main-toolbar button {
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+html[data-debug] .tcld-main-toolbar .text-sm {
+  font-size: 10px !important;
+}
+
+/* Status bar */
+html[data-debug] .tcld-status-bar > div:first-child {
+  height: 22px;
+  gap: 6px;
+  font-size: 10px;
+}
+
+html[data-debug] .tcld-status-bar > div:last-child {
+  height: 18px;
+  font-size: 10px;
+}
+
+html[data-debug] .tcld-status-bar span,
+html[data-debug] .tcld-status-bar button {
+  font-size: 10px !important;
+}
+
+/* Console input */
+html[data-debug] .tcld-console-input {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+html[data-debug] .tcld-console-input span,
+html[data-debug] .tcld-console-input input {
+  font-size: 11px !important;
+}
+
+/* ─── Utility Classes ─────────────────────────────────────────── */
+.no-select {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.scanline-effect::after {
+  display: none;
+}
+
+/* ─── Flash Row (jump target navigation) ─────────────────────── */
+@keyframes flash-row {
+  0% {
+    background: color-mix(in srgb, var(--color-tcld-accent) 15%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+.flash-row {
+  animation: flash-row 0.35s ease-out;
+}
+
+/* ─── Drop Zone ───────────────────────────────────────────────── */
+.drop-zone-active {
+  position: relative;
+}
+
+.drop-zone-active::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px dashed var(--color-tcld-border-focus);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-tcld-accent) 4%, transparent);
+  z-index: 100;
+  pointer-events: none;
+  animation: none;
+}
+
+/* ─── Cross-Panel Hover Channel ──────────────────────────────── */
+.instruction-row[data-hover],
+.decompile-row[data-hover] {
+  box-shadow: inset 0 0 0 9999px color-mix(in srgb, var(--color-tcld-fg-muted) 4%, transparent);
+}
+
+.instruction-row-selected {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.tcld-disasm-group-rail {
+  display: var(--rail-display);
+  width: 2px;
+  align-self: stretch;
+  flex: 0 0 2px;
+  border-radius: 0;
+  background: currentColor;
+  opacity: 0.4;
+}
+
+.instruction-row[data-command-group] .tcld-disasm-group-rail {
+  opacity: 0.55;
+}
+
+.instruction-row[data-group-start] .tcld-disasm-group-rail {
+  opacity: 1;
+  width: 3px;
+  flex-basis: 3px;
+}
+
+.instruction-row[data-group-start] .tcld-disasm-group-rail::after {
+  content: "";
+  display: block;
+  width: 3px;
+  height: 4px;
+  background: inherit;
+}
+
+.instruction-row[data-group-start] {
+  margin-top: 4px;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--line-2) 70%, transparent);
+}
+
+.instruction-row[data-group-start]:first-child {
+  margin-top: 0;
+}
+
+.instruction-row[data-selected-group="true"][data-group-start="true"] {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.instruction-row[data-fold-state="collapsed"] {
+  background: color-mix(in srgb, var(--bg-panel-2) 72%, transparent);
+}
+
+.tcld-disasm-fold-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tcld-disasm-source-group-column {
+  min-width: 0;
+}
+
+.tcld-disasm-group-summary {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 5px;
+}
+
+.tcld-disasm-group-dot {
+  display: var(--rail-display);
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 999px;
+}
+
+.tcld-disasm-group-label,
+.tcld-disasm-group-source,
+.tcld-disasm-group-detail,
+.tcld-disasm-group-range,
+.tcld-disasm-folded-count {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tcld-disasm-group-label {
+  min-width: 0;
+  color: var(--fg-2);
+}
+
+.tcld-disasm-group-source {
+  color: var(--fg-4);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.tcld-disasm-group-detail {
+  max-width: 34%;
+  color: var(--fg-4);
+  font-size: 10.5px;
+}
+
+.tcld-disasm-group-range {
+  flex: 0 0 auto;
+  color: var(--fg-4);
+  font-size: 10px;
+}
+
+.tcld-disasm-folded-count {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 10px;
+}
+
+.instruction-row[data-fold-state="collapsed"] [data-disasm-column="address"],
+.instruction-row[data-fold-state="collapsed"] [data-disasm-column="opcode"],
+.instruction-row[data-fold-state="collapsed"] [data-disasm-column="operand"] {
+  opacity: 0.62;
+}
+
+.decompile-editor-shell {
+  background: var(--color-tcld-bg-2);
+}
+
+.decompile-editor-tabs {
+  background: var(--color-tcld-bg-1);
+  border-bottom: 1px solid var(--color-tcld-bg);
+  min-height: 34px;
+}
+
+.decompile-editor-tab {
+  color: var(--color-tcld-fg-muted);
+  border: 1px solid transparent;
+  font-size: 12px;
+}
+
+.decompile-editor-tab-active {
+  background: var(--color-tcld-bg);
+  color: var(--color-tcld-fg-bright);
+  border-color: var(--color-tcld-border-dim);
+  border-bottom-color: var(--color-tcld-bg);
+}
+
+.decompile-editor-crumbs {
+  color: var(--color-tcld-fg-dim);
+}
+
+.decompile-editor-varpill {
+  color: color-mix(in srgb, var(--color-tcld-variable) 90%, #fff);
+  background: color-mix(in srgb, var(--color-tcld-variable) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-tcld-variable) 35%, transparent);
+}
+
+.decompile-editor-toolbar {
+  background: color-mix(in srgb, var(--color-tcld-bg-1) 70%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-tcld-border-dim) 60%, transparent);
+  min-height: 22px;
+}
+
+.decompile-editor-toolbar-action {
+  display: inline-flex;
+  height: 20px;
+  min-width: 20px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-tcld-fg-dim);
+  padding: 0 4px;
+  font: 10px var(--mono);
+  cursor: pointer;
+  transition: color 0.1s ease, background 0.1s ease;
+}
+
+.decompile-editor-toolbar-action:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--color-tcld-fg);
+}
+
+.decompile-editor-toolbar-action.is-active {
+  color: var(--accent);
+}
+
+.decompile-editor-toolbar-action.is-active:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.decompile-editor-toolbar-action:hover {
+  background: var(--color-tcld-bg-highlight);
+  color: var(--color-tcld-fg);
+}
+
+.decompile-editor-fold-count {
+  white-space: nowrap;
+}
+
+.decompile-editor-surface {
+  background: var(--color-tcld-bg);
+}
+
+.decompile-editor-row {
+  border-bottom: none;
+}
+
+.decompile-source-group-header {
+  display: grid;
+  grid-template-columns: 4px 18px minmax(7rem, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--code-row-height);
+  padding: 0 10px;
+  border-top: 1px solid color-mix(in srgb, var(--color-tcld-border-dim) 75%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-tcld-border-dim) 35%, transparent);
+  background: color-mix(in srgb, var(--color-tcld-bg-1) 74%, var(--color-tcld-bg));
+  color: var(--color-tcld-fg-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.decompile-source-group-header-selected {
+  background: color-mix(in srgb, var(--color-tcld-accent) 9%, var(--color-tcld-bg));
+}
+
+.decompile-source-group-header-execution {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-tcld-success) 20%, transparent);
+}
+
+.decompile-source-group-rail {
+  width: 3px;
+  height: 70%;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-tcld-group) 78%, transparent);
+}
+
+.decompile-source-group-chevron {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--color-tcld-fg-dim);
+}
+
+.decompile-source-group-chevron:not(:disabled):hover {
+  background: var(--color-tcld-bg-highlight);
+  color: var(--color-tcld-accent);
+}
+
+.decompile-source-group-chevron:disabled {
+  opacity: 0.28;
+}
+
+.decompile-source-group-title {
+  color: var(--color-tcld-fg);
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.decompile-source-group-detail {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-tcld-fg-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.decompile-source-group-meta {
+  color: var(--color-tcld-fg-dim);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/*
+ * Row highlights hug the actual content rather than spanning the full panel
+ * width. Without this, hovering or selecting a short line painted a wide
+ * empty bar all the way to the right edge — visually noisy.
+ *
+ * `width: max-content` on the row collapses it to its natural content width
+ * (gutter + line text). The outer virtualized wrapper still has
+ * `min-width: 100%` so the row's *click area* covers the panel width, but
+ * the row's own background only paints up to where the text actually ends.
+ *
+ * The accent left-edge stripe (the inset box-shadow) anchors at the gutter
+ * edge so it remains visible regardless of line length.
+ */
+.decompile-editor-row {
+  width: max-content;
+  min-width: 0;
+}
+
+.decompile-editor-row:hover {
+  background: color-mix(in srgb, var(--color-tcld-bg-highlight) 50%, transparent);
+  /* Add ~32px of breathing room past the text so the highlight reads as a
+   * "pill" hugging the line, not flush against the last character. */
+  padding-right: 2rem;
+}
+
+/*
+ * Selected-row highlight reads as a "sheet of warm light," not a stripe.
+ * Per the UI review §6.6.2: a 12% accent wash across the full row beats a
+ * thin border because the user's eye lands on the row's mass, not its edge.
+ * The previous inset 2px box-shadow + 7% wash combination split the signal
+ * across two cues that fought for the same hierarchy slot.
+ */
+.decompile-editor-row[data-selected] {
+  background: var(--accent-bg);
+  padding-right: 2rem;
+}
+
+/*
+ * Execution-row keeps the dual-cue (warning wash + 2px PC stripe). Distinct
+ * from selection: selection is a sheet, execution is a stripe + sheet so
+ * the eye can tell them apart when both land on different rows. The ▶ step
+ * caret rendered in the gutter (DecompilePanel.tsx) reinforces this and
+ * makes the execution row identifiable even when the warning palette has
+ * been tuned down.
+ */
+.decompile-editor-row[data-execution] {
+  background: color-mix(in srgb, var(--color-tcld-warning) 8%, transparent);
+  box-shadow: inset 2px 0 0 var(--color-tcld-warning);
+  padding-right: 2rem;
+}
+
+.decompile-editor-row[data-execution-group] {
+  background: color-mix(in srgb, var(--color-tcld-success) 5%, var(--color-tcld-bg));
+  padding-right: 2rem;
+}
+
+.decompile-editor-gutter {
+  background: var(--color-tcld-bg);
+  min-width: 48px;
+}
+
+.decompile-editor-gutter-focus {
+  /* line number highlights only */
+}
+
+.decompile-editor-line-number {
+  color: var(--color-tcld-fg-dim);
+  opacity: 0.55;
+}
+
+.decompile-editor-row:hover .decompile-editor-line-number,
+.decompile-editor-row[data-selected] .decompile-editor-line-number {
+  color: var(--color-tcld-fg-bright);
+  opacity: 1;
+}
+
+.decompile-editor-row[data-execution] .decompile-editor-line-number {
+  color: var(--color-tcld-fg-bright);
+  opacity: 1;
+}
+
+.decompile-editor-code {
+  color: var(--color-tcld-fg);
+  padding-left: 8px;
+}
+
+.decompile-editor-group-pill {
+  color: var(--color-tcld-fg-muted);
+  background: color-mix(in srgb, var(--color-tcld-group) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-tcld-group) 25%, transparent);
+}
+
+.decompile-editor-status {
+  background: var(--color-tcld-accent);
+  border-top: none;
+  min-height: 22px;
+}
+
+.decompile-editor-status span {
+  color: var(--color-tcld-bg) !important;
+  font-weight: 500;
+}
+
+.comparison-view {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: var(--type-code);
+}
+
+.comparison-toolbar {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line);
+  padding: 3px 8px;
+  color: var(--fg-3);
+}
+
+.comparison-toolbar-title,
+.comparison-legend,
+.comparison-legend-item {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.comparison-toolbar-title {
+  flex: 0 1 auto;
+  gap: 7px;
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+
+.comparison-toolbar-separator {
+  width: 3px;
+  height: 3px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--fg-4);
+}
+
+.comparison-legend {
+  flex: 1 1 auto;
+  justify-content: flex-end;
+  gap: 8px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.comparison-legend-item {
+  flex: 0 0 auto;
+  gap: 4px;
+  color: var(--fg-3);
+  font-size: 10.5px;
+}
+
+.comparison-legend-count {
+  color: var(--fg-4);
+}
+
+.comparison-dot,
+.comparison-row-rail {
+  flex: 0 0 auto;
+  border-radius: 999px;
+}
+
+.comparison-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.comparison-dot-match,
+.comparison-row-rail-match {
+  background: var(--accent);
+}
+
+.comparison-dot-partial,
+.comparison-row-rail-partial {
+  background: var(--warn);
+}
+
+.comparison-dot-stripped,
+.comparison-row-rail-stripped {
+  background: var(--fg-4);
+}
+
+.comparison-row-header {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  padding: 4px 12px;
+  color: var(--fg-4);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.comparison-row-header span:first-child {
+  grid-column: 2;
+}
+
+.comparison-row-list {
+  min-height: 0;
+  overflow: auto;
+}
+
+.comparison-row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) minmax(0, 1fr);
+  width: 100%;
+  gap: 10px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  padding: 6px 12px;
+  color: var(--fg-2);
+  text-align: left;
+}
+
+.comparison-row:hover,
+.comparison-row-selected {
+  background: color-mix(in srgb, var(--accent-bg) 55%, transparent);
+}
+
+.comparison-row-selected {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.comparison-row-rail {
+  width: 8px;
+  height: 100%;
+  min-height: 32px;
+  align-self: stretch;
+  border-radius: 999px;
+}
+
+.comparison-row-source,
+.comparison-row-reconstructed {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.comparison-row-source {
+  color: var(--fg-2);
+}
+
+.comparison-row-reconstructed {
+  color: var(--fg-3);
+}
+
+.comparison-row-stripped .comparison-row-reconstructed,
+.comparison-row-stripped .comparison-row-source {
+  color: var(--fg-4);
+}
+
+.comparison-row-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comparison-row-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-4);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comparison-empty {
+  padding: 18px 14px;
+  color: var(--fg-4);
+}
+
+@media (max-width: 760px) {
+  .comparison-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+    min-height: 46px;
+  }
+
+  .comparison-legend {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .comparison-row,
+  .comparison-row-header {
+    grid-template-columns: 8px minmax(0, 1fr);
+  }
+
+  .comparison-row-reconstructed,
+  .comparison-row-header span:last-child {
+    grid-column: 2;
+  }
+}
+
+.diagnostics-summary-strip {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  min-height: 26px;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  border: 1px solid var(--color-tcld-border-dim);
+  border-radius: var(--radius-panel);
+  background: color-mix(in srgb, var(--color-tcld-bg-1) 88%, var(--color-tcld-bg));
+  padding: 3px 6px;
+  color: var(--color-tcld-fg);
+  white-space: nowrap;
+}
+
+.diagnostics-summary-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--color-tcld-border-dim);
+  border-radius: var(--radius-badge);
+  padding: 2px 7px;
+  font-size: 10px;
+  font-weight: 600;
+  font-feature-settings: "tnum" 1;
+  letter-spacing: 0.02em;
+  background: var(--color-tcld-bg);
+  color: var(--color-tcld-fg-dim);
+}
+
+.diagnostics-summary-count-err {
+  border-color: color-mix(in srgb, var(--err) 45%, var(--color-tcld-border-dim));
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 12%, var(--color-tcld-bg));
+}
+
+.diagnostics-summary-count-warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--color-tcld-border-dim));
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, var(--color-tcld-bg));
+}
+
+.diagnostics-summary-count-info {
+  border-color: color-mix(in srgb, var(--info) 45%, var(--color-tcld-border-dim));
+  color: var(--info);
+  background: color-mix(in srgb, var(--info) 12%, var(--color-tcld-bg));
+}
+
+.diagnostics-issue-row {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  width: 100%;
+  min-height: 44px;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-bottom: 1px solid var(--color-tcld-border-dim);
+  background: transparent;
+  padding: 6px 2px;
+  color: var(--color-tcld-fg);
+  text-align: left;
+}
+
+.diagnostics-issue-row:not(:disabled):hover,
+.diagnostics-issue-row[data-selected] {
+  background: color-mix(in srgb, var(--color-tcld-accent) 10%, transparent);
+}
+
+.diagnostics-issue-row:disabled {
+  cursor: default;
+}
+
+.diagnostics-severity-pill {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  height: 18px;
+  border: 1px solid var(--color-tcld-border-dim);
+  border-radius: var(--radius-badge);
+  padding: 0 6px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  line-height: 1;
+  background: var(--color-tcld-bg);
+}
+
+.diagnostics-severity-pill-err {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 45%, var(--color-tcld-border-dim));
+  background: color-mix(in srgb, var(--err) 14%, var(--color-tcld-bg));
+}
+
+.diagnostics-severity-pill-warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--color-tcld-border-dim));
+  background: color-mix(in srgb, var(--warn) 14%, var(--color-tcld-bg));
+}
+
+.diagnostics-severity-pill-info {
+  color: var(--info);
+  border-color: color-mix(in srgb, var(--info) 45%, var(--color-tcld-border-dim));
+  background: color-mix(in srgb, var(--info) 14%, var(--color-tcld-bg));
+}
+
+.diagnostics-issue-message {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--color-tcld-fg);
+  font-size: 11.5px;
+}
+
+.diagnostics-issue-meta {
+  display: block;
+  min-width: 0;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  color: var(--color-tcld-fg-dim);
+  font-size: 10px;
+}
+
+.diagnostics-empty-state {
+  border: 1px solid var(--color-tcld-border-dim);
+  border-radius: var(--radius-panel);
+  background: color-mix(in srgb, var(--color-tcld-bg-1) 72%, transparent);
+  padding: 10px;
+}
+
+/* Breakpoint dot */
+.decompile-bp-dot {
+  border-radius: 50%;
+}
+
+.decompile-bp-dot[data-active] {
+  background: var(--color-tcld-error);
+}
+
+/*
+ * A disabled-but-set breakpoint stays visible in the gutter as a dimmer
+ * dot — it's still a real breakpoint the user has set, just not currently
+ * armed. Hiding it entirely was misleading.
+ */
+.decompile-bp-dot[data-active][data-bp-disabled="true"] {
+  background: var(--color-tcld-error);
+  opacity: 0.35;
+}
+
+.decompile-bp-dot:not([data-active]) {
+  opacity: 0;
+}
+
+.decompile-editor-row:hover .decompile-bp-dot:not([data-active]) {
+  opacity: 0.4;
+  background: var(--color-tcld-error);
+}
+
+.graph-node[data-hover] > rect:first-child {
+  stroke: var(--color-tcld-group) !important;
+  stroke-width: 1.5px !important;
+}
+
+/*
+ * ─── Design system: semantic typography utilities ──────────────────
+ * Lifted from the canonical tcld-design-system/colors_and_type.css.
+ * Use these classes everywhere instead of arbitrary text-[Npx]. They
+ * pin font-family + font-size + line-height to one role per class so
+ * density tuning lands in one place.
+ *
+ *   .t-hero    — welcome screen 40px hero
+ *   .t-h1      — settings dialog 22px section title
+ *   .t-ui      — primary UI labels (toolbars, menus, dialog body)
+ *   .t-meta    — secondary metadata (status bar, breadcrumbs)
+ *   .t-label   — chip labels, key hints, badges
+ *   .t-tag     — uppercase letterspaced section eyebrows
+ *   .t-code    — code listings (decompile, source)
+ *   .t-disasm  — bytecode rows
+ *   .t-kbd     — keyboard hint glyphs inside <kbd>
+ */
+.t-ui {
+  font-family: var(--ui);
+  font-size: var(--text-ui);
+  line-height: 1.4;
+}
+
+.t-meta {
+  font-family: var(--mono);
+  font-size: var(--text-meta);
+  line-height: 1.4;
+  color: var(--fg-3);
+}
+
+.t-label {
+  font-family: var(--mono);
+  font-size: var(--text-label);
+  line-height: 1.4;
+  color: var(--fg-3);
+  letter-spacing: 0.02em;
+}
+
+.t-tag {
+  font-family: var(--mono);
+  font-size: var(--text-tag);
+  line-height: 1.3;
+  color: var(--fg-4);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.t-code {
+  font-family: var(--mono);
+  font-size: var(--text-code);
+  line-height: 1.5;
+}
+
+.t-disasm {
+  font-family: var(--mono);
+  font-size: var(--text-disasm);
+  line-height: 1.4;
+}
+
+.t-kbd {
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-keyhint);
+}
+
+.t-h1 {
+  font-family: var(--mono);
+  font-size: var(--text-section-h1);
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--fg);
+}
+
+.t-hero {
+  font-family: var(--mono);
+  font-size: var(--text-welcome);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  color: var(--fg);
+}
+
+/*
+ * ─── Design system: chip family ────────────────────────────────────
+ * Three sizes, six tones. Replaces the dozen ad-hoc h-[14px] /
+ * rounded-[3px] count badges scattered across panels. The React
+ * <Chip /> primitive in components/primitives/Chip.tsx composes the
+ * same shapes via Tailwind utilities; these classes exist so non-
+ * React surfaces (CSS-only mocks, anchor-tag chips, dialog content
+ * coming from rich-text) can hit the same vocabulary.
+ */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 1px solid var(--line-2);
+  background: color-mix(in srgb, var(--bg-panel) 84%, transparent);
+  color: var(--fg-3);
+  font-family: var(--mono);
+  white-space: nowrap;
+  font-feature-settings: "tnum";
+}
+
+.chip-xs {
+  height: 14px;
+  padding: 0 3px;
+  border-radius: var(--radius-badge);
+  font-size: var(--text-label);
+}
+
+.chip-sm {
+  height: 18px;
+  padding: 0 4px;
+  border-radius: var(--radius-badge);
+  font-size: var(--text-label);
+}
+
+.chip-md {
+  height: 22px;
+  padding: 0 5px;
+  border-radius: var(--radius-badge);
+  font-size: var(--text-meta);
+}
+
+.chip-accent {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  background: var(--accent-bg);
+}
+
+.chip-warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 34%, var(--line));
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+.chip-err {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 34%, var(--line));
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+}
+
+.chip-info {
+  color: var(--info);
+  border-color: color-mix(in srgb, var(--info) 34%, var(--line));
+  background: color-mix(in srgb, var(--info) 10%, transparent);
+}
+
+.chip-success {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 34%, var(--line));
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+}
+
+.chip-group {
+  color: var(--group);
+  border-color: color-mix(in srgb, var(--group) 34%, var(--line));
+  background: color-mix(in srgb, var(--group) 10%, transparent);
+}
+
+/*
+ * ─── Design system: icon-button tooltip (data-tip) ─────────────────
+ * Pairs with [data-tip="Step over (F10)"] on icon-only buttons in
+ * panel titlebars and toolbars. One delayed 0.3s appearance, no
+ * portal, no JS — just a CSS pseudo-element. Pop above by default;
+ * flip below on bottom-edge buttons via [data-tip-side="bottom"].
+ */
+[data-tip] {
+  position: relative;
+}
+
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 3px 6px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-badge);
+  white-space: nowrap;
+  box-shadow: var(--shadow-popover);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.08s ease-out 0.3s;
+  z-index: var(--z-popover);
+}
+
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  opacity: 1;
+}
+
+[data-tip-side="top"]::after {
+  top: auto;
+  bottom: calc(100% + 5px);
+}
+
+[data-tip-side="left"]::after {
+  top: 50%;
+  left: auto;
+  right: calc(100% + 5px);
+  transform: translateY(-50%);
+}
+
+[data-tip-side="right"]::after {
+  top: 50%;
+  left: calc(100% + 5px);
+  transform: translateY(-50%);
+}
+
+/*
+ * Reduced-motion: kill the tooltip delay so screen-readers and users
+ * with vestibular sensitivity get an instant on/off, not a soft fade.
+ */
+@media (prefers-reduced-motion: reduce) {
+  [data-tip]::after {
+    transition: none;
+  }
+}
+
+/*
+ * ─── Design system: section eyebrow ────────────────────────────────
+ * The ALL-CAPS letterspaced label that introduces a section block —
+ * "LAYOUT", "PROFILE", "RECENT FILES", "INSTRUCTION". Matches t-tag
+ * but adds the bottom margin and inactive color so consumers can stop
+ * hand-rolling `text-label uppercase tracking-wider text-tcld-fg-muted`
+ * (~30 sites in the codebase).
+ */
+.tcld-section-eyebrow {
+  display: block;
+  font-family: var(--mono);
+  font-size: var(--text-tag);
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--fg-2);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+
+/*
+ * ─── Design system: status indicator glow ──────────────────────────
+ * The 6px halo pattern used on the debug toolbar paused/running dot,
+ * the breakpoint hit indicator, and the launch button's "ready" dot.
+ * One canonical shadow per semantic state; no inline rgba shadows.
+ */
+.tcld-glow-accent  { box-shadow: var(--shadow-glow-accent); }
+.tcld-glow-warn    { box-shadow: var(--shadow-glow-warn); }
+.tcld-glow-err     { box-shadow: var(--shadow-glow-err); }
+.tcld-glow-info    { box-shadow: var(--shadow-glow-info); }
+
+/*
+ * Pulse-subtle keyframe is registered above; this class binds it for
+ * the "paused debugger" dot. Animation duration is intentionally long
+ * (1.4s) — short pulses read as urgent / loading, not "we're paused".
+ */
+.tcld-pulse-paused {
+  animation: pulse-subtle 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tcld-pulse-paused {
+    animation: none;
+  }
+}
+
+/*
+ * ──────────────────────────────────────────────────────────────────
+ * Design system: canonical panel titlebar
+ * ──────────────────────────────────────────────────────────────────
+ * Lifted verbatim from tcld-design-system/colors_and_type.css. This
+ * is the 28px row that owns every panel's chrome — glyph, name,
+ * breadcrumb, and the action button cluster on the right. It also
+ * has a `--container` variant where an inline tab strip replaces
+ * the name slot for multi-view panels.
+ *
+ * The whole tcld-pt-* family (glyph, name, crumb, actions, btn)
+ * lives here so React panels can render `tcld-panel-titlebar`
+ * markup instead of hand-rolling their own header layout.
+ */
+.tcld-panel-titlebar {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 0 10px;
+  background: var(--bg-window);
+  border-bottom: 1px solid var(--line-2);
+  font: 600 11px var(--mono);
+  color: var(--fg-2);
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+
+.tcld-panel-titlebar .tcld-pt-glyph {
+  color: var(--fg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.tcld-panel-titlebar .tcld-pt-name {
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tcld-panel-titlebar .tcld-pt-crumb {
+  color: var(--fg-4);
+  font-weight: 400;
+  letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tcld-panel-titlebar .tcld-pt-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  flex-shrink: 0;
+}
+
+.tcld-panel-titlebar .tcld-pt-btn {
+  height: 22px;
+  width: 22px;
+  padding: 0;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fg-3);
+  font: 12px var(--mono);
+  cursor: pointer;
+  transition: background 0.1s ease-out, color 0.1s ease-out, border-color 0.1s ease-out;
+}
+
+.tcld-panel-titlebar .tcld-pt-btn:hover {
+  background: var(--bg-elev);
+  color: var(--fg);
+  border-color: var(--line-2);
+}
+
+.tcld-panel-titlebar .tcld-pt-btn.is-pressed,
+.tcld-panel-titlebar .tcld-pt-btn[data-pressed="true"] {
+  background: var(--accent-bg);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+}
+
+.tcld-panel-titlebar .tcld-pt-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.tcld-panel-titlebar .tcld-pt-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--line-2);
+  margin: 0 3px;
+  align-self: center;
+  flex-shrink: 0;
+}
+
+/* Focused-panel header wash + accent title color (cue 2 + 3 of the
+   three-cue focus stack; cue 1 is the rail pseudo-element on .tcld-panel.is-focused). */
+.tcld-panel.is-focused > .tcld-panel-titlebar,
+.panel-root.is-focused > .tcld-panel-titlebar {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-window));
+}
+.tcld-panel.is-focused > .tcld-panel-titlebar .tcld-pt-name,
+.panel-root.is-focused > .tcld-panel-titlebar .tcld-pt-name {
+  color: color-mix(in srgb, var(--accent) 70%, var(--fg));
+}
+
+/*
+ * Multi-view container: titlebar carries an inline tab strip that
+ * replaces the name slot. The `is-bare` modifier on the strip drops
+ * the left padding/separator so the first tab sits flush with the
+ * panel edge. Used by every panel that hosts more than one view.
+ */
+.tcld-panel-titlebar--container {
+  padding-left: 0;
+}
+
+.tcld-panel-titlebar .tcld-inline-tabs {
+  display: inline-flex;
+  align-items: stretch;
+  height: 100%;
+  margin-left: 6px;
+  padding-left: 6px;
+  border-left: 1px solid var(--line-2);
+  gap: 0;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.tcld-panel-titlebar .tcld-inline-tabs.is-bare {
+  margin-left: 0;
+  padding-left: 0;
+  border-left: 0;
+}
+
+.tcld-panel-titlebar .tcld-inline-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 100%;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-bottom: 0;
+  border-radius: 4px 4px 0 0;
+  margin-right: 1px;
+  margin-bottom: -1px;
+  background: color-mix(in srgb, var(--bg-window) 60%, transparent);
+  color: var(--text-inactive);
+  font: 500 11px var(--mono);
+  letter-spacing: 0;
+  cursor: pointer;
+  text-transform: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.1s ease-out, color 0.1s ease-out, border-color 0.1s ease-out;
+}
+
+.tcld-panel-titlebar .tcld-inline-tabs.is-bare .tcld-inline-tab:first-child {
+  padding-left: 12px;
+  border-left: 0;
+  border-top-left-radius: 0;
+}
+
+.tcld-panel-titlebar .tcld-inline-tab:hover {
+  color: var(--fg-2);
+  background: var(--bg-elev);
+  border-color: var(--line);
+}
+
+.tcld-panel-titlebar .tcld-inline-tab.is-active {
+  color: var(--fg);
+  background: var(--bg-panel);
+  border-color: var(--line);
+  box-shadow: inset 0 2px 0 0 var(--accent);
+  z-index: var(--z-tab-active, 10);
+}
+
+.tcld-panel-titlebar .tcld-inline-tab .tcld-pt-glyph {
+  color: var(--fg-3);
+  width: 12px;
+  height: 12px;
+}
+
+.tcld-panel-titlebar .tcld-inline-tab.is-active .tcld-pt-glyph {
+  color: var(--accent);
+}
+
+/* Drag-targeted tab (cross-leaf drop preview) — accent dashed border. */
+.tcld-panel-titlebar .tcld-inline-tab[data-drag-target="true"] {
+  border-style: dashed;
+  border-color: var(--border-focus);
+  background: var(--accent-bg);
+}
+
+/* Tab close button — 14×14 hit area, hidden until hover/focus on the tab. */
+.tcld-panel-titlebar .tcld-inline-tab .tcld-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  margin-left: 4px;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--fg-4);
+  font: 10px var(--mono);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.08s ease-out, background 0.08s ease-out, color 0.08s ease-out;
+}
+
+.tcld-panel-titlebar .tcld-inline-tab:hover .tcld-tab-close,
+.tcld-panel-titlebar .tcld-inline-tab.is-active .tcld-tab-close,
+.tcld-panel-titlebar .tcld-inline-tab:focus-within .tcld-tab-close {
+  opacity: 1;
+}
+
+.tcld-panel-titlebar .tcld-inline-tab .tcld-tab-close:hover {
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+
+/*
+ * ──────────────────────────────────────────────────────────────────
+ * Design system: stacked sub-panel accordion (Inspector pattern)
+ * ──────────────────────────────────────────────────────────────────
+ * VSCode-style. Each sub-panel: 22px ALL-CAPS letterspaced header bar
+ * + optional inline meta + optional action cluster + resizable body.
+ * The active sub-panel paints an accent border-top + accent name.
+ */
+.tcld-subpanels {
+  display: flex;
+  flex-direction: column;
+}
+
+.tcld-subpanel {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-panel);
+}
+
+.tcld-subpanel:first-child {
+  border-top: 1px solid var(--line);
+}
+
+.tcld-subpanel-head {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 8px;
+  background: var(--bg-window);
+  font: 700 9.5px var(--mono);
+  color: var(--fg-2);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  user-select: none;
+  border: 0;
+  width: 100%;
+  text-align: left;
+}
+
+.tcld-subpanel-head:hover {
+  color: var(--fg);
+}
+
+.tcld-subpanel-head .chev {
+  color: var(--fg-3);
+  width: 10px;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.tcld-subpanel-head .name {
+  color: var(--fg);
+  font-weight: 700;
+}
+
+.tcld-subpanel-head .meta {
+  margin-left: auto;
+  color: var(--fg-4);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  font-size: 10px;
+}
+
+.tcld-subpanel-head .actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  margin-left: 6px;
+}
+
+.tcld-subpanel-head .sp-btn {
+  height: 16px;
+  min-width: 16px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--fg-4);
+  font: 11px var(--mono);
+  cursor: pointer;
+}
+
+.tcld-subpanel-head .sp-btn:hover {
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+
+.tcld-subpanel.is-active > .tcld-subpanel-head {
+  color: var(--accent);
+  border-top: 1px solid var(--accent);
+  margin-top: -1px;
+}
+
+.tcld-subpanel.is-active > .tcld-subpanel-head .name {
+  color: var(--accent);
+}
+
+.tcld-subpanel.is-collapsed .tcld-subpanel-body {
+  display: none;
+}
+
+.tcld-subpanel-body {
+  padding: 4px 0;
+  font: 11.5px var(--mono);
+  color: var(--fg-2);
+  position: relative;
+  resize: vertical;
+  overflow: auto;
+  min-height: 40px;
+}
+
+/* Resize grip — a 4px hover-visible affordance along the bottom edge
+   of an expanded sub-panel. Native CSS resize provides functionality;
+   this just makes the affordance visible. */
+.tcld-subpanel:not(.is-collapsed) {
+  position: relative;
+}
+
+.tcld-subpanel:not(.is-collapsed)::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -2px;
+  height: 4px;
+  cursor: ns-resize;
+  background: transparent;
+  transition: background 0.08s ease-out;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.tcld-subpanel:not(.is-collapsed):hover::after {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.tcld-subpanel:not(.is-collapsed):last-child::after {
+  display: none;
+}
+
+/* The canonical kv row inside a sub-panel body: 22px tall, 100px gutter
+   for the key, ellipsizing value column. Don't reach for grid utilities
+   when this shape is what you want — use this. */
+.tcld-subpanel .kv {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  gap: 12px;
+  padding: 1px 12px;
+  height: 22px;
+  align-items: center;
+  font: 11.5px var(--mono);
+}
+
+.tcld-subpanel .kv .k {
+  color: var(--fg-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tcld-subpanel .kv .v {
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── Workbench row primitives ──────────────────────────────────
+ * Top-level row shapes lifted verbatim from the workbench mock
+ * (tcld-design-system/ui_kits/workbench/workbench.css). Used by
+ * BreakpointsPanel and ConsolePanel so the production renders
+ * one-for-one with the design source. */
+
+.bp-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--line-2);
+  font: 11.5px var(--mono);
+  color: var(--fg);
+}
+.bp-row:last-child { border-bottom: 0; }
+.bp-row > .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--err);
+  flex: 0 0 auto;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.bp-row > .dot.off { background: var(--fg-4); }
+.bp-row > .name {
+  color: var(--fg);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.bp-row > .name .file {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 22ch;
+}
+.bp-row > .loc {
+  color: var(--fg-4);
+  margin-left: auto;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.bp-row > .loc > .remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fg-4);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.08s ease-out;
+}
+.bp-row:hover > .loc > .remove,
+.bp-row:focus-within > .loc > .remove { opacity: 1; }
+.bp-row > .loc > .remove:hover { background: var(--bg-elev); color: var(--err); }
+
+.console-row {
+  display: grid;
+  grid-template-columns: 56px 18px minmax(0, 1fr);
+  gap: 8px;
+  padding: 1px 12px;
+  align-items: baseline;
+  min-height: var(--row-h, 22px);
+  font: 11.5px var(--mono);
+  color: var(--fg-2);
+  border-left: 2px solid transparent;
+}
+.console-row > .t {
+  color: var(--fg-4);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.console-row > .lvl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 10px;
+  color: var(--fg-4);
+}
+.console-row > .lvl.ok   { color: var(--accent); }
+.console-row > .lvl.warn { color: var(--warn); }
+.console-row > .lvl.err  { color: var(--err); }
+.console-row > .lvl.info { color: var(--info); }
+.console-row > .msg {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.console-row.is-error {
+  border-left-color: var(--err);
+  background: color-mix(in srgb, var(--err) 4%, transparent);
+}
