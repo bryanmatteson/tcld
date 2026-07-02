@@ -1,0 +1,157 @@
+name: Release
+
+# A vX.Y.Z tag
+# produces CLI binaries (macos-arm64, macos-x64, linux-x64) + SHA256 checksums
+# + a GitHub release whose body comes from the annotated tag. The dmg job is
+# present but gated.
+#
+# Every CLI archive carries loadable Tcl 8.6 and Tcl 9 debugger nubs. The
+# libraries resolve Tcl symbols from the selected tclsh at load time and are
+# rejected before spawn unless their ABI/protocol/target/checksum manifest is
+# valid.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  cli:
+    name: CLI (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Tcl 8.6 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tcl8.6-dev tcl8.6
+          echo "TCL8_6_PREFIX=/usr" >> "$GITHUB_ENV"
+          echo "TCLD_TCLSH86=$(command -v tclsh8.6)" >> "$GITHUB_ENV"
+      - name: Install Tcl 8.6 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install tcl-tk@8
+          echo "TCL8_6_PREFIX=$(brew --prefix tcl-tk@8)" >> "$GITHUB_ENV"
+          echo "TCLD_TCLSH86=$(brew --prefix tcl-tk@8)/bin/tclsh8.6" >> "$GITHUB_ENV"
+      - name: Build Tcl 9 (cached)
+        uses: ./.github/actions/tcl9
+      - name: Record Tcl 9 shell
+        run: echo "TCLD_TCLSH9=$TCL9_PREFIX/bin/tclsh9.0" >> "$GITHUB_ENV"
+      - name: Build CLI and dual-ABI nubs
+        run: cargo build -p tcld --release --target ${{ matrix.target }}
+      - run: >
+          cargo build -p tcld-dbg-ext --release --no-default-features
+          --features tcl8_6,loadable-extension --target ${{ matrix.target }}
+          --target-dir target/release-nub-tcl86
+      - run: >
+          cargo build -p tcld-dbg-ext --release --no-default-features
+          --features tcl9,loadable-extension --target ${{ matrix.target }}
+          --target-dir target/release-nub-tcl9
+      - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="tcld-${version}-${TARGET}"
+          mkdir -p "dist/${name}"
+          cp "target/${TARGET}/release/tcld" "dist/${name}/"
+          cp LICENSE README.md COMPAT.md "dist/${name}/"
+          ext=so
+          if [[ "$TARGET" == *apple-darwin ]]; then ext=dylib; fi
+          scripts/package-debug-nubs.sh \
+            "target/release-nub-tcl86/${TARGET}/release/libtcld_dbg.${ext}" \
+            "target/release-nub-tcl9/${TARGET}/release/libtcld_dbg.${ext}" \
+            "dist/${name}" "$TARGET"
+          tar -czf "dist/${name}.tar.gz" -C dist "${name}"
+          (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          verify_root=$(mktemp -d)
+          tar -xzf "dist/${name}.tar.gz" -C "$verify_root"
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          if [[ "$host" == "$TARGET" ]]; then
+            TCLD_BUNDLE_TARGET="$TARGET" \
+              TCLD_TCL8_BYTECODE_FIXTURE="$PWD/apps/tcld/tests/fixtures/expr.tbc" \
+              scripts/verify-debug-release-bundle.sh "$verify_root/${name}"
+          else
+            TCLD_BUNDLE_TARGET="$TARGET" TCLD_TCLSH86='' TCLD_TCLSH9='' \
+              scripts/verify-debug-release-bundle.sh "$verify_root/${name}"
+          fi
+          rm -rf "$verify_root"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  dmg:
+    name: Desktop bundle (macOS dmg)
+    runs-on: macos-latest
+    # Signing config is complete (B5); the job activates when the
+    # MACOS_SIGNING_ENABLED repository variable is set to "true" AFTER
+    # these repository secrets exist: APPLE_CERTIFICATE (base64 .p12),
+    # APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, and for
+    # notarization APPLE_ID, APPLE_PASSWORD (app-specific), and
+    # APPLE_TEAM_ID. Unsigned dmgs are never shipped. Bundle identifier
+    # stays dev.matteson.tcld — the correct reverse-DNS of matteson.dev.
+    if: ${{ vars.MACOS_SIGNING_ENABLED == 'true' }}
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build Tcl 9 (cached)
+        uses: ./.github/actions/tcl9
+      - run: npm ci --prefix apps/tcld-gui
+      - run: cargo install tauri-cli --locked
+      - run: cargo tauri build
+        working-directory: apps/tcld-tauri
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmg
+          path: target/release/bundle/dmg/*.dmg
+
+  publish:
+    name: Publish GitHub release
+    needs: [cli, dmg]
+    # dmg is optional (skipped until signing is enabled); publish runs
+    # when cli succeeds and dmg either succeeded or was skipped.
+    if: ${{ !cancelled() && needs.cli.result == 'success' && (needs.dmg.result == 'success' || needs.dmg.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" artifacts/* \
+            --title "$GITHUB_REF_NAME" \
+            --notes-from-tag

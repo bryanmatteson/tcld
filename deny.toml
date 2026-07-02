@@ -1,0 +1,55 @@
+# cargo-deny configuration for dependency and license policy.
+#
+# Rule: every ignore names the real fix and the condition under which the
+# ignore is removed. An ignore with no revisit condition is not allowed.
+
+[advisories]
+version = 2
+ignore = [
+    # ── gtk-rs GTK3 bindings: unmaintained ─────────────────────────────
+    # Pulled transitively by tauri v2 / wry on Linux (GTK3 webview stack).
+    # Real fix: Tauri's move off GTK3 (wry GTK4 backend / Tauri v3).
+    # Remove this block when `cargo tree -i gtk` no longer resolves.
+    "RUSTSEC-2024-0411",
+    "RUSTSEC-2024-0412",
+    "RUSTSEC-2024-0413",
+    "RUSTSEC-2024-0414",
+    "RUSTSEC-2024-0415",
+    "RUSTSEC-2024-0416",
+    "RUSTSEC-2024-0417",
+    "RUSTSEC-2024-0418",
+    "RUSTSEC-2024-0419",
+    "RUSTSEC-2024-0420",
+
+    # ── proc-macro-error: unmaintained ──────────────────────────────────
+    # Transitive via the GTK3 macro stack above; leaves with it.
+    "RUSTSEC-2024-0370",
+
+    # ── paste: unmaintained (proc-macro) ────────────────────────────────
+    # Via ratatui 0.29. Real fix: ratatui release that drops paste
+    # (tracked upstream); remove on the ratatui upgrade that clears it.
+    "RUSTSEC-2024-0436",
+
+    # ── fxhash: unmaintained ────────────────────────────────────────────
+    # Build-dependency of tauri / tauri-plugin-fs. Remove when a tauri
+    # upgrade drops it (`cargo tree -i fxhash` empty).
+    "RUSTSEC-2025-0057",
+
+    # ── unic-* family: unmaintained ─────────────────────────────────────
+    # Via tauri-runtime-wry (urlpattern stack). Leaves with a tauri/wry
+    # upgrade; remove when `cargo tree -i unic-common` is empty.
+    "RUSTSEC-2025-0075",
+    "RUSTSEC-2025-0080",
+    "RUSTSEC-2025-0081",
+    "RUSTSEC-2025-0098",
+    "RUSTSEC-2025-0100",
+
+    # ── quick-xml 0.38: DoS vulnerabilities (quadratic attr scan, ───────
+    # unbounded NsReader allocation). Patched in quick-xml >= 0.41, but
+    # plist 1.8 (via tauri) pins ^0.38 so no compatible update exists yet.
+    # Exposure is low: quick-xml parses only the app's own plist bundle
+    # metadata, never untrusted input. REMOVE the moment
+    # `cargo update quick-xml` reaches >= 0.41 (plist bump).
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

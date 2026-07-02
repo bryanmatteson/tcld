@@ -1,0 +1,40 @@
+name: Provision Tcl 9
+description: >
+  Make Tcl 9 headers/libraries available and export TCL9_PREFIX. Uses
+  Homebrew on macOS; builds from source (cached) on Linux, where distros
+  still ship 8.6.
+
+runs:
+  using: composite
+  steps:
+    - name: Install via Homebrew (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        brew install tcl-tk
+        echo "TCL9_PREFIX=$(brew --prefix tcl-tk)" >> "$GITHUB_ENV"
+
+    - name: Cache Tcl 9 build (Linux)
+      if: runner.os == 'Linux'
+      id: tcl9-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/tcl9
+        key: tcl9-${{ runner.os }}-${{ env.TCL_CORE_TAG }}
+
+    - name: Build Tcl 9 from source (Linux)
+      if: runner.os == 'Linux' && steps.tcl9-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        curl -sSfL -o /tmp/tcl.tar.gz \
+          "https://github.com/tcltk/tcl/archive/refs/tags/${TCL_CORE_TAG}.tar.gz"
+        tar -xzf /tmp/tcl.tar.gz -C /tmp
+        cd /tmp/tcl-${TCL_CORE_TAG}/unix
+        ./configure --prefix="$HOME/tcl9" >/dev/null
+        make -j"$(nproc)" >/dev/null
+        make install >/dev/null
+
+    - name: Export TCL9_PREFIX (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: echo "TCL9_PREFIX=$HOME/tcl9" >> "$GITHUB_ENV"

@@ -1,0 +1,316 @@
+name: CI
+
+# Gated jobs run with continue-on-error and carry an "ungate:" comment naming
+# the track whose completion flips them to required. Gates stage runtime
+# verification; they never reduce what is checked.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  TCL_CORE_TAG: core-9-0-2
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the channel; dtolnay@stable matches it.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+      - name: Build Tcl 9 (cached)
+        uses: ./.github/actions/tcl9
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+        env:
+          TCL9_PREFIX: ${{ env.TCL9_PREFIX }}
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Tauri system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+      - name: Build Tcl 9 (cached)
+        uses: ./.github/actions/tcl9
+      - run: cargo test --workspace
+        env:
+          TCL9_PREFIX: ${{ env.TCL9_PREFIX }}
+
+  # Hybrid TEBC production gates (preview). Opt-in feature `hybrid` links
+  # embedded Tcl 9; fails closed if Tcl 9 cannot be built (no silent skip).
+  hybrid-tebc:
+    name: Hybrid TEBC gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Tcl 9 (cached)
+        uses: ./.github/actions/tcl9
+      - name: Hybrid Pass gates
+        run: scripts/verify-hybrid-gates.sh
+        env:
+          TCL9_PREFIX: ${{ env.TCL9_PREFIX }}
+
+  opcode-runtime:
+    name: Opcode runtime (patched Tcl 9)
+    runs-on: ubuntu-latest
+    env:
+      TCL9_PREFIX: ${{ github.workspace }}/third_party/tcl/runtime/tcl-core-9-0-2
+      LD_LIBRARY_PATH: ${{ github.workspace }}/third_party/tcl/runtime/tcl-core-9-0-2/lib
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache patched Tcl runtime
+        id: opcode-runtime-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/tcl/runtime/tcl-core-9-0-2
+          key: opcode-runtime-${{ runner.os }}-${{ env.TCL_CORE_TAG }}-${{ hashFiles('third_party/tcl/patches/0001-opcode-runtime-hooks.patch', 'scripts/build_tcl9_opcode_runtime.sh') }}
+      - name: Build patched Tcl runtime
+        if: steps.opcode-runtime-cache.outputs.cache-hit != 'true'
+        run: scripts/build_tcl9_opcode_runtime.sh
+      - name: Verify opcode hook exports
+        run: |
+          lib="$(find "$TCL9_PREFIX/lib" -maxdepth 1 -name 'libtcl9.0.*' | head -n 1)"
+          test -n "$lib"
+          nm -D "$lib" | grep 'tcld_opcode_supported'
+          nm -D "$lib" | grep 'tcld_opcode_set_hook'
+          nm -D "$lib" | grep 'tcld_opcode_arm'
+          nm -D "$lib" | grep 'tcld_opcode_current_pc'
+          nm -D "$lib" | grep 'tcld_opcode_current_source'
+      - name: Run opcode runtime tests
+        run: cargo test -p tcld-dbg-ext patched_runtime_ -- --nocapture
+
+  gui:
+    name: GUI (lint, types, build)
+    runs-on: ubuntu-latest
+    # Required since Track 2 exit (2026-07-02): static gates pass on the
+    # runner and guard the frontend.
+    defaults:
+      run:
+        working-directory: apps/tcld-gui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/tcld-gui/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm run build
+
+  gui-tests:
+    name: GUI unit + browser tests
+    runs-on: ubuntu-latest
+    # Required since the B4 addendum close (2026-07-02): the four
+    # runner-specific failures were fixed at the root — the parity manifest
+    # is generated in-job below, the Mod-shortcut tests pin/resolve the
+    # platform instead of assuming macOS, and browser wait ceilings scale
+    # via TCLD_TEST_WAIT_SCALE. Closes gated:gui-tests-runner
+    env:
+      # Multiplies every browser-test wait budget (see
+      # tests/browser-production-harness.ts) so the 2-CPU runner gets
+      # longer ceilings; local runs leave it unset and stay fast.
+      TCLD_TEST_WAIT_SCALE: "3"
+    defaults:
+      run:
+        working-directory: apps/tcld-gui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/tcld-gui/package-lock.json
+      - run: npm ci
+      # The V2 visual-parity test hard-requires the gitignored
+      # .design-parity/manifest.json artifact, so produce it in-job. The
+      # capture is headless (puppeteer launches with --no-sandbox) and also
+      # runs `next build`, so test:unit below reuses the fresh dist/.
+      - run: npm run design:parity
+      - run: npm run test:unit
+
+  tcl-compat:
+    name: Tcl compat (${{ matrix.os }}, tcl ${{ matrix.tcl }})
+    runs-on: ${{ matrix.os }}
+    # Required since Track 3 exit (2026-07-02): all four legs green on
+    # run 28619340412 (C5 ungate — parallel wire suites, Linux notifier
+    # fix, Debian layout discovery, COMPAT-scoped 8.6 checklist).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        tcl: ["8.6", "9.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Tcl 8.6 (Linux)
+        if: matrix.tcl == '8.6' && runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y tcl8.6-dev tcl8.6
+          echo "TCL8_6_PREFIX=/usr" >> "$GITHUB_ENV"
+          echo "TCLD_TCLSH=tclsh8.6" >> "$GITHUB_ENV"
+      - name: Install Tcl 8.6 (macOS)
+        if: matrix.tcl == '8.6' && runner.os == 'macOS'
+        run: |
+          brew install tcl-tk@8
+          echo "TCL8_6_PREFIX=$(brew --prefix tcl-tk@8)" >> "$GITHUB_ENV"
+          echo "TCLD_TCLSH=$(brew --prefix tcl-tk@8)/bin/tclsh8.6" >> "$GITHUB_ENV"
+      - name: Build Tcl 9 (cached)
+        if: matrix.tcl == '9.0'
+        uses: ./.github/actions/tcl9
+      - name: Integration tests (Tcl 9)
+        if: matrix.tcl == '9.0'
+        run: |
+          cargo build -p tcld-dbg-ext --features integration_tclsh
+          cargo test -p tcld-dbg-ext --features integration_tclsh
+        env:
+          TCL9_PREFIX: ${{ env.TCL9_PREFIX }}
+          TCLD_TCLSH: ${{ env.TCL9_PREFIX }}/bin/tclsh9.0
+      # The 8.6 legs run exactly the COMPAT.md 8.6 checklist: the wire
+      # suites against a real tclsh8.6 subprocess (production shape).
+      # The in-process test pool is documented as unrunnable on 8.6 —
+      # its per-thread notifier finalizes after repeated interp
+      # create/delete cycles in one process (COMPAT.md "Tier 1 in-process
+      # test pool on 8.6") — and that is a test-infrastructure limit,
+      # not a runtime gap.
+      - name: Integration tests (Tcl 8.6, COMPAT checklist)
+        if: matrix.tcl == '8.6'
+        run: |
+          cargo build -p tcld-dbg-ext --no-default-features \
+            --features tcl8_6,integration_tclsh
+          cargo test -p tcld-dbg-ext --no-default-features \
+            --features tcl8_6,integration_tclsh \
+            --lib --test wire_real_tclsh --test wire_parity_matrix
+
+  debugger-bundle:
+    name: Debugger bundle (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Tcl 8.6 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tcl8.6-dev tcl8.6
+          echo "TCL8_6_PREFIX=/usr" >> "$GITHUB_ENV"
+          echo "TCLD_TCLSH86=$(command -v tclsh8.6)" >> "$GITHUB_ENV"
+      - name: Install Tcl 8.6 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install tcl-tk@8
+          echo "TCL8_6_PREFIX=$(brew --prefix tcl-tk@8)" >> "$GITHUB_ENV"
+          echo "TCLD_TCLSH86=$(brew --prefix tcl-tk@8)/bin/tclsh8.6" >> "$GITHUB_ENV"
+      - name: Build Tcl 9 (cached)
+        uses: ./.github/actions/tcl9
+      - name: Build isolated loadable nubs
+        run: |
+          cargo build -p tcld
+          cargo build -p tcld-dbg-ext --no-default-features \
+            --features tcl8_6,loadable-extension --target-dir target/ci-nub-tcl86
+          cargo build -p tcld-dbg-ext --no-default-features \
+            --features tcl9,loadable-extension --target-dir target/ci-nub-tcl9
+      - name: Assemble and verify bundle
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          ext=so
+          if [[ "$RUNNER_OS" == macOS ]]; then ext=dylib; fi
+          scripts/package-debug-nubs.sh \
+            "target/ci-nub-tcl86/debug/libtcld_dbg.${ext}" \
+            "target/ci-nub-tcl9/debug/libtcld_dbg.${ext}" \
+            target/ci-debug-bundle "$host"
+          cp target/debug/tcld target/ci-debug-bundle/tcld
+          TCLD_BUNDLE_TARGET="$host" \
+            TCLD_TCLSH9="$TCL9_PREFIX/bin/tclsh9.0" \
+            TCLD_TCL8_BYTECODE_FIXTURE="$PWD/apps/tcld/tests/fixtures/expr.tbc" \
+            scripts/verify-debug-release-bundle.sh target/ci-debug-bundle
+      - name: Debugger PTY terminal contract (Tcl 8.6 and Tcl 9)
+        run: |
+          ext=so
+          if [[ "$RUNNER_OS" == macOS ]]; then ext=dylib; fi
+          TCLD_DEBUG_PTY_TCLSH="$TCLD_TCLSH86" \
+          TCLD_DEBUG_PTY_DYLIB="$PWD/target/ci-nub-tcl86/debug/libtcld_dbg.${ext}" \
+            cargo test -p tcld --features integration_tclsh \
+              --test debug_pty_terminal_contract -- --test-threads=1
+          TCLD_DEBUG_PTY_TCLSH="$TCL9_PREFIX/bin/tclsh9.0" \
+          TCLD_DEBUG_PTY_DYLIB="$PWD/target/ci-nub-tcl9/debug/libtcld_dbg.${ext}" \
+            cargo test -p tcld --features integration_tclsh \
+              --test debug_pty_terminal_contract -- --test-threads=1
+
+  miri:
+    name: Miri (pure crates)
+    runs-on: ubuntu-latest
+    # Miri cannot execute FFI: tcld-syntax and tcld-decompile link
+    # tree-sitter C code, so scope is the genuinely pure crates only.
+    # Main pushes only — it is slow.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    env:
+      # miri ships on nightly only; override the repo's stable pin for
+      # this job (rust-toolchain.toml would otherwise force stable).
+      RUSTUP_TOOLCHAIN: nightly
+      MIRIFLAGS: -Zmiri-disable-isolation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      # NOT in scope: tcld-syntax and tcld-decompile (tree-sitter C), and
+      # tcld-debug-state (its identity tests parse source via tcld-syntax,
+      # hitting the same FFI). tcld-debug-wire's codec tests are pure.
+      - run: >
+          cargo miri test
+          -p tcld-core -p tcld-ir -p tcld-debug-wire
+
+  deny:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories

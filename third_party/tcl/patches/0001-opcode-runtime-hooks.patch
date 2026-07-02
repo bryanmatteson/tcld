@@ -1,0 +1,285 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tcld <noreply@local>
+Date: Fri, 3 Jul 2026 00:00:00 +0000
+Subject: [PATCH] Add Tcl9 opcode callback runtime hooks for debugger
+
+This patch introduces the private callback ABI used by tcld's opcode-level
+debugger. The hot-path integration is one armed-branch in TEBC; debugger
+state lives in the private per-interp ExecEnv rather than Tcl_Interp client
+data.
+---
+ generic/tclExecute.c       |  16 ++++++
+ generic/tclInt.h           |  17 ++++++
+ generic/tcldOpcodeRuntime.c | 140 ++++++++++++++++++++++++++++++++++++++++++++
+ unix/Makefile.in           |   6 ++-
+ win/makefile.vc            |   1 +
+ 5 files changed, 179 insertions(+), 1 deletion(-)
+ create mode 100644 generic/tcldOpcodeRuntime.c
+
+diff --git a/generic/tclExecute.c b/generic/tclExecute.c
+index 37d50410b5..a183e976b1 100644
+--- a/generic/tclExecute.c
++++ b/generic/tclExecute.c
+@@ -806,6 +806,12 @@ TclCreateExecEnv(
+     eePtr->callbackPtr = NULL;
+     eePtr->corPtr = NULL;
+     eePtr->rewind = 0;
++    eePtr->tcldOp.armed = 0;
++    eePtr->tcldOp.fn = NULL;
++    eePtr->tcldOp.clientData = NULL;
++    eePtr->tcldOp.currentPc = -1;
++    eePtr->tcldOp.currentCodePtr = NULL;
++    eePtr->tcldOp.sourcePathObj = NULL;
+ 
+     esPtr->prevPtr = NULL;
+     esPtr->nextPtr = NULL;
+@@ -880,6 +886,9 @@ TclDeleteExecEnv(
+ 
+     TclDecrRefCount(eePtr->constants[0]);
+     TclDecrRefCount(eePtr->constants[1]);
++    if (eePtr->tcldOp.sourcePathObj != NULL) {
++	Tcl_DecrRefCount(eePtr->tcldOp.sourcePathObj);
++    }
+     if (eePtr->callbackPtr && !cachedInExit) {
+ 	Tcl_Panic("Deleting execEnv with pending TEOV callbacks!");
+     }
+@@ -2268,6 +2277,13 @@ TEBCresume(
+ 
+     TCL_DTRACE_INST_NEXT();
+ 
++    if (iPtr->execEnvPtr->tcldOp.armed) {
++	DECACHE_STACK_INFO();
++	TcldOpcodeAtBoundary(interp, codePtr, pc - codePtr->codeStart,
++		codePtr->flags, iPtr->numLevels);
++	CACHE_STACK_INFO();
++    }
++
+     if (inst == INST_LOAD_SCALAR1) {
+ 	goto instLoadScalar1;
+     } else if (inst == INST_PUSH1) {
+diff --git a/generic/tclInt.h b/generic/tclInt.h
+index f088545a49..064652b066 100644
+--- a/generic/tclInt.h
++++ b/generic/tclInt.h
+@@ -1659,6 +1659,22 @@ typedef struct CoroutineData {
+ 				 * coroutine is busy. */
+ } CoroutineData;
+ 
++typedef int (*TcldOpcodeHook)(void *clientData, Tcl_Interp *interp,
++	Tcl_Size pcOffset, unsigned int bcFlags, Tcl_Size numLevels);
++
++typedef struct TcldOpcodeCtl {
++    int armed;
++    TcldOpcodeHook fn;
++    void *clientData;
++    Tcl_Size currentPc;
++    const void *currentCodePtr;
++    Tcl_Obj *sourcePathObj;
++} TcldOpcodeCtl;
++
++MODULE_SCOPE int	TcldOpcodeAtBoundary(Tcl_Interp *interp,
++			    const void *codePtr, Tcl_Size pcOffset,
++			    unsigned int bcFlags, Tcl_Size numLevels);
++
+ typedef struct ExecEnv {
+     ExecStack *execStackPtr;	/* Points to the first item in the evaluation
+ 				 * stack on the heap. */
+@@ -1671,6 +1687,7 @@ typedef struct ExecEnv {
+     int rewind;			/* Set when exception trapping is disabled
+ 				 * because a context is being deleted (e.g.,
+ 				 * the current coroutine has been deleted). */
++    TcldOpcodeCtl tcldOp;	/* Private tcld opcode debugger hook state. */
+ } ExecEnv;
+ 
+ #define COR_IS_SUSPENDED(corPtr) \
+diff --git a/generic/tcldOpcodeRuntime.c b/generic/tcldOpcodeRuntime.c
+new file mode 100644
+index 0000000000..c9a223d1cc
+--- /dev/null
++++ b/generic/tcldOpcodeRuntime.c
+@@ -0,0 +1,140 @@
++#include "tclInt.h"
++#include "tclCompile.h"
++
++static TcldOpcodeCtl *
++GetOpcodeCtl(Tcl_Interp *interp)
++{
++    Interp *iPtr = (Interp *) interp;
++
++    if (iPtr == NULL || iPtr->execEnvPtr == NULL) {
++	return NULL;
++    }
++    return &iPtr->execEnvPtr->tcldOp;
++}
++
++static void
++ClearOpcodeSource(TcldOpcodeCtl *ctlPtr)
++{
++    if (ctlPtr->sourcePathObj != NULL) {
++	Tcl_DecrRefCount(ctlPtr->sourcePathObj);
++	ctlPtr->sourcePathObj = NULL;
++    }
++}
++
++int
++tcld_opcode_supported(Tcl_Interp *interp)
++{
++    return GetOpcodeCtl(interp) != NULL;
++}
++
++int
++tcld_opcode_set_hook(Tcl_Interp *interp, TcldOpcodeHook fn, void *clientData)
++{
++    TcldOpcodeCtl *ctlPtr = GetOpcodeCtl(interp);
++
++    if (ctlPtr == NULL) {
++	return TCL_ERROR;
++    }
++    ctlPtr->fn = fn;
++    ctlPtr->clientData = clientData;
++    if (fn == NULL) {
++	ctlPtr->armed = 0;
++    }
++    return TCL_OK;
++}
++
++void
++tcld_opcode_arm(Tcl_Interp *interp, int on)
++{
++    TcldOpcodeCtl *ctlPtr = GetOpcodeCtl(interp);
++
++    if (ctlPtr != NULL) {
++	ctlPtr->armed = (on != 0);
++	if (!ctlPtr->armed) {
++	    ctlPtr->currentPc = -1;
++	    ctlPtr->currentCodePtr = NULL;
++	    ClearOpcodeSource(ctlPtr);
++	}
++    }
++}
++
++int
++tcld_opcode_current_pc(Tcl_Interp *interp, Tcl_Size *pcOffOut)
++{
++    TcldOpcodeCtl *ctlPtr = GetOpcodeCtl(interp);
++
++    if (ctlPtr == NULL || pcOffOut == NULL || ctlPtr->currentPc < 0) {
++	return TCL_ERROR;
++    }
++    *pcOffOut = ctlPtr->currentPc;
++    return TCL_OK;
++}
++
++int
++tcld_opcode_current_source(
++    Tcl_Interp *interp,
++    const char **fileOut,
++    Tcl_Size *lineOut)
++{
++    TcldOpcodeCtl *ctlPtr = GetOpcodeCtl(interp);
++    ByteCode *codePtr;
++    CmdFrame frame;
++    Tcl_Size pcOffset;
++
++    if (ctlPtr == NULL || fileOut == NULL || lineOut == NULL) {
++	return -1;
++    }
++    if (ctlPtr->currentCodePtr == NULL || ctlPtr->currentPc < 0) {
++	ClearOpcodeSource(ctlPtr);
++	return -1;
++    }
++
++    codePtr = (ByteCode *) ctlPtr->currentCodePtr;
++    pcOffset = ctlPtr->currentPc;
++    if ((codePtr->flags & TCL_BYTECODE_PRECOMPILED)
++	    || pcOffset < 0 || pcOffset >= codePtr->numCodeBytes) {
++	ClearOpcodeSource(ctlPtr);
++	return 0;
++    }
++
++    memset(&frame, 0, sizeof(frame));
++    frame.type = TCL_LOCATION_BC;
++    frame.data.tebc.codePtr = codePtr;
++    frame.data.tebc.pc = (char *) (codePtr->codeStart + pcOffset);
++    TclGetSrcInfoForPc(&frame);
++
++    ClearOpcodeSource(ctlPtr);
++
++    if (frame.type != TCL_LOCATION_SOURCE || frame.data.eval.path == NULL
++	    || frame.line == NULL || frame.nline <= 0) {
++	return 0;
++    }
++
++    ctlPtr->sourcePathObj = frame.data.eval.path;
++    *fileOut = Tcl_GetString(ctlPtr->sourcePathObj);
++    *lineOut = frame.line[0];
++    return 1;
++}
++
++int
++TcldOpcodeAtBoundary(
++    Tcl_Interp *interp,
++    const void *codePtr,
++    Tcl_Size pcOffset,
++    unsigned int bcFlags,
++    Tcl_Size numLevels)
++{
++    TcldOpcodeCtl *ctlPtr = GetOpcodeCtl(interp);
++
++    if (ctlPtr == NULL) {
++	return TCL_OK;
++    }
++
++    ctlPtr->currentPc = pcOffset;
++    ctlPtr->currentCodePtr = codePtr;
++    if (!ctlPtr->armed || ctlPtr->fn == NULL) {
++	return TCL_OK;
++    }
++
++    return ctlPtr->fn(ctlPtr->clientData, interp, pcOffset, bcFlags, numLevels);
++}
+diff --git a/unix/Makefile.in b/unix/Makefile.in
+index 2c0ddaa688..c1bc33245b 100644
+--- a/unix/Makefile.in
++++ b/unix/Makefile.in
+@@ -305,7 +305,7 @@ GENERIC_OBJS = regcomp.o regexec.o regfree.o regerror.o tclAlloc.o \
+ 	tclCompCmds.o tclCompCmdsGR.o tclCompCmdsSZ.o tclCompExpr.o \
+ 	tclCompile.o tclConfig.o tclDate.o tclDictObj.o tclDisassemble.o \
+ 	tclEncoding.o tclEnsemble.o \
+-	tclEnv.o tclEvent.o tclExecute.o tclFCmd.o tclFileName.o tclGet.o \
++	tclEnv.o tclEvent.o tclExecute.o tcldOpcodeRuntime.o tclFCmd.o tclFileName.o tclGet.o \
+ 	tclHash.o tclHistory.o \
+ 	tclIcu.o tclIndexObj.o tclInterp.o tclIO.o tclIOCmd.o \
+ 	tclIORChan.o tclIORTrans.o tclIOGT.o tclIOSock.o tclIOUtil.o \
+@@ -430,6 +430,7 @@ GENERIC_SRCS = \
+ 	$(GENERIC_DIR)/tclEnv.c \
+ 	$(GENERIC_DIR)/tclEvent.c \
+ 	$(GENERIC_DIR)/tclExecute.c \
++	$(GENERIC_DIR)/tcldOpcodeRuntime.c \
+ 	$(GENERIC_DIR)/tclFCmd.c \
+ 	$(GENERIC_DIR)/tclFileName.c \
+ 	$(GENERIC_DIR)/tclGet.c \
+@@ -1369,6 +1370,9 @@ tclEvent.o: $(GENERIC_DIR)/tclEvent.c tclUuid.h
+ tclExecute.o: $(GENERIC_DIR)/tclExecute.c $(COMPILEHDR) $(MATHHDRS) $(NREHDR)
+ 	$(CC) -c $(CC_SWITCHES) $(GENERIC_DIR)/tclExecute.c
+ 
++tcldOpcodeRuntime.o: $(GENERIC_DIR)/tcldOpcodeRuntime.c $(COMPILEHDR)
++	$(CC) -c $(CC_SWITCHES) $(GENERIC_DIR)/tcldOpcodeRuntime.c
++
+ tclFCmd.o: $(GENERIC_DIR)/tclFCmd.c
+ 	$(CC) -c $(CC_SWITCHES) $(GENERIC_DIR)/tclFCmd.c
+ 
+diff --git a/win/makefile.vc b/win/makefile.vc
+index 175c4b2612..78c3b82bc1 100644
+--- a/win/makefile.vc
++++ b/win/makefile.vc
+@@ -272,6 +272,7 @@ COREOBJS = \
+ 	$(TMP_DIR)\tclEnv.obj \
+ 	$(TMP_DIR)\tclEvent.obj \
+ 	$(TMP_DIR)\tclExecute.obj \
++	$(TMP_DIR)\tcldOpcodeRuntime.obj \
+ 	$(TMP_DIR)\tclFCmd.obj \
+ 	$(TMP_DIR)\tclFileName.obj \
+ 	$(TMP_DIR)\tclGet.obj \
+-- 
+2.0.0
