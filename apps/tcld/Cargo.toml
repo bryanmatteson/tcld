@@ -8,15 +8,15 @@ authors.workspace = true
 default-run = "tcld"
 
 [features]
-# Production default keeps the CLI free of an embedded Tcl link (batch
-# decompile/explore/host-nub debug work without hybrid). The hybrid TEBC
-# preview is **opt-in**:
+# The default CLI does not link an embedded Tcl runtime. Batch commands,
+# explore, and host debugging work without hybrid. Enable the TEBC VM with:
 #   cargo build -p tcld --features hybrid
 #   scripts/verify-hybrid-gates.sh
 default = []
 integration_tclsh = []
 # In-process TEBC VM + embedded Tcl 9 WorldHost (requires Tcl 9 headers/libs).
 # Enables `tcld run` hybrid path and hybrid `tcld debug` for `.tbc`.
+hybrid = ["dep:tcld-vm", "tcld-vm/host", "tcld-vm/debug"]
 
 [dependencies]
 tcld-core = { path = "../../crates/tcld-core" }
@@ -26,6 +26,7 @@ tcld-explore = { path = "../../crates/tcld-explore" }
 tcld-syntax = { path = "../../crates/tcld-syntax" }
 termosaic = { version = "0.3", path = "../../../termosaic/crates/termosaic", default-features = false }
 tcld-tui = { path = "../../crates/tcld-tui" }
+tcld-vm = { path = "../../crates/tcld-vm", optional = true, default-features = false }
 crossterm = "0.29"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
 clap = { version = "4", features = ["derive", "env"] }

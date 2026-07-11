@@ -1,0 +1,31 @@
+[package]
+name = "tcld-vm"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Hybrid TEBC bytecode engine (VM loop + optional embedded Tcl host bridge)"
+
+[features]
+default = ["host", "debug"]
+# Link/use embedded Tcl via tcld-interp for WorldHost invokes (hybrid mode).
+host = ["dep:tcld-interp", "dep:tcl-sys"]
+# Model B pause hooks and debug surfaces used by apps/tcld hybrid debug.
+debug = []
+
+[dependencies]
+tcld-core = { path = "../tcld-core" }
+tcld-decompile = { path = "../tcld-decompile" }
+thiserror = "1"
+num-bigint = "0.4"
+num-traits = "0.2"
+tcl-sys = { path = "../tcl-sys", default-features = false, features = ["tcl9"], optional = true }
+tcld-interp = { path = "../tcld-interp", default-features = false, features = ["tcl9"], optional = true }
+
+[dev-dependencies]
+sha2 = "0.10"
+static_assertions = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"

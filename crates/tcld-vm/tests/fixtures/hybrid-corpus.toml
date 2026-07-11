@@ -1,0 +1,372 @@
+version = 1
+
+[[synthetic_proof]]
+group = "pass_f1_f12"
+test = "f1_hand_built_arith_jump, f2_host_puts, f3_local_set_append, f4_proc_tbc, f5_catch1_tbc, f6_break_tbc, f7_cont2_happy_path, f8_public_fixture_registration_count, f9_hostvar_synthetic, f9b_upvar_vm_to_vm, f10_trap_suite, f11_vm_strict_puts_denied, f12_debug_hybrid_pause_shape"
+
+[[synthetic_proof]]
+group = "catch_completion"
+test = "catch_captures_return_break_and_continue_codes"
+
+[[synthetic_proof]]
+group = "foreach_old_new"
+test = "foreach_legacy_assigns_groups_and_fills_missing_values, foreach_new_uses_frame_owned_state_and_cleans_stack"
+
+[[synthetic_proof]]
+group = "jump_tables"
+test = "jump_tables_consume_keys, foreach_and_jump_tables_reject_invalid_aux_state_and_targets"
+
+[[synthetic_proof]]
+group = "dict_core"
+test = "dict_lvt_mutations_set_unset_incr_append_and_lappend, dict_expand_recombine_and_iteration_follow_compiled_protocols"
+
+[[synthetic_proof]]
+group = "expand"
+test = "expanded_invoke_handles_lists_empty_marks_and_parse_errors, nested_expansion_and_invoke_replace_preserve_stack_protocols"
+
+[[synthetic_proof]]
+group = "variables"
+test = "promoted_integer_string_regexp_syntax_and_variable_edges_match_tcl, host_value_string_and_clock_protocols_match_tcl, host_frame_mirror_round_trips_arrays_new_locals_unsets_and_vm_links, nsupvar_links_namespace_variable_and_is_denied_before_dispatch_in_strict"
+
+[[synthetic_proof]]
+group = "namespace"
+test = "frame_namespace_resolves_sibling_vm_proc_relative_host_and_ns_current"
+
+[[synthetic_proof]]
+group = "semantic_failures"
+test = "stable_semantic_failure_oracles_are_exact"
+
+[[scenario]]
+id = "pass.proc"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/proc.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = "{TEST : TEST} {TEST > TEST}"
+expect_stdout = ""
+expect_stderr = ""
+forbidden_classes = ["Trap"]
+
+[[scenario.setup]]
+kind = "host_eval"
+script = "set ::tcld::corpus_marker ready"
+
+[[scenario]]
+id = "catch.error"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/catch1.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = "PASS"
+expect_stdout = ""
+expect_stderr = ""
+
+[[scenario]]
+id = "loop.break"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/break.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = "1.2..3...4....5.....6......7.......8........DONE"
+expect_stdout = ""
+expect_stderr = ""
+
+[[scenario]]
+id = "loop.continue_eval"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/cont.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = "2.4..6...8....10.....12......14.......16........DONE"
+expect_stdout = ""
+expect_stderr = ""
+required_opcodes = ["EvalStk"]
+
+[[scenario]]
+id = "foreach.real_fixture"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/foreach.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = "DONE"
+expect_stdout = ""
+expect_stderr = ""
+
+[[scenario]]
+id = "expr.full"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/expr.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = "40"
+expect_stdout = ""
+expect_stderr = ""
+required_opcodes = ["ExprStk"]
+
+[[scenario]]
+id = "expr.one"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/expr1.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = "40"
+expect_stdout = ""
+expect_stderr = ""
+
+[[scenario]]
+id = "expr.two"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/expr2.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = "PASS"
+expect_stdout = ""
+expect_stderr = ""
+
+[[scenario]]
+id = "fixture.is_valid_empty"
+kind = "body"
+path = "testing/fixtures/public/public_complex_fixture.tbc"
+mode = "hybrid"
+invoke = "::fixture::isValidContent"
+args = [""]
+expect_code = 0
+expect_result = "0"
+expect_stdout = ""
+expect_stderr = ""
+forbidden_classes = ["Trap"]
+
+[[scenario]]
+id = "catch.result_variable"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/catch.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = "PASS"
+expect_stdout = ""
+expect_stderr = ""
+forbidden_classes = ["Trap"]
+
+[[scenario]]
+id = "loop.break_while"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/break2.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = "1.2..3...4....5.....6......7.......8........DONE"
+expect_stdout = ""
+expect_stderr = ""
+
+[[scenario]]
+id = "loop.continue_foreach"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/cont1.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = "DONE"
+expect_stdout = ""
+expect_stderr = ""
+
+[[scenario]]
+id = "loop.continue_while"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/cont2.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = "2.4..6...8....10.....12......14.......16........DONE"
+expect_stdout = ""
+expect_stderr = ""
+
+[[scenario]]
+id = "eval.for"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/for.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = "1.2..3...4....5.....6......7.......8........DONE"
+expect_stdout = ""
+expect_stderr = ""
+required_opcodes = ["EvalStk"]
+
+[[scenario]]
+id = "eval.while"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/while.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = "1.2..3...4....5.....6......7.......8........DONE"
+expect_stdout = ""
+expect_stderr = ""
+
+[[scenario]]
+id = "variables.interp_boundary"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/interp.tbc"
+mode = "hybrid"
+args = []
+expect_code = 1
+expect_result = "invalid command name \"test\""
+expect_stdout = ""
+expect_stderr = ""
+expect_error_code = "TCL LOOKUP COMMAND test"
+expect_error_info_contains = "invalid command name \"test\""
+forbidden_classes = ["Trap"]
+
+[[scenario]]
+id = "proc.continue"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/proccontinue1.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = ".0.1.2.3.DONE"
+expect_stdout = ""
+expect_stderr = ""
+
+[[scenario]]
+id = "proc.string_case"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/procvar2.tbc"
+mode = "hybrid"
+args = []
+expect_code = 0
+expect_result = "TEST test test TEST"
+expect_stdout = ""
+expect_stderr = ""
+
+[[scenario]]
+id = "fixture.is_valid_text"
+kind = "body"
+path = "testing/fixtures/public/public_complex_fixture.tbc"
+mode = "hybrid"
+invoke = "::fixture::isValidContent"
+args = ["abc"]
+expect_code = 0
+expect_result = "1"
+expect_stdout = ""
+expect_stderr = ""
+forbidden_classes = ["Trap"]
+
+[[scenario]]
+id = "fixture.calculate_interval"
+kind = "body"
+path = "testing/fixtures/public/public_complex_fixture.tbc"
+mode = "hybrid"
+invoke = "::fixture::calculateInterval"
+args = ["2h", "m"]
+expect_code = 0
+expect_result = "120"
+expect_stdout = ""
+expect_stderr = ""
+forbidden_classes = ["Trap"]
+
+[[scenario]]
+id = "fixture.proper_time"
+kind = "body"
+path = "testing/fixtures/public/public_complex_fixture.tbc"
+mode = "hybrid"
+invoke = "::fixture::getProperTimeShow"
+args = ["61"]
+expect_code = 0
+expect_result = " 1 minute(s) 1 second(s)"
+expect_stdout = ""
+expect_stderr = ""
+forbidden_classes = ["Trap"]
+
+[[scenario]]
+id = "semantic.break1_missing_top"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/break1.tbc"
+mode = "hybrid"
+args = []
+expect_code = 1
+expect_result = "can't read \"top\": no such variable"
+expect_stdout = ""
+expect_stderr = ""
+expect_error_code = "TCL LOOKUP VARNAME top"
+expect_error_info_contains = "can't read \"top\""
+forbidden_classes = ["Trap"]
+
+[[scenario]]
+id = "semantic.procbod1_not_procedure"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/procbod1.tbc"
+mode = "hybrid"
+args = []
+expect_code = 1
+expect_result = "\"a\" isn't a procedure"
+expect_stdout = ""
+expect_stderr = ""
+expect_error_code = "TCL LOOKUP PROCEDURE a"
+expect_error_info_contains = "isn't a procedure"
+forbidden_classes = ["Trap"]
+
+[[scenario]]
+id = "semantic.procbod2_not_procedure"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/procbod2.tbc"
+mode = "hybrid"
+args = []
+expect_code = 1
+expect_result = "\"a\" isn't a procedure"
+expect_stdout = ""
+expect_stderr = ""
+expect_error_code = "TCL LOOKUP PROCEDURE a"
+expect_error_info_contains = "isn't a procedure"
+forbidden_classes = ["Trap"]
+
+[[scenario]]
+id = "semantic.procbod3_not_procedure"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/procbod3.tbc"
+mode = "hybrid"
+args = []
+expect_code = 1
+expect_result = "\"a\" isn't a procedure"
+expect_stdout = ""
+expect_stderr = ""
+expect_error_code = "TCL LOOKUP PROCEDURE a"
+expect_error_info_contains = "isn't a procedure"
+forbidden_classes = ["Trap"]
+
+[[scenario]]
+id = "semantic.procshd2_missing_x"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/procshd2.tbc"
+mode = "hybrid"
+args = []
+expect_code = 1
+expect_result = "can't read \"x\": no such variable"
+expect_stdout = ""
+expect_stderr = ""
+expect_error_code = ""
+expect_error_info_contains = ""
+forbidden_classes = ["Trap"]
+
+[[scenario]]
+id = "semantic.procvar1_missing_x"
+kind = "top_level"
+path = "apps/tcld/tests/fixtures/procvar1.tbc"
+mode = "hybrid"
+args = []
+expect_code = 1
+expect_result = "can't read \"x\": no such variable"
+expect_stdout = ""
+expect_stderr = ""
+expect_error_code = ""
+expect_error_info_contains = ""
+forbidden_classes = ["Trap"]
