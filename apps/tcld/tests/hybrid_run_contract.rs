@@ -128,13 +128,10 @@ fn hybrid_module_source_never_mentions_decompile_to_temp() {
             !backend.contains("decompile_to_temp"),
             "hybrid backend must not reference decompile_to_temp (I1)"
         );
-        let hybrid_app = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/debug/hybrid_app.rs"
-        ));
+        let app = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/debug/app.rs"));
         assert!(
-            !hybrid_app.contains("decompile_to_temp"),
-            "hybrid TUI must not reference decompile_to_temp (I1)"
+            !app.contains("decompile_to_temp"),
+            "canonical debugger app must not choose or invoke decompilation (I1)"
         );
     }
 }

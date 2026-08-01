@@ -21,6 +21,29 @@ pub enum PauseReason {
     InstructionBreakpoint,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceUnitChange {
+    Registered,
+    Revalidated,
+}
+
+impl SourceUnitChange {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Registered => "registered",
+            Self::Revalidated => "revalidated",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "registered" => Some(Self::Registered),
+            "revalidated" => Some(Self::Revalidated),
+            _ => None,
+        }
+    }
+}
+
 impl PauseReason {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -90,6 +113,9 @@ pub enum WireEvent {
     },
     BlocksRevalidated {
         block: String, // "proc:foo" | "file:/path" | "anon:HEX"
+        generation: u64,
+        source_path: Option<String>,
+        change: SourceUnitChange,
     },
     NubStarted {
         pid: u32,
@@ -219,8 +245,18 @@ impl WireEvent {
                 push_kv(&mut parts, "breakpoint", breakpoint.clone());
                 push_kv(&mut parts, "message", message.clone());
             }
-            Self::BlocksRevalidated { block } => {
+            Self::BlocksRevalidated {
+                block,
+                generation,
+                source_path,
+                change,
+            } => {
                 push_kv(&mut parts, "block", block.clone());
+                push_kv(&mut parts, "generation", generation.to_string());
+                push_kv(&mut parts, "change", change.as_str().to_owned());
+                if let Some(path) = source_path {
+                    push_kv(&mut parts, "source_path", path.clone());
+                }
             }
             Self::NubStarted {
                 pid,
@@ -329,6 +365,28 @@ impl WireEvent {
             }),
             "blocks_revalidated" => Ok(Self::BlocksRevalidated {
                 block: take_required(&dict, &kind, "block")?,
+                generation: dict
+                    .get("generation")
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .map_err(|_| EventParseError::BadField {
+                        kind: kind.clone(),
+                        field: "generation".into(),
+                        reason: "must be u64".into(),
+                    })?
+                    .unwrap_or(0),
+                source_path: dict.get("source_path").cloned(),
+                change: dict
+                    .get("change")
+                    .map(|value| {
+                        SourceUnitChange::parse(value).ok_or_else(|| EventParseError::BadField {
+                            kind: kind.clone(),
+                            field: "change".into(),
+                            reason: "must be registered or revalidated".into(),
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or(SourceUnitChange::Revalidated),
             }),
             "nub_started" => Ok(Self::NubStarted {
                 pid: take_required(&dict, &kind, "pid")?.parse().map_err(|_| {
@@ -500,6 +558,9 @@ mod tests {
     fn round_trip_blocks_revalidated() {
         round_trip(WireEvent::BlocksRevalidated {
             block: "proc:foo::bar".into(),
+            generation: 3,
+            source_path: Some("/tmp/lib.tcl".into()),
+            change: SourceUnitChange::Revalidated,
         });
     }
 

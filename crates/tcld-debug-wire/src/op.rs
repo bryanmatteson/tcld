@@ -150,6 +150,12 @@ pub enum Op {
     ProcBody {
         qname: String,
     },
+    /// Read source bytes from the nub's canonical BlockRegistry. The block
+    /// id must come from a registration/pause event; controllers must not
+    /// synthesize it from a display filename.
+    BlockSource {
+        block: String,
+    },
     ProcLocation {
         qname: String,
     },
@@ -250,6 +256,7 @@ impl Op {
             Self::InstructionBreakpoints { .. } => "instruction_breakpoints",
             Self::ProcList => "proc_list",
             Self::ProcBody { .. } => "proc_body",
+            Self::BlockSource { .. } => "block_source",
             Self::ProcLocation { .. } => "proc_location",
             Self::BlockDisable { .. } => "block_disable",
             Self::BlockEnable { .. } => "block_enable",
@@ -349,6 +356,7 @@ impl Op {
             | Self::BlockEnable { qname } => {
                 parts.push(qname.clone());
             }
+            Self::BlockSource { block } => parts.push(block.clone()),
             Self::BpSetIgnore { id, count } => {
                 parts.push(id.clone());
                 parts.push(count.to_string());
@@ -573,6 +581,7 @@ impl Op {
             }
             "bp_validate" => one_arg_qname(name, &rest, |q| Self::BpValidate { qname: q }),
             "proc_body" => one_arg_qname(name, &rest, |q| Self::ProcBody { qname: q }),
+            "block_source" => one_arg_qname(name, &rest, |block| Self::BlockSource { block }),
             "proc_location" => one_arg_qname(name, &rest, |q| Self::ProcLocation { qname: q }),
             "block_disable" => one_arg_qname(name, &rest, |q| Self::BlockDisable { qname: q }),
             "block_enable" => one_arg_qname(name, &rest, |q| Self::BlockEnable { qname: q }),
@@ -876,6 +885,13 @@ mod tests {
         round_trip(Op::SlaveList);
         round_trip(Op::IgnoreError);
         round_trip(Op::Quit);
+    }
+
+    #[test]
+    fn round_trip_owner_block_source() {
+        round_trip(Op::BlockSource {
+            block: "anon:0123456789abcdef".into(),
+        });
     }
 
     #[test]

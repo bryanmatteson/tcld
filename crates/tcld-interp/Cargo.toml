@@ -1,16 +1,16 @@
 [package]
-name = "tcld-interp"
-edition.workspace = true
-version.workspace = true
-license.workspace = true
-repository.workspace = true
-authors.workspace = true
+    authors.workspace    = true
+    edition.workspace    = true
+    license.workspace    = true
+    name                 = "tcld-interp"
+    repository.workspace = true
+    version.workspace    = true
 
 [features]
-default = ["tcl9"]
-tcl8_5 = ["tcl-sys/tcl8_5"]
-tcl8_6 = ["tcl-sys/tcl8_6"]
-tcl9 = ["tcl-sys/tcl9"]
+    default = ["tcl9"]
+    tcl8_5  = ["tcl-sys/tcl8_5"]
+    tcl8_6  = ["tcl-sys/tcl8_6"]
+    tcl9    = ["tcl-sys/tcl9"]
 
 [dependencies]
-tcl-sys = { path = "../tcl-sys", default-features = false }
+    tcl-sys.workspace = true

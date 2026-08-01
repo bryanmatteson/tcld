@@ -101,6 +101,16 @@ impl CommandRegistry {
         self.procs.len()
     }
 
+    pub fn vm_proc_names(&self) -> Vec<String> {
+        let mut names = self
+            .procs
+            .keys()
+            .map(|name| name.as_str_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
     pub fn resolve(
         &self,
         cmd_word: &ByteString,

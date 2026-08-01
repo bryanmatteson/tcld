@@ -191,11 +191,17 @@ with tempfile.TemporaryDirectory(prefix="tcld-release-debug-") as root:
     output = bytearray()
     deadline = time.monotonic() + 12
     passed = False
+    mapped = False
     while time.monotonic() < deadline:
         ready, _, _ = select.select([fd], [], [], 0.2)
         if ready:
             drain(fd, output)
-        if any(maps_expected_nub(child) for child in descendants(pid)):
+        mapped = mapped or any(maps_expected_nub(child) for child in descendants(pid))
+        # Mapping can occur before Crossterm has installed its input loop. Do
+        # not send Ctrl-C until the packaged debugger has rendered a real
+        # paused frame, or the keystroke can race initialization and hang the
+        # verifier despite a healthy bundle.
+        if mapped and b"tcld debug" in output and b"[Paused]" in output:
             passed = True
             break
 
@@ -215,7 +221,7 @@ with tempfile.TemporaryDirectory(prefix="tcld-release-debug-") as root:
         os.close(fd)
         try:
             os.killpg(pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
         kill_deadline = time.monotonic() + 3
         while time.monotonic() < kill_deadline:
@@ -230,6 +236,7 @@ with tempfile.TemporaryDirectory(prefix="tcld-release-debug-") as root:
     if status is None:
         raise SystemExit(f"packaged tcld debug did not exit after verification with {abi}")
     if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+        sys.stderr.write(output.decode("utf-8", "replace"))
         raise SystemExit(f"packaged tcld debug exited abnormally with {abi}: {status}")
     print(f"packaged tcld debug ({mode}) mapped {expected_nub} with {abi}")
 PY
@@ -238,6 +245,27 @@ PY
 if [[ -z "$binary" ]]; then
   echo "packaged tcld executable not found under $bundle" >&2
   exit 1
+fi
+
+# Release archives are the host-debugger distribution. A native archive must
+# advertise an explicit Hybrid/VmStrict request as unavailable instead of
+# silently routing it to source reconstruction. Cross-target jobs inspect the
+# binary but cannot execute it, so their runtime check remains on the matching
+# target's release job.
+host_triple=$(rustc -vV | sed -n 's/^host: //p')
+if [[ -z "$target_triple" || "$target_triple" == "$host_triple" ]]; then
+  hybrid_probe=$bundle/tcld-release-hybrid-probe.tcl
+  printf 'set release_hybrid_probe 1\n' > "$hybrid_probe"
+  set +e
+  hybrid_output=$("$binary" debug --backend=hybrid "$hybrid_probe" 2>&1)
+  hybrid_status=$?
+  set -e
+  rm -f "$hybrid_probe"
+  if [[ "$hybrid_status" -ne 3 ]] || [[ "$hybrid_output" != hybrid_unavailable:* ]]; then
+    printf '%s\n' "$hybrid_output" >&2
+    echo "packaged tcld must report hybrid_unavailable with exit 3" >&2
+    exit 1
+  fi
 fi
 if [[ "$(uname -s)" == Darwin ]]; then
   if otool -L "$binary" | grep -E 'libtcl(8|9|\.)|/Cellar/tcl|/opt/homebrew/opt/tcl'; then

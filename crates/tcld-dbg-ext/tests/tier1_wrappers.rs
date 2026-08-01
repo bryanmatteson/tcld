@@ -14,7 +14,9 @@ use tcl_sys::{
 };
 use tcld_dbg::step_engine;
 use tcld_dbg::wrappers;
-use tcld_debug_state::{AppState, BlockId, BreakpointKind, DebugEvent, DebugState, Location};
+use tcld_debug_state::{
+    AppState, BlockChange, BlockId, BreakpointKind, DebugEvent, DebugState, Location,
+};
 
 /// Serializes interp creation across test threads. Concurrent
 /// `Tcl_Init` calls race Tcl's process-global path/VFS state: `file
@@ -187,6 +189,110 @@ fn proc_redefinition_bumps_block_version() {
         step_engine::uninstall(interp).expect("uninstall");
         Tcl_DeleteInterp(interp);
     }
+}
+
+#[test]
+fn nested_source_owner_stack_unwinds_and_reports_definition_provenance() {
+    let interp = fresh_interp();
+    let (_state, spy) = install_full_engine(interp);
+    let root = std::env::temp_dir().join(format!(
+        "tcld-source-owner-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let grandchild = root.join("grandchild.tcl");
+    let child = root.join("child.tcl");
+    let failing = root.join("failing.tcl");
+    std::fs::write(&grandchild, "set ::grandchild_loaded 1\n").unwrap();
+    std::fs::write(
+        &child,
+        format!(
+            "source {{{}}}\nproc ::from_child {{}} {{ set value child }}\neval {{set ::child_eval dynamic}}\n",
+            grandchild.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &failing,
+        format!("source {{{}}}\n", root.join("missing.tcl").display()),
+    )
+    .unwrap();
+
+    eval(interp, &format!("source {{{}}}", child.display())).expect("nested source succeeds");
+    let child = child.canonicalize().unwrap();
+    let grandchild = grandchild.canonicalize().unwrap();
+    let events = spy.events();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        DebugEvent::BlocksRevalidated {
+            block: BlockId::File(path),
+            source_path: Some(owner),
+            ..
+        } if path.as_ref() == child.to_string_lossy() && owner.as_ref() == child.to_string_lossy()
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        DebugEvent::BlocksRevalidated {
+            block: BlockId::File(path),
+            source_path: Some(owner),
+            ..
+        } if path.as_ref() == grandchild.to_string_lossy() && owner.as_ref() == grandchild.to_string_lossy()
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        DebugEvent::BlocksRevalidated {
+            block: BlockId::ProcBody(name),
+            source_path: Some(owner),
+            ..
+        } if name.as_ref() == "from_child" && owner.as_ref() == child.to_string_lossy()
+    )));
+    let initial_child_generation = events
+        .iter()
+        .find_map(|event| match event {
+            DebugEvent::BlocksRevalidated {
+                block: BlockId::File(path),
+                generation,
+                change: BlockChange::Registered,
+                ..
+            } if path.as_ref() == child.to_string_lossy() => Some(*generation),
+            _ => None,
+        })
+        .expect("initial child registration");
+
+    spy.clear();
+    std::fs::write(&child, "set ::child_reloaded 1\n").unwrap();
+    eval(interp, &format!("source {{{}}}", child.display())).expect("changed source reloads");
+    assert!(spy.events().iter().any(|event| matches!(
+        event,
+        DebugEvent::BlocksRevalidated {
+            block: BlockId::File(path),
+            generation,
+            change: BlockChange::Revalidated,
+            ..
+        } if path.as_ref() == child.to_string_lossy() && *generation > initial_child_generation
+    )));
+    let ctx = step_engine::lookup_ctx(interp).expect("engine context");
+    assert!(unsafe { &(*ctx).active_source_files }.is_empty());
+    assert!(unsafe { &(*ctx).active_dynamic_blocks }.is_empty());
+
+    let caught = eval(
+        interp,
+        &format!("catch {{source {{{}}}}} message", failing.display()),
+    )
+    .expect("source error is caught");
+    assert_eq!(caught, "1");
+    assert!(unsafe { &(*ctx).active_source_files }.is_empty());
+    assert!(unsafe { &(*ctx).active_dynamic_blocks }.is_empty());
+
+    unsafe {
+        step_engine::uninstall(interp).expect("uninstall");
+        Tcl_DeleteInterp(interp);
+    }
+    std::fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]

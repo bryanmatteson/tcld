@@ -129,6 +129,18 @@ pub struct EngineCtx {
     pub stop_on_entry: Option<(BlockId, usize)>,
     /// File block currently being executed by StartTarget.
     pub active_target_file: Option<BlockId>,
+    /// Nested `source` ownership. The last entry is the file whose commands
+    /// are executing now; it prevents a sourced child from being attributed
+    /// to the entry target merely because both share one interpreter.
+    pub active_source_files: Vec<BlockId>,
+    /// Runtime owner stack for eval/apply/namespace bodies. Anonymous block
+    /// identity comes only from wrapper registration; frame filenames are
+    /// intentionally not used to guess it.
+    pub active_dynamic_blocks: Vec<BlockId>,
+    /// Controller-visible logical breakpoint id by generation-specific core
+    /// id. The event forwarder reads this without re-entering Tcl, including
+    /// while a condition evaluation is already active.
+    pub logical_breakpoint_ids: BTreeMap<String, String>,
     /// User stack captured at the exact pause boundary, before the nub's
     /// synchronous wire loop adds debugger-owned frames. Absolute Tcl levels
     /// remain valid for eval/variable operations while that loop is active.
@@ -260,6 +272,9 @@ impl EngineCtx {
             wire_attached: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             stop_on_entry: None,
             active_target_file: None,
+            active_source_files: Vec::new(),
+            active_dynamic_blocks: Vec::new(),
+            logical_breakpoint_ids: BTreeMap::new(),
             paused_stack: Vec::new(),
             observed_frames: BTreeMap::new(),
         }
@@ -470,9 +485,9 @@ unsafe fn inspect_stack_live(interp: *mut Tcl_Interp) -> Vec<FrameSnapshot> {
         // dict lacks one. Strip leading `::` for consistency.
         let resolved_qname =
             proc_name.or_else(|| args.first().map(|s| Arc::from(s.trim_start_matches("::"))));
-        if source_path.is_none() && resolved_qname.is_some() {
-            source_path = active_target_path(interp).map(Arc::from);
-        }
+        // A procedure may have been defined by any sourced file or by eval.
+        // The frame itself does not prove definition provenance, so leave it
+        // absent rather than mis-tagging it with the entry target.
 
         // Recompute Location now that we have a possibly-recovered
         // qname (the earlier resolution used the literal proc field).
@@ -758,6 +773,29 @@ pub fn active_target_path(interp: *mut Tcl_Interp) -> Option<String> {
         Some(BlockId::File(path)) => Some(path.to_string()),
         _ => None,
     }
+}
+
+pub fn bind_logical_breakpoint(interp: *mut Tcl_Interp, logical_id: String, core_id: String) {
+    if let Some(ctx_ptr) = lookup_ctx(interp) {
+        unsafe {
+            (*ctx_ptr)
+                .logical_breakpoint_ids
+                .insert(core_id, logical_id);
+        }
+    }
+}
+
+pub fn unbind_logical_breakpoint(interp: *mut Tcl_Interp, core_id: &str) {
+    if let Some(ctx_ptr) = lookup_ctx(interp) {
+        unsafe {
+            (*ctx_ptr).logical_breakpoint_ids.remove(core_id);
+        }
+    }
+}
+
+pub fn logical_breakpoint_id(interp: *mut Tcl_Interp, core_id: &str) -> Option<String> {
+    let ctx_ptr = lookup_ctx(interp)?;
+    unsafe { (*ctx_ptr).logical_breakpoint_ids.get(core_id).cloned() }
 }
 
 /// Suspend at a pre-registered target location before Tcl begins evaluating
@@ -1236,9 +1274,35 @@ unsafe fn handler_body(
     // Fall back to line-based resolution and finally to the
     // placeholder offset for blocks the wrapper hasn't registered yet.
     let frame_location_opt = build_location_from_frame(&frame);
-    let mut location_opt = frame_location_opt.clone();
+    let dynamic_location =
+        unsafe { (*ctx_ptr).active_dynamic_blocks.last().cloned() }.and_then(|block_id| {
+            let state = unsafe { (*ctx_ptr).state.clone() };
+            state.lock().ok().and_then(|guard| {
+                let block = guard.blocks.get(&block_id)?;
+                let offset = block.offset_for_cmd(cmd_text, 0)?;
+                let line = block.line_for_offset(offset).unwrap_or(1) as usize;
+                Location::new(
+                    block_id,
+                    line,
+                    offset..offset.saturating_add(cmd_text.len().max(1)),
+                )
+                .ok()
+            })
+        });
+    let mut location_opt = dynamic_location
+        .clone()
+        .or_else(|| frame_location_opt.clone());
     let last_offset = unsafe { (*ctx_ptr).last_resolved_offset };
-    if let Some(active_file) = unsafe { (*ctx_ptr).active_target_file.clone() } {
+    let active_file = unsafe {
+        (*ctx_ptr)
+            .active_source_files
+            .last()
+            .cloned()
+            .or_else(|| (*ctx_ptr).active_target_file.clone())
+    };
+    if dynamic_location.is_none()
+        && let Some(active_file) = active_file
+    {
         let state_arc = unsafe { (*ctx_ptr).state.clone() };
         if let Ok(guard) = state_arc.lock()
             && let Some(block) = guard.blocks.get(&active_file)
@@ -1258,7 +1322,31 @@ unsafe fn handler_body(
     }
     let mut block_disabled = false;
     let mut location_registered = false;
-    let mut debugger_internal_location = false;
+    let wrapper_frame = frame.proc_name.as_deref().is_some_and(|name| {
+        let name = name.trim_start_matches("::");
+        let dynamic_user_command = dynamic_location.is_some();
+        let internal_wrapper_name = name.starts_with("tcld::dbg::__wrap__::")
+            || name
+                .rsplit("::")
+                .next()
+                .is_some_and(|leaf| leaf.starts_with("orig_"));
+        !dynamic_user_command
+            && (internal_wrapper_name
+                || matches!(
+                    name,
+                    "proc"
+                        | "catch"
+                        | "apply"
+                        | "namespace"
+                        | "eval"
+                        | "vwait"
+                        | "update"
+                        | "uplevel"
+                        | "interp"
+                        | "rename"
+                ))
+    });
+    let mut debugger_internal_location = wrapper_frame;
     let resolved_offset = if let Some(loc) = location_opt.as_ref() {
         let state_arc = unsafe { (*ctx_ptr).state.clone() };
         let resolved = {
@@ -1267,7 +1355,7 @@ unsafe fn handler_body(
                 Err(_) => return TCL_OK,
             };
             location_registered = guard.blocks.contains(loc.block());
-            debugger_internal_location = matches!(
+            debugger_internal_location |= matches!(
                 loc.block(),
                 BlockId::ProcBody(name)
                     if name.trim_start_matches("::").starts_with("tcld::dbg::")
@@ -1303,37 +1391,39 @@ unsafe fn handler_body(
     // breakpoints, but a command inside a proc must still be reported as that
     // proc body. Resolve a separate display location without changing the
     // exact file offset used above for breakpoint matching.
-    let frame_pause_location = frame_location_opt.as_ref().and_then(|location| {
-        let state_arc = unsafe { (*ctx_ptr).state.clone() };
-        state_arc.lock().ok().and_then(|guard| {
-            let block = guard.blocks.get(location.block())?;
-            let hint = unsafe {
-                (*ctx_ptr)
-                    .last_frame_offsets
-                    .get(location.block())
-                    .copied()
-                    .unwrap_or(0)
-            };
-            let offset = block.offset_for_cmd(cmd_text, hint).or_else(|| {
-                matches!(location.block(), BlockId::File(_))
-                    .then(|| block.offset_for_line(frame.line as u32))
-                    .flatten()
-            })?;
-            unsafe {
-                (*ctx_ptr)
-                    .last_frame_offsets
-                    .insert(location.block().clone(), offset.saturating_add(1));
-            }
-            let line = block
-                .line_for_offset(offset)
-                .map(|line| line as usize)
-                .unwrap_or(frame.line);
-            Location::new(
-                location.block().clone(),
-                line,
-                offset..offset.saturating_add(cmd_text.len().max(1)),
-            )
-            .ok()
+    let frame_pause_location = dynamic_location.clone().or_else(|| {
+        frame_location_opt.as_ref().and_then(|location| {
+            let state_arc = unsafe { (*ctx_ptr).state.clone() };
+            state_arc.lock().ok().and_then(|guard| {
+                let block = guard.blocks.get(location.block())?;
+                let hint = unsafe {
+                    (*ctx_ptr)
+                        .last_frame_offsets
+                        .get(location.block())
+                        .copied()
+                        .unwrap_or(0)
+                };
+                let offset = block.offset_for_cmd(cmd_text, hint).or_else(|| {
+                    matches!(location.block(), BlockId::File(_))
+                        .then(|| block.offset_for_line(frame.line as u32))
+                        .flatten()
+                })?;
+                unsafe {
+                    (*ctx_ptr)
+                        .last_frame_offsets
+                        .insert(location.block().clone(), offset.saturating_add(1));
+                }
+                let line = block
+                    .line_for_offset(offset)
+                    .map(|line| line as usize)
+                    .unwrap_or(frame.line);
+                Location::new(
+                    location.block().clone(),
+                    line,
+                    offset..offset.saturating_add(cmd_text.len().max(1)),
+                )
+                .ok()
+            })
         })
     });
     // Disabled blocks short-circuit before breakpoint or step matching.

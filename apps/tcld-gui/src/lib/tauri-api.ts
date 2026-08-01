@@ -106,7 +106,7 @@ export async function openFileDialog(): Promise<string | null> {
     const result = await open({
       multiple: false,
       filters: [
-        { name: "TBC Files", extensions: ["tbc", "tcl", "tk", "itcl", "tm"] },
+        { name: "Tcl Bytecode and Source", extensions: ["tbc", "tcl", "tk", "itcl", "tm"] },
         { name: "All Files", extensions: ["*"] },
       ],
     });
@@ -341,9 +341,9 @@ export async function saveAppearanceSettings(settings: AppearanceSettingsPayload
 
 export type BytecodeHookMode = "passthrough" | "intercept";
 
-/** Which debugger backend a launch uses. `embedded` (default) runs the
- * in-process interpreter; `external` spawns a tclsh nub driven over the
- * tcld-debug-wire protocol. */
+/** Which host-debugger transport a desktop launch uses. This is deliberately
+ * not the CLI Auto/Host/Hybrid/VmStrict execution policy: the native desktop
+ * debugger runs Tcl source in a host interpreter. */
 export type DebugBackendKind = "embedded" | "external";
 
 export interface DebugLaunchOptions {

@@ -1,0 +1,15 @@
+[package]
+    authors.workspace    = true
+    description          = "Deterministic Tcl source admission and DebugImage compilation for tcld"
+    edition.workspace    = true
+    license.workspace    = true
+    name                 = "tcld-compile"
+    repository.workspace = true
+    version.workspace    = true
+
+[dependencies]
+    sha2.workspace        = true
+    tcld-core.workspace   = true
+    tcld-syntax.workspace = true
+    thiserror.workspace   = true
+    tree-sitter.workspace = true

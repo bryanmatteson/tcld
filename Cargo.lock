@@ -1962,6 +1962,8 @@ dependencies = [
 [[package]]
 name = "laidout"
 version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d9753fd4e88ad53d426fd50d2373a3df330a742a9a5785be471ed163ff08ead"
 dependencies = [
  "thiserror 2.0.19",
  "unicode-width 0.2.2",
@@ -3969,14 +3971,14 @@ dependencies = [
 
 [[package]]
 name = "tcl-sys"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "tcld"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "clap",
  "crossterm",
@@ -3985,6 +3987,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tcld-compile",
  "tcld-core",
  "tcld-debug-wire",
  "tcld-decompile",
@@ -3998,15 +4001,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tcld-compile"
+version = "0.3.2"
+dependencies = [
+ "sha2",
+ "tcld-core",
+ "tcld-syntax",
+ "thiserror 1.0.69",
+ "tree-sitter",
+]
+
+[[package]]
 name = "tcld-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "tcld-dbg-ext"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "arc-swap",
  "cc",
@@ -4018,7 +4032,7 @@ dependencies = [
 
 [[package]]
 name = "tcld-debug-state"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "arc-swap",
  "tcld-decompile",
@@ -4027,14 +4041,14 @@ dependencies = [
 
 [[package]]
 name = "tcld-debug-wire"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "tcld-debug-state",
 ]
 
 [[package]]
 name = "tcld-decompile"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "pretty",
  "tcld-core",
@@ -4044,7 +4058,7 @@ dependencies = [
 
 [[package]]
 name = "tcld-explore"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "similar",
  "tcld-core",
@@ -4054,21 +4068,21 @@ dependencies = [
 
 [[package]]
 name = "tcld-interp"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "tcl-sys",
 ]
 
 [[package]]
 name = "tcld-ir"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "tcld-core",
 ]
 
 [[package]]
 name = "tcld-syntax"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "streaming-iterator",
  "tcld-core",
@@ -4078,7 +4092,7 @@ dependencies = [
 
 [[package]]
 name = "tcld-tauri"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -4092,12 +4106,13 @@ dependencies = [
  "tcld-decompile",
  "tcld-interp",
  "tcld-syntax",
+ "tcld-vm",
  "tokio",
 ]
 
 [[package]]
 name = "tcld-tui"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -4109,7 +4124,7 @@ dependencies = [
 
 [[package]]
 name = "tcld-vm"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "num-bigint",
  "num-traits",
@@ -4118,6 +4133,7 @@ dependencies = [
  "sha2",
  "static_assertions",
  "tcl-sys",
+ "tcld-compile",
  "tcld-core",
  "tcld-decompile",
  "tcld-interp",
@@ -4150,6 +4166,8 @@ dependencies = [
 [[package]]
 name = "termosaic"
 version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb9347695e200952ac854d569fcf0ac4249d1a019cddc780b44874b07a057506"
 dependencies = [
  "console",
  "laidout",
@@ -4161,6 +4179,8 @@ dependencies = [
 [[package]]
 name = "termosaic-ratatui"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfe4bb71a330449a8e5e4463e1d3d965b29a026e7aabae7b5e9affa89ff763aa"
 dependencies = [
  "ratatui-core",
  "termosaic",

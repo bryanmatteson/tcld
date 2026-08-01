@@ -2,18 +2,14 @@
     rust          = "latest"
     rust-analyzer = "latest"
 
-[env]
-    RUSTC_WRAPPER = "sccache"
-    SCCACHE_DIR   = "{{ env.HOME }}/.cache/sccache"
-
 [tasks."tcld:explore"]
-    run = "cargo run --bin tcld -- explore"
     description = "Open the unified interactive terminal explorer"
+    run         = "cargo run --bin tcld -- explore"
 
 [tasks."tcld:install"]
-    run = "cargo install --path apps/tcld"
-    description = "Install the CLI binary"
+    description = "Install the CLI and its manifested Tcl 9 debugger nub"
+    run         = "scripts/install-tcld.sh"
 
 [tasks."tcld-tauri:dev"]
-    run = "cargo tauri dev"
     description = "Run the desktop GUI in development mode"
+    run         = "cargo tauri dev"

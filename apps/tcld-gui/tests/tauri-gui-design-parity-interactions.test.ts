@@ -277,7 +277,7 @@ test("V3 top bar empty tab, plus opener, command search, and read-only tab state
   const app = await withProductionPage("/", { dialogPath: "/tmp/topbar-first.tbc" });
   try {
     await waitForVisibleText(app.page, '[data-design-surface="top-tab-strip"]', /No file loaded/);
-    await waitForVisibleText(app.page, '[data-design-surface="top-tab-strip"]', /Open a \.tbc to begin/);
+    await waitForVisibleText(app.page, '[data-design-surface="top-tab-strip"]', /Open Tcl bytecode or source/);
 
     const emptyAffordance = await app.page.$eval('[data-testid="topbar-empty-open-file"]', (button) => ({
       tag: button.tagName,
@@ -286,7 +286,7 @@ test("V3 top bar empty tab, plus opener, command search, and read-only tab state
     }));
     assert.deepEqual(emptyAffordance, {
       tag: "BUTTON",
-      label: "Open a .tbc file to begin",
+      label: "Open Tcl bytecode or source to begin",
       disabled: false,
     });
 

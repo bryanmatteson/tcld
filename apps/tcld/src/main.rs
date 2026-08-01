@@ -10,8 +10,16 @@ const DEFAULT_BATCH_TERMINAL_WIDTH: u16 = 80;
 
 fn main() {
     if let Err(err) = run() {
-        eprintln!("{err}");
-        std::process::exit(1);
+        let message = err.to_string();
+        eprintln!("{message}");
+        // Backend availability is a distinct, stable CLI capability failure.
+        // Keep it aligned with `tcld run` and the documented package contract.
+        let exit_code = if message.starts_with("hybrid_unavailable:") {
+            3
+        } else {
+            1
+        };
+        std::process::exit(exit_code);
     }
 }
 

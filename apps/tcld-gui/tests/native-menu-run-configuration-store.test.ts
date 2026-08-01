@@ -293,6 +293,9 @@ test("main app removes inline run configuration fields and routes full editing t
   assert.match(page, /openRunConfigurationWindow\(\)/);
   assert.match(page, /menu:recent-configurations/);
   assert.match(page, /recentRunConfigurationActionByMenuItem/);
+  assert.match(page, /data-debug-execution-backend="host"/);
+  assert.match(page, /Host debugger transport/);
+  assert.match(page, /Hybrid and VmStrict source compilation are CLI options/);
   assert.doesNotMatch(page, /setLaunchConfig/);
   assert.doesNotMatch(page, /value=\{launchConfig/);
 });

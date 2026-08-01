@@ -1,152 +1,170 @@
 # tcld
 
-Tcld reads TclPro bytecode (`.tbc`), reconstructs Tcl source, and provides
-terminal and desktop tools for inspection and debugging.
+**Turn 25-year-old Tcl bytecode back into source — then step through it in a debugger.**
 
-## Capabilities
+[![CI](https://github.com/bryanmatteson/tcld/actions/workflows/ci.yml/badge.svg)](https://github.com/bryanmatteson/tcld/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+![Rust](https://img.shields.io/badge/rust-stable-orange.svg)
 
-- Decompile bytecode through a multi-pass control-flow pipeline.
-- Disassemble instructions with resolved operands.
-- Inspect bytecode and source in an interactive terminal explorer.
-- Debug Tcl source with stepping, breakpoints, stack frames, variables, watches,
-  and event history.
-- Run and debug bytecode in the optional in-process TEBC VM.
-- Use synchronized analysis views in the Tauri desktop application.
-- Parse, highlight, and format Tcl with Tree-sitter.
+Around the year 2000, TclPro let you compile Tcl scripts into `.tbc` bytecode and
+ship them without source. A quarter century later, those `.tbc` files are still
+running inside EDA tools, network gear, test harnesses, and lab equipment — and
+for many of them, the original source is long gone.
 
-All application layers consume the same domain snapshot. It includes load
-provenance, metadata, instructions, literals, exception ranges, basic blocks,
-trace frames, reconstructed source, source mappings, diagnostics, coverage
-data, and dump text.
+`tcld` reads that bytecode and gives you your program back:
 
-## Requirements
+- **Decompile** `.tbc` files into readable Tcl through a multi-pass
+  control-flow reconstruction pipeline
+- **Disassemble** instructions with resolved operands and literals
+- **Explore** bytecode, literals, exception ranges, and reconstructed source in
+  a synchronized terminal UI (plus a Tauri desktop app)
+- **Debug** with breakpoints, stepping, stack frames, variables, and watches —
+  against a host `tclsh`, or directly on bytecode
+- **Run** `.tbc` files in an in-process TEBC virtual machine, no source
+  reconstruction required
 
-- Rust stable. The repository pins the stable channel in
-  `rust-toolchain.toml`.
-- Tcl 9 development headers and libraries for native debugger crates, the full
-  workspace, and the optional hybrid VM.
+Written in Rust. Handles bytecode from Tcl 8.0 through 9.0.
 
-Set `TCL9_PREFIX` or `TCL_PREFIX` when Tcl is outside the system search path.
-The default CLI build does not link Tcl:
+![tcld explore: navigating instructions, decompiled source, and literals with a synchronized inspector](docs/demo.gif)
 
-```bash
-cargo build -p tcld
+## From bytecode to source
+
+```
+$ tcld disassemble app.tbc              $ tcld decompile app.tbc
+
+ (0) push1 0             # a            set a 1
+ (2) push1 1             # 1            return -code ok -level 1 -options {} $a
+ (4) storeStk
+ (5) pop
+ (6) push1 0             # a
+ (8) loadStk
+ (9) push1 2
+(11) returnImm 0 1
+(20) done
 ```
 
-Build the in-process VM explicitly:
+The reconstruction is structural, not a stack-trace dump. Loops, `switch`,
+`catch`, namespaces, and procedure bodies come back as idiomatic Tcl:
 
-```bash
-cargo build -p tcld --features hybrid
+```tcl
+proc fixture::logLevelInit {} {
+    variable debug_types
+    variable debug_level
+    variable initialized
+    foreach el $debug_types {
+        set tvar "FIXTURE_LOG_LEVEL_$el"
+        if {[info exists "::env($tvar)"]} {
+            set debug_level($el) $::env($tvar)
+        } else {
+            set debug_level($el) 0
+        }
+        fixture::setValue "debug_level_$el" $debug_level($el)
+    }
+    ...
+}
 ```
 
-Host debugging discovers Tcl 9.0, 8.6, or 8.5 at runtime and loads the matching
-debugger nub. Release archives include Tcl 8.6 and 9.0 nubs, plus Tcl 8.5 where
-the target supports it. [COMPAT.md](COMPAT.md) describes the ABI and packaging
-contract.
+*(actual `tcld decompile` output from the bundled fixture)*
 
-## Use
+When an exact reconstruction isn't possible, `tcld` says so: diagnostics
+identify each approximated operation, its bytecode range when known, and the
+reason — no silent guesses.
 
-```bash
-# Reconstruct Tcl source
-cargo run -- decompile path/to/file.tbc
+## The explorer
 
-# Print bytecode instructions
-cargo run -- disassemble path/to/file.tbc
+`tcld explore` opens a terminal workspace where instructions, literals,
+exception ranges, decompiled source, and source maps are different views of the
+same artifact — cursor position stays synchronized as you move between them.
+The demo above is a real session (recorded with [vhs](https://github.com/charmbracelet/vhs)
+from [docs/demo.tape](docs/demo.tape)).
 
-# Inspect exceptions, literals, and instructions
-cargo run -- dump path/to/file.tbc
+The same domain snapshot powers the desktop app (`apps/tcld-gui`, Tauri), with
+synchronized analysis views and run configurations.
 
-# Report opcode and Tcl-version coverage
-cargo run -- coverage report
+## Quick start
 
-# Open the terminal explorer
-cargo run -- explore path/to/file.tbc
-
-# Render one deterministic explorer frame
-cargo run -- explore --dump-screen path/to/file.tbc
-
-# Print source-map spans
-cargo run -- source-map path/to/file.tbc
-```
-
-Batch decompile and disassemble output uses ANSI color when stdout is an
-interactive terminal. Redirected output is plain. Use `--no-colors` or
-`NO_COLOR=1` to disable color explicitly:
+You need stable Rust (the toolchain is pinned in `rust-toolchain.toml`). The
+default CLI build has **no Tcl dependency**:
 
 ```bash
-cargo run -- --no-colors decompile path/to/file.tbc
-NO_COLOR=1 cargo run -- disassemble path/to/file.tbc
+cargo build --release -p tcld
 ```
 
-## Debug and run
-
-Debug Tcl source through a host interpreter:
+Then point it at a `.tbc` file:
 
 ```bash
-cargo run -- debug path/to/script.tcl
-cargo run -- debug --tclsh /usr/local/bin/tclsh9.0 path/to/script.tcl
+tcld decompile path/to/file.tbc     # reconstruct Tcl source
+tcld disassemble path/to/file.tbc   # linear instruction listing
+tcld dump path/to/file.tbc          # exceptions, literals, instructions
+tcld explore path/to/file.tbc       # interactive terminal explorer
+tcld source-map path/to/file.tbc    # bytecode ↔ source span mapping
+tcld coverage report                # opcode × Tcl-version support matrix
 ```
 
-Run or debug bytecode in process with the hybrid build:
+Try it immediately on the bundled fixture:
 
 ```bash
-cargo run -p tcld --features hybrid -- run path/to/file.tbc
-cargo run -p tcld --features hybrid -- run --backend=vm-strict path/to/file.tbc
-cargo run -p tcld --features hybrid -- debug path/to/file.tbc
+tcld decompile testing/fixtures/public/public_complex_fixture.tbc
 ```
 
-`vm-strict` denies WorldHost calls. The regular hybrid backend can reach Tcl
-commands such as `load` and `exec`; use the strict backend for untrusted
+Batch output is ANSI-colored when stdout is a terminal and plain when
+redirected; `--no-colors` or `NO_COLOR=1` disables color explicitly.
+
+## Debugging and running
+
+**Debug Tcl source** through a host interpreter — no special build needed.
+`tcld` discovers Tcl 9.0, 8.6, or 8.5 at runtime and injects the matching
+debugger nub:
+
+```bash
+tcld debug path/to/script.tcl
+tcld debug --tclsh /usr/local/bin/tclsh9.0 path/to/script.tcl
+```
+
+**Run or debug bytecode directly** with the hybrid TEBC virtual machine, an
+in-process bytecode interpreter with an optional bridge to an embedded Tcl 9
+host. This build links Tcl 9 (set `TCL9_PREFIX` if it's outside the system
+search path):
+
+```bash
+cargo build --release -p tcld --features hybrid
+
+tcld run path/to/file.tbc
+tcld run --backend=vm-strict path/to/file.tbc   # sandboxed: denies host calls
+tcld debug path/to/file.tbc                     # breakpoints at real bytecode PCs
+```
+
+`vm-strict` denies all WorldHost calls. The regular hybrid backend can reach
+Tcl commands such as `load` and `exec` — use strict mode for untrusted
 bytecode.
 
-Host debugging of bytecode remains available when exact bytecode program
-counters are not required:
+There's also a middle path: `tcld debug --backend=host file.tbc` reconstructs
+the source into a temporary file and debugs that through a host `tclsh`. It
+requires an exact reconstruction and reports diagnostics when one isn't
+possible.
 
-```bash
-cargo run -- debug --backend=host path/to/file.tbc
-```
+A binary built without `--features hybrid` reports `hybrid_unavailable` (exit
+code 3) when a hybrid backend is requested.
 
-This path reconstructs Tcl into a temporary source file before launch. It
-requires an exact reconstruction. When reconstruction uses approximations,
-diagnostics identify each affected operation, its bytecode range when known,
-and the reason.
+## How it works
 
-## Hybrid verification
-
-```bash
-# Build, test, PTY, and release gates
-scripts/verify-hybrid-gates.sh
-
-# Pinned scenarios, fixture sweep, and JSON report
-scripts/verify-hybrid-corpus.sh
-```
-
-Both commands require Tcl 9 headers and libraries. A binary built without the
-`hybrid` feature reports `hybrid_unavailable` with exit code 3 when a hybrid
-backend is requested.
-
-## Stability
-
-During the 0.x series:
-
-- `decompile` and `disassemble` output shapes and process exit codes are stable.
-- Coverage TSV columns, dump output, explorer session files, debugger commands,
-  and the wire protocol may change between minor releases.
-
-The wire protocol carries its own version in the handshake.
-
-## Architecture
+Every application layer — CLI, terminal explorer, desktop app, debugger —
+consumes one canonical analysis snapshot: load provenance, metadata,
+instructions, literals, exception ranges, basic blocks, trace frames,
+reconstructed source, source mappings, diagnostics, coverage data, and dump
+text. Analyze once, view everywhere.
 
 ```
 tcld/
 ├── crates/
 │   ├── tcld-core/       # Bytecode parser and instruction tables
 │   ├── tcld-ir/         # Intermediate representation and control-flow graph
-│   ├── tcld-syntax/     # Tcl parsing, extraction, and highlighting
-│   ├── tcld-decompile/  # Reconstruction pipeline and source mappings
+│   ├── tcld-syntax/     # Tcl parsing, extraction, and highlighting (Tree-sitter)
+│   ├── tcld-decompile/  # Reconstruction pipeline; owns the canonical snapshot
 │   ├── tcld-explore/    # Explorer domain model
 │   ├── tcld-tui/        # Generic terminal framework
-│   └── tcld-vm/         # Hybrid TEBC runtime
+│   ├── tcld-vm/         # Hybrid TEBC runtime
+│   └── tcld-debug-*/    # Debugger state, wire protocol, Tcl FFI boundary
 ├── apps/
 │   ├── tcld/            # Command-line interface
 │   ├── tcld-tauri/      # Desktop backend
@@ -156,15 +174,26 @@ tcld/
     └── fuzz/            # Fuzz targets and seed corpora
 ```
 
-`tcld-decompile` owns the canonical analysis snapshot. `tcld-explore` derives
-artifact capabilities and navigation facts from that snapshot.
-`apps/tcld/src/explore` adapts those facts to the generic `tcld-tui`
-`DataSource` boundary. Runtime debugging remains a separate `tcld debug`
-workflow.
+Compatibility is tracked opcode by opcode across Tcl versions — `tcld coverage
+report` prints the full matrix, classifying each opcode as golden-tested,
+structurally recovered, or rendered. The golden decompiler suite covers 37
+bytecode fixtures spanning control flow, exception handling, and procedure
+reconstruction, and the parser and decompiler are fuzzed continuously.
 
-TurtleTap owns terminal attachment, raw mode, resize events, and ticks.
-Termosaic owns semantic theme resolution and color-depth adaptation. Tcld owns
-its viewport, input model, layouts, palettes, and `ui.*` token vocabulary.
+Release archives ship loadable debugger nubs for Tcl 8.6 and 9.0 (plus 8.5
+where the target supports it), validated against an ABI/protocol/checksum
+manifest before spawn. [COMPAT.md](COMPAT.md) describes the contract.
+
+## Stability
+
+During the 0.x series:
+
+- `decompile` and `disassemble` output shapes and process exit codes are
+  **stable**
+- Coverage TSV columns, dump output, explorer session files, debugger commands,
+  and the wire protocol may change between minor releases
+
+The wire protocol carries its own version in the handshake.
 
 ## Development
 
@@ -173,22 +202,20 @@ its viewport, input model, layouts, palettes, and `ui.*` token vocabulary.
 cargo fmt --all --check
 cargo test --workspace
 
-# Explorer render contracts
+# Explorer render contracts (deterministic frame snapshots)
 cargo test -p tcld --test explore_dump_screen_contract
 
 # Terminal lifecycle checks
 scripts/explore-pty-smoke.sh
 scripts/debug-pty-smoke.sh
 
-# Desktop frontend
-cd apps/tcld-gui
-npm ci
-npm test
-npm run build
-```
+# Hybrid VM gates (requires Tcl 9 headers)
+scripts/verify-hybrid-gates.sh
+scripts/verify-hybrid-corpus.sh
 
-The golden decompiler suite contains 37 bytecode fixtures covering control
-flow, exception handling, and procedure reconstruction.
+# Desktop frontend
+cd apps/tcld-gui && npm ci && npm test && npm run build
+```
 
 This public branch is a curated reconstruction of private development history.
 Author dates retain source provenance; committer dates record the
@@ -196,8 +223,7 @@ reconstruction.
 
 ## License
 
-Copyright 2026 Bryan Matteson.
-
-Licensed under the [Apache License, Version 2.0](LICENSE). Redistributed TclPro
-fixtures retain their original notices; see
+Copyright 2026 Bryan Matteson. Licensed under the
+[Apache License, Version 2.0](LICENSE). Redistributed TclPro fixtures retain
+their original notices; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

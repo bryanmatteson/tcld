@@ -1,5 +1,8 @@
 # Tcl Compatibility
 
+For the user-facing source and bytecode debugger workflows, backend choices,
+and failure behavior, see [DEBUGGING.md](DEBUGGING.md).
+
 ## Supported runtimes
 
 The debugger nub supports Tcl 8.5, 8.6, and 9.0 runtime ABIs.
@@ -25,6 +28,11 @@ stepping or opcode profiling. Shell discovery prefers 8.6 for Tcl 8 bytecode
 and uses 8.5 when 8.6 is not present.
 
 ## Building a debugger nub
+
+`mise run tcld:install` is the supported checkout installation path. It
+installs both the CLI and a manifested Tcl 9 nub. A raw `cargo install --path
+apps/tcld` installs only the executable because Cargo does not install cdylib
+artifacts.
 
 Cargo features `tcl8_5`, `tcl8_6`, and `tcl9` select the ABI and are mutually
 exclusive. `tcl9` is the default. Prefix variables select non-system
@@ -106,6 +114,17 @@ ABIs into one process.
 | `tcld debug path.tbc` | Uses the hybrid debugger when linked |
 | `tcld debug --backend=host path.tbc` | Reconstructs source and uses the wire nub |
 | Binary without `hybrid` | Returns `hybrid_unavailable` with exit code 3 for a requested VM backend |
+
+Tcl source is also a first-class debug target. `auto` and `host` execute the
+original source in the host debugger. In a hybrid build, explicit `hybrid` and
+`vm-strict` compile admitted source into a verified in-process debug image.
+
+The downloadable CLI archive is the host-debugger distribution: it has no
+compile-time Tcl dependency and includes the versioned loadable nubs. The
+hybrid VM is a separate source-build profile because it links Tcl 9 in process.
+The release-bundle verifier rejects a compile-time Tcl dependency, so an
+archive never claims to contain Hybrid/VmStrict; requesting either reports the
+capability failure above with rebuild guidance.
 
 The hybrid debugger supports nested step, over, and out; code-qualified program
 counter breakpoints; selected-frame variables; opcode coverage; synchronized

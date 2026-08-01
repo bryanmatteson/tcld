@@ -1,6 +1,6 @@
 //! `tcld debug` driver loop.
 //!
-//! Owns the wire-protocol [`Session`], the local source-text cache,
+//! Owns one backend-neutral debug session, the local source/disassembly cache,
 //! the rolling event log, and the [`DebugUiState`]. Rendering is
 //! delegated to [`tcld_tui::debug::render`] so the view itself stays
 //! reusable and themed.
@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
 use serde::{Deserialize, Serialize};
-use tcld_debug_wire::{Op, WireEvent};
 use tcld_tui::Theme;
 use tcld_tui::debug::{
     AppState, BindingContext, CoverageRow, DebugAction, DebugSnapshot, DebugUiState, EventLine,
@@ -22,8 +21,15 @@ use tcld_tui::debug::{
 };
 use tcld_tui::terminal::{Event, Frame, Rect, RuntimeAction, RuntimeEvent, TerminalApplication};
 
-use super::config::{NubPaths, TclAbi};
-use super::session::{ProcEntry, Session, format_event};
+use super::backend::{DebugBackend, WireSessionBackend};
+use super::config::NubPaths;
+use super::contract::{
+    BackendCapabilities, BackendOperation, DebugBreakpoint, DebugBreakpointId,
+    DebugBreakpointResolution, DebugBreakpointSpec, DebugDiagnosticSeverity, DebugEvent,
+    DebugLifecycleState, DebugLocation, DebugOutputStream, DebugPauseReason, DebugProcedure,
+    DebugSourceUnitIdentity, DebugStepKind, SourceCommandSpan,
+};
+use super::planning::{PreparedDebugTarget, TargetProvenance};
 
 const EVENT_LOG_CAPACITY: usize = 1024;
 const APP_TITLE: &str = "tcld debug";
@@ -84,96 +90,24 @@ struct SourceCache {
     user_script_origin: SourceOrigin,
     /// Most-recent proc body keyed by qname.
     proc_bodies: HashMap<String, Vec<SourceLine>>,
+    /// Canonical runtime-owned source units keyed by the backend block id.
+    /// Unlike `user_script`/`proc_bodies`, this includes sourced files and
+    /// eval/anonymous units and carries generation/provenance.
+    source_units: HashMap<String, CachedSourceUnit>,
+    showing_block_id: Option<String>,
     /// Which qname the source pane is currently showing (None ⇒ user
     /// script).
     showing_qname: Option<String>,
     origin: SourceOrigin,
+    secondary: Vec<SourceLine>,
+    secondary_highlight_line: Option<u32>,
+    pc_to_line: HashMap<u64, u32>,
+    line_to_code: HashMap<u32, super::contract::DebugCodeLocation>,
 }
 
-/// What the driver was asked to debug, plus the actual file the nub
-/// will source. When the input was a `.tbc`, [`Self::runtime_path`]
-/// points at a decompiled `.tcl` inside an OS-allocated temp dir
-/// (created via `tempfile::TempDir`); the dir is unlinked when this
-/// struct (or any [`DebugApp`] that consumed it) is dropped.
-/// [`Self::display_path`] always keeps the original for UI labelling.
-#[derive(Debug)]
-pub struct SourceProvenance {
-    pub runtime_path: PathBuf,
-    pub display_path: PathBuf,
-    pub decompiled_from: Option<PathBuf>,
-    pub bytecode_tcl_version: Option<String>,
-    /// Lifetime guard for the OS-allocated temp dir. `None` when the
-    /// runtime path is a user-owned source file we must NOT delete.
-    pub(super) temp_dir: Option<tempfile::TempDir>,
-}
-
-impl SourceProvenance {
-    pub fn user_script(path: PathBuf) -> Self {
-        Self {
-            runtime_path: path.clone(),
-            display_path: path,
-            decompiled_from: None,
-            bytecode_tcl_version: None,
-            temp_dir: None,
-        }
-    }
-
-    /// Build a decompiled-source provenance that owns the temp dir
-    /// holding the rendered Tcl. The directory is unlinked when the
-    /// returned value (or any [`DebugApp`] that consumed it) is
-    /// dropped.
-    pub fn decompiled(
-        runtime_path: PathBuf,
-        display_path: PathBuf,
-        temp_dir: tempfile::TempDir,
-    ) -> Self {
-        let decompiled_from = Some(display_path.clone());
-        Self {
-            runtime_path,
-            display_path,
-            decompiled_from,
-            bytecode_tcl_version: None,
-            temp_dir: Some(temp_dir),
-        }
-    }
-
-    pub fn decompiled_bytecode(
-        runtime_path: PathBuf,
-        display_path: PathBuf,
-        bytecode_tcl_version: String,
-        temp_dir: tempfile::TempDir,
-    ) -> Self {
-        Self {
-            runtime_path,
-            display_path: display_path.clone(),
-            decompiled_from: Some(display_path),
-            bytecode_tcl_version: Some(bytecode_tcl_version),
-            temp_dir: Some(temp_dir),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct DebugTarget {
-    pub runtime_path: PathBuf,
-    pub display_path: PathBuf,
-    pub provenance: SourceProvenance,
-    pub required_tcl_abi: Option<TclAbi>,
-}
-
-impl DebugTarget {
-    pub fn new(provenance: SourceProvenance, required_tcl_abi: Option<TclAbi>) -> Self {
-        Self {
-            runtime_path: provenance.runtime_path.clone(),
-            display_path: provenance.display_path.clone(),
-            provenance,
-            required_tcl_abi,
-        }
-    }
-
-    pub fn user_script(path: PathBuf) -> Self {
-        Self::new(SourceProvenance::user_script(path), None)
-    }
+struct CachedSourceUnit {
+    registration: super::contract::RegisteredSource,
+    lines: Vec<SourceLine>,
 }
 
 pub struct DebugApp {
@@ -184,8 +118,9 @@ pub struct DebugApp {
     /// user-script inputs. Drop unlinks the directory + every file
     /// in it so we never litter `/tmp`.
     _temp_dir: Option<tempfile::TempDir>,
-    paths: NubPaths,
-    session: Option<Session>,
+    backend: Option<Box<dyn DebugBackend>>,
+    capabilities: BackendCapabilities,
+    backend_label: String,
 
     cache: SourceCache,
 
@@ -206,7 +141,7 @@ pub struct DebugApp {
     event_filter: String,
     last_status_full: String,
 
-    proc_picker: Vec<ProcEntry>,
+    proc_picker: Vec<DebugProcedure>,
     proc_picker_filtered: Vec<String>,
     proc_picker_selected: Option<usize>,
 
@@ -250,27 +185,62 @@ enum RepeatableAction {
 }
 
 impl DebugApp {
-    pub fn new(target: DebugTarget, paths: NubPaths, theme: Theme) -> io::Result<Self> {
-        let DebugTarget {
+    pub fn new(target: PreparedDebugTarget, paths: NubPaths, theme: Theme) -> io::Result<Self> {
+        let description = format!(
+            "host Tcl {} ({}) via {}; debugger nub {}",
+            paths.tcl_patchlevel,
+            paths
+                .tcl_abi
+                .map(|abi| abi.to_string())
+                .unwrap_or_else(|| "unprobed ABI".to_string()),
+            paths.tclsh.display(),
+            paths.dylib.display()
+        );
+        let backend = WireSessionBackend::connect(paths)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Self::with_backend(target, Box::new(backend), description, theme)
+    }
+
+    pub fn with_backend(
+        target: PreparedDebugTarget,
+        backend: Box<dyn DebugBackend>,
+        backend_label: impl Into<String>,
+        theme: Theme,
+    ) -> io::Result<Self> {
+        let compiled_source = target.compiled_image.is_some();
+        let capabilities = backend.capabilities();
+        let backend_label = backend_label.into();
+        let PreparedDebugTarget {
             runtime_path: _,
             display_path: _,
             provenance,
             required_tcl_abi,
+            ..
         } = target;
-        let SourceProvenance {
+        let TargetProvenance {
+            original_path: _,
             runtime_path,
             display_path,
             decompiled_from,
             bytecode_tcl_version,
             temp_dir,
         } = provenance;
-        let user_script_origin = if decompiled_from.is_some() {
+        let direct_bytecode = capabilities
+            .support(BackendOperation::DirectBytecode)
+            .is_supported();
+        let user_script_origin = if compiled_source {
+            SourceOrigin::CompiledSource
+        } else if decompiled_from.is_some() || direct_bytecode {
             SourceOrigin::Synthetic
         } else {
             SourceOrigin::UserScript
         };
 
-        let highlighted = load_source_highlighted(&runtime_path, &theme);
+        let highlighted = if direct_bytecode {
+            placeholder_lines("Loading bytecode disassembly…".into(), &theme)
+        } else {
+            load_source_highlighted(&runtime_path, &theme)
+        };
         let theme_name = theme.name().to_string();
         let mut initial_status = "press ? for help, F5 to continue once paused".to_string();
         let mut initial_event: Option<EventLine> = None;
@@ -297,28 +267,26 @@ impl DebugApp {
         if let Some(line) = initial_event {
             events.push_back(line);
         }
-        events.push_back(EventLine::info(format!(
-            "runtime Tcl {} ({}) via {}; debugger nub {}",
-            paths.tcl_patchlevel,
-            paths
-                .tcl_abi
-                .map(|abi| abi.to_string())
-                .unwrap_or_else(|| "unprobed ABI".to_string()),
-            paths.tclsh.display(),
-            paths.dylib.display()
-        )));
+        events.push_back(EventLine::info(format!("backend: {backend_label}")));
         Ok(Self {
             user_script: runtime_path,
             display_path,
             _temp_dir: temp_dir,
-            paths,
-            session: None,
+            backend: Some(backend),
+            capabilities,
+            backend_label,
             cache: SourceCache {
                 user_script: highlighted,
                 user_script_origin,
                 proc_bodies: HashMap::new(),
+                source_units: HashMap::new(),
+                showing_block_id: None,
                 showing_qname: None,
                 origin: user_script_origin,
+                secondary: Vec::new(),
+                secondary_highlight_line: None,
+                pc_to_line: HashMap::new(),
+                line_to_code: HashMap::new(),
             },
             app_state: AppState::Dead,
             focused_proc: None,
@@ -330,7 +298,10 @@ impl DebugApp {
             breakpoints: Vec::new(),
             watches: Vec::new(),
             coverage: Vec::new(),
-            coverage_enabled: false,
+            // Direct-bytecode sessions historically surfaced VM coverage as a
+            // primary view. Keep that useful default while source sessions
+            // retain their quieter opt-in coverage pane.
+            coverage_enabled: direct_bytecode,
             events,
             event_filter: String::new(),
             last_status_full: initial_status.clone(),
@@ -366,37 +337,24 @@ impl DebugApp {
     }
 
     fn connect_debugger(&mut self) -> bool {
-        match Session::connect(self.paths.clone()) {
-            Ok(session) => {
-                self.push_event(EventLine::info(format!(
-                    "nub connected: controller :{}",
-                    session.bound_port()
-                )));
-                self.session = Some(session);
-                self.app_state = AppState::Ready;
-                self.set_status("Ready");
-                true
-            }
-            Err(err) => {
-                self.set_status(format!("nub failed to start: {err} (press r to retry)"));
-                self.push_event(EventLine::error(format!("startup error: {err}")));
-                false
-            }
-        }
+        self.app_state = AppState::Ready;
+        self.set_status(format!("Ready · {}", self.backend_label));
+        true
     }
 
     fn start_debug_target(&mut self) {
         self.try_autoload_persisted_breakpoints();
         let start = self
-            .session
+            .backend
             .as_mut()
-            .expect("connected session")
+            .expect("constructed backend")
             .start_target(&self.user_script, true);
         match start {
-            Ok(ack) => {
+            Ok(()) => {
                 self.app_state = AppState::Loading;
                 self.set_status("Loading");
-                self.push_event(EventLine::info(format!("target scheduled: {ack}")));
+                self.push_event(EventLine::info("target scheduled"));
+                self.tick();
             }
             Err(error) => {
                 self.set_status(format!("target start failed: {error}"));
@@ -406,18 +364,33 @@ impl DebugApp {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let displayed_unit = self
+            .cache
+            .showing_block_id
+            .as_ref()
+            .and_then(|block| self.cache.source_units.get(block));
+        let source_lines: &[SourceLine] = displayed_unit.map_or_else(
+            || match &self.cache.showing_qname {
+                Some(qname) => self
+                    .cache
+                    .proc_bodies
+                    .get(qname)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&self.cache.user_script),
+                None => &self.cache.user_script,
+            },
+            |unit| unit.lines.as_slice(),
+        );
+        let source_path_label = displayed_unit
+            .map(|unit| unit.registration.identity.display_label())
+            .unwrap_or_else(|| self.display_path.display().to_string());
+        let source_qname = displayed_unit
+            .and_then(|unit| unit.registration.qualified_proc.as_deref())
+            .or(self.cache.showing_qname.as_deref());
         // Make the event ring buffer contiguous so we can hand a flat
-        // slice to the renderer.
+        // slice to the renderer. All other borrows above are on disjoint
+        // cache fields.
         let events_slice: &[EventLine] = self.events.make_contiguous();
-        let source_lines: &[SourceLine] = match &self.cache.showing_qname {
-            Some(q) => self
-                .cache
-                .proc_bodies
-                .get(q)
-                .map(Vec::as_slice)
-                .unwrap_or(&self.cache.user_script),
-            None => &self.cache.user_script,
-        };
         let picker_overlay = if matches!(
             self.prompt.as_ref().map(|p| p.kind),
             Some(PromptKind::ProcPicker)
@@ -437,12 +410,12 @@ impl DebugApp {
         };
         let snapshot = DebugSnapshot {
             title: APP_TITLE,
-            source_path: self.display_path.to_str().unwrap_or("<non-utf8 path>"),
+            source_path: &source_path_label,
             source_origin: self.cache.origin,
-            source_qname: self.cache.showing_qname.as_deref(),
+            source_qname,
             source_lines,
-            secondary_source_lines: &[],
-            secondary_highlight_line: None,
+            secondary_source_lines: &self.cache.secondary,
+            secondary_highlight_line: self.cache.secondary_highlight_line,
             focused_proc: self.focused_proc.as_ref(),
             app_state: self.app_state,
             stack: &self.stack,
@@ -465,6 +438,9 @@ impl DebugApp {
     }
 
     fn current_source_lines(&self) -> &[SourceLine] {
+        if let Some(unit) = self.displayed_source_unit() {
+            return &unit.lines;
+        }
         match &self.cache.showing_qname {
             Some(q) => self
                 .cache
@@ -476,62 +452,167 @@ impl DebugApp {
         }
     }
 
+    fn displayed_source_unit(&self) -> Option<&CachedSourceUnit> {
+        self.cache
+            .showing_block_id
+            .as_ref()
+            .and_then(|block| self.cache.source_units.get(block))
+    }
+
+    fn displayed_file_path(&self) -> Option<PathBuf> {
+        self.displayed_source_unit()
+            .and_then(|unit| unit.registration.path.clone())
+            .or_else(|| {
+                self.cache
+                    .showing_block_id
+                    .is_none()
+                    .then(|| self.user_script.clone())
+            })
+    }
+
     fn current_source_lines_len(&self) -> usize {
         self.current_source_lines().len()
     }
 
     fn tick(&mut self) -> bool {
-        let Some(session) = self.session.as_mut() else {
+        let Some(backend) = self.backend.as_mut() else {
             return false;
         };
-        let events = session.drain_events();
+        let events = backend.drain_events();
         if events.is_empty() {
             return false;
         }
         let mut needs_refresh = false;
         let mut needs_revalidate = Vec::new();
-        for ev in &events {
-            let (sev, text) = format_event(ev);
-            self.push_event_text(sev, &text);
+        let mut pauses = Vec::new();
+        for ev in events {
             match ev {
-                WireEvent::TargetStarted { .. } => {
-                    self.app_state = AppState::Running;
-                    self.set_status("Running");
+                DebugEvent::StateChanged(state) => {
+                    self.app_state = state.into();
+                    self.set_status(self.app_state.label());
                 }
-                WireEvent::TargetCompleted { .. } => {
+                DebugEvent::Completed { result } => {
                     self.app_state = AppState::Completed;
-                    self.set_status("Completed");
+                    self.set_status(result.filter(|value| !value.is_empty()).map_or_else(
+                        || "Completed".to_owned(),
+                        |value| format!("Completed · {value}"),
+                    ));
                     self.error_banner = None;
                     self.clear_execution_state();
                 }
-                WireEvent::TargetLoadFailed { message, .. } => {
+                DebugEvent::Failed { message } => {
                     self.app_state = AppState::LoadFailed;
-                    self.set_status(format!("Load Failed: {}", trim_status(message)));
+                    self.set_status(format!("Load Failed: {}", trim_status(&message)));
                     self.clear_execution_state();
                     self.error_banner = Some(message.clone());
+                    self.push_event(EventLine::error(message));
                 }
-                WireEvent::Paused { .. } | WireEvent::ErrorPaused { .. } => {
+                DebugEvent::Paused(pause) => {
                     self.app_state = AppState::Stopped;
-                    self.set_status("Paused");
+                    pauses.push(*pause);
                     needs_refresh = true;
                 }
-                WireEvent::Resumed => {
-                    self.app_state = AppState::Running;
-                    self.set_status("Running");
+                DebugEvent::Output { stream, text } => {
+                    let label = match stream {
+                        DebugOutputStream::Stdout => "stdout",
+                        DebugOutputStream::Stderr => "stderr",
+                        DebugOutputStream::Console => "console",
+                    };
+                    self.push_event_text(
+                        tcld_tui::debug::EventSeverity::Info,
+                        &format!("{label}: {text}"),
+                    );
                 }
-                WireEvent::NubStopped { .. } => {
-                    self.app_state = AppState::Dead;
-                    self.set_status("Debugger stopped");
+                DebugEvent::Diagnostic { severity, message } => {
+                    let severity = match severity {
+                        DebugDiagnosticSeverity::Info => tcld_tui::debug::EventSeverity::Info,
+                        DebugDiagnosticSeverity::Warning => tcld_tui::debug::EventSeverity::Warn,
+                        DebugDiagnosticSeverity::Error => tcld_tui::debug::EventSeverity::Error,
+                    };
+                    self.push_event_text(severity, &message);
+                }
+                DebugEvent::TargetLoadFailed {
+                    path,
+                    status,
+                    message,
+                    error_code,
+                    error_info,
+                } => {
+                    self.app_state = AppState::LoadFailed;
+                    self.set_status(format!("Load Failed: {}", trim_status(&message)));
                     self.clear_execution_state();
+                    self.error_banner = Some(message.clone());
+                    self.push_event_text(
+                        tcld_tui::debug::EventSeverity::Error,
+                        &format!(
+                            "target_load_failed path={} status={status} message={message}\nerror_code={error_code}\nerror_info={error_info}",
+                            path.display()
+                        ),
+                    );
                 }
-                WireEvent::BlocksRevalidated { block } => {
-                    needs_revalidate.push(block.clone());
+                DebugEvent::SourceRegistered(source) => {
+                    self.push_event(EventLine::info(format!(
+                        "source unit registered: {} generation {}",
+                        source.identity.display_label(),
+                        source.generation
+                    )));
+                    needs_revalidate.push(source.block_id);
                 }
-                _ => {}
+                DebugEvent::SourceRevalidated(source) => {
+                    self.push_event(EventLine::info(format!(
+                        "source unit revalidated: {} generation {}",
+                        source.identity.display_label(),
+                        source.generation
+                    )));
+                    needs_revalidate.push(source.block_id);
+                }
+                DebugEvent::SourceUnavailable {
+                    identity,
+                    block_id,
+                    reason,
+                } => {
+                    self.cache.source_units.remove(&block_id);
+                    if self.cache.showing_block_id.as_deref() == Some(&block_id) {
+                        self.cache.showing_block_id = None;
+                        self.cache.showing_qname = None;
+                        self.cache.origin = self.cache.user_script_origin;
+                    }
+                    self.push_event(EventLine::warn(format!(
+                        "source unit unavailable: {}: {reason}",
+                        identity.display_label()
+                    )));
+                }
+                DebugEvent::CompanionSourceDiscovered(source) => {
+                    self.push_event(EventLine::warn(format!(
+                        "unverified companion source {}: {}",
+                        source.path.display(),
+                        source.reason
+                    )))
+                }
+                DebugEvent::CodeRegistered(code) => self.push_event(EventLine::info(format!(
+                    "code object {} registered{}",
+                    code.id.0,
+                    code.name
+                        .as_deref()
+                        .map(|name| format!(" ({name})"))
+                        .unwrap_or_default()
+                ))),
             }
         }
+        let source_registry_changed = !needs_revalidate.is_empty();
         for block in needs_revalidate {
             self.invalidate_block(&block);
+        }
+        if source_registry_changed {
+            self.refresh_source_artifacts();
+            self.reload_breakpoints();
+            self.update_source_view();
+        }
+        if !pauses.is_empty() {
+            self.refresh_source_artifacts();
+            for pause in pauses {
+                self.apply_pause(pause);
+            }
         }
         if needs_refresh && self.app_state == AppState::Stopped {
             self.refresh_state();
@@ -546,6 +627,7 @@ impl DebugApp {
         self.stack.clear();
         self.locals.clear();
         self.cache.showing_qname = None;
+        self.cache.showing_block_id = None;
         self.cache.origin = self.cache.user_script_origin;
         self.ui.selections.stack.select(None);
         self.ui.selections.locals.select(None);
@@ -561,60 +643,305 @@ impl DebugApp {
                 self.cache.origin = self.cache.user_script_origin;
             }
         }
+        self.cache.source_units.remove(block);
+        if self.cache.showing_block_id.as_deref() == Some(block) {
+            self.cache.showing_block_id = None;
+        }
+    }
+
+    fn apply_pause(&mut self, pause: super::contract::BackendPause) {
+        let source = pause.location.source.as_ref();
+        let source_hint = pause.location.source_hint.as_ref();
+        let code_line = pause
+            .location
+            .code
+            .and_then(|location| self.cache.pc_to_line.get(&location.pc).copied());
+        let line = source
+            .map(|location| location.line)
+            .or(code_line)
+            .or_else(|| source_hint.map(|hint| hint.line))
+            .unwrap_or(0);
+        self.cache.secondary_highlight_line = if source.is_some() {
+            code_line
+        } else {
+            source_hint.map(|hint| hint.line)
+        };
+        let qname = pause.proc_qname.clone().unwrap_or_default();
+        let block_id = source
+            .map(|location| location.block_id.clone())
+            .unwrap_or_else(|| {
+                pause.location.code.map_or_else(
+                    || "runtime".to_owned(),
+                    |location| format!("code:{}", location.code_id.0),
+                )
+            });
+        let block_kind =
+            source.map_or(
+                tcld_tui::debug::SourceBlockKind::Anonymous,
+                |location| match location.block_kind {
+                    tcld_debug_wire::SourceBlockKind::File => {
+                        tcld_tui::debug::SourceBlockKind::File
+                    }
+                    tcld_debug_wire::SourceBlockKind::Proc => {
+                        tcld_tui::debug::SourceBlockKind::Proc
+                    }
+                    tcld_debug_wire::SourceBlockKind::Anonymous => {
+                        tcld_tui::debug::SourceBlockKind::Anonymous
+                    }
+                },
+            );
+        let pause_reason = match pause.reason {
+            DebugPauseReason::Entry => tcld_tui::debug::PauseReasonLabel::Entry,
+            DebugPauseReason::Step | DebugPauseReason::StepOver | DebugPauseReason::StepOut => {
+                tcld_tui::debug::PauseReasonLabel::Step
+            }
+            DebugPauseReason::Breakpoint => tcld_tui::debug::PauseReasonLabel::Breakpoint,
+            DebugPauseReason::Watchpoint => tcld_tui::debug::PauseReasonLabel::Watchpoint,
+            DebugPauseReason::Pause => tcld_tui::debug::PauseReasonLabel::Pause,
+            DebugPauseReason::InstructionStep | DebugPauseReason::RunToLocation => {
+                tcld_tui::debug::PauseReasonLabel::InstructionStep
+            }
+            DebugPauseReason::InstructionBreakpoint => {
+                tcld_tui::debug::PauseReasonLabel::InstructionBreakpoint
+            }
+            DebugPauseReason::Error => tcld_tui::debug::PauseReasonLabel::Error,
+        };
+        let focus = FocusedProc {
+            block_id,
+            block_kind,
+            source_path: source
+                .and_then(|location| location.source_path.clone())
+                .map(|path| path.to_string()),
+            qname,
+            line,
+            offset_start: source
+                .map(|location| location.offset_start)
+                .or_else(|| pause.location.code.map(|location| location.pc))
+                .unwrap_or(0),
+            offset_end: source
+                .map(|location| location.offset_end)
+                .or_else(|| {
+                    pause
+                        .location
+                        .code
+                        .map(|location| location.pc.saturating_add(1))
+                })
+                .unwrap_or(0),
+            pause_reason,
+            frame_count: pause.frame_count,
+            breakpoint: pause.breakpoint.map(|id| id.0),
+            pause_kind: if pause.error.is_some() {
+                tcld_tui::debug::PauseKind::Error
+            } else {
+                tcld_tui::debug::PauseKind::Normal
+            },
+            error_message: pause.error,
+        };
+        self.paused_focus = Some(focus.clone());
+        self.focused_proc = Some(focus);
+        self.set_status(match pause.reason {
+            DebugPauseReason::Entry => "Paused at entry".to_owned(),
+            reason => format!("Paused · {reason:?}"),
+        });
+        self.push_event(EventLine::pause(format!(
+            "paused at {} · {:?}",
+            format_debug_location(&pause.location),
+            pause.reason
+        )));
+    }
+
+    fn refresh_source_artifacts(&mut self) {
+        let Some(backend) = self.backend.as_mut() else {
+            return;
+        };
+        if let Ok(sources) = backend.sources() {
+            for source in sources {
+                let raw: Vec<String> = source.text.lines().map(str::to_owned).collect();
+                let highlighted = highlight_lines(&raw, &self.theme);
+                if let Some(qname) = source.source.qualified_proc.clone() {
+                    self.cache.proc_bodies.insert(qname, highlighted.clone());
+                }
+                self.cache.source_units.insert(
+                    source.source.block_id.clone(),
+                    CachedSourceUnit {
+                        registration: source.source,
+                        lines: highlighted,
+                    },
+                );
+            }
+        }
+        if self
+            .capabilities
+            .support(BackendOperation::DisassemblyAccess)
+            .is_supported()
+            && let Ok(disassemblies) = backend.disassembly()
+            && let Some(disassembly) = disassemblies.first()
+        {
+            self.cache.pc_to_line.clear();
+            self.cache.line_to_code.clear();
+            for (index, line) in disassembly.lines.iter().enumerate() {
+                let line_number = u32::try_from(index + 1).unwrap_or(u32::MAX);
+                if let Some(pc) = parse_disassembly_pc(line) {
+                    self.cache.pc_to_line.insert(pc, line_number);
+                    self.cache.line_to_code.insert(
+                        line_number,
+                        super::contract::DebugCodeLocation {
+                            code_id: disassembly.code.id,
+                            pc,
+                        },
+                    );
+                }
+            }
+            if let Some(instruction_set) = disassembly.instruction_set.as_deref() {
+                self.theme_name = format!("{} · {instruction_set}", self.theme.name());
+            }
+            if self
+                .capabilities
+                .support(BackendOperation::DirectBytecode)
+                .is_supported()
+            {
+                self.cache.user_script = disassembly
+                    .lines
+                    .iter()
+                    .cloned()
+                    .map(SourceLine::raw)
+                    .collect();
+                self.cache.origin = SourceOrigin::Synthetic;
+                self.cache.user_script_origin = SourceOrigin::Synthetic;
+            } else {
+                self.cache.secondary = disassembly
+                    .lines
+                    .iter()
+                    .cloned()
+                    .map(SourceLine::raw)
+                    .collect();
+            }
+        }
+        if let Ok(companions) = backend.companion_sources()
+            && let Some(companion) = companions.first()
+        {
+            self.cache.secondary = companion
+                .text
+                .lines()
+                .map(|line| SourceLine::raw(line.to_owned()))
+                .collect();
+        }
+    }
+
+    fn evaluate_frontend_watches(&mut self) {
+        if self.app_state != AppState::Stopped
+            || !self
+                .capabilities
+                .support(BackendOperation::Evaluate)
+                .is_supported()
+        {
+            return;
+        }
+        let Some(backend) = self.backend.as_mut() else {
+            return;
+        };
+        for watch in &mut self.watches {
+            let previous = (watch.last_value.clone(), watch.last_error.clone());
+            match backend.evaluate(
+                self.inspected_frame,
+                &format!("expr {}", quote_tcl_word(&watch.expr)),
+            ) {
+                Ok(result) if result.completion_code == 0 => {
+                    watch.last_value = Some(result.result);
+                    watch.last_error = None;
+                }
+                Ok(result) => {
+                    watch.last_value = None;
+                    watch.last_error = Some(format!(
+                        "code {}: {}",
+                        result.completion_code, result.result
+                    ));
+                }
+                Err(error) => {
+                    watch.last_value = None;
+                    watch.last_error = Some(error.to_string());
+                }
+            }
+            watch.changed |= previous != (watch.last_value.clone(), watch.last_error.clone());
+        }
     }
 
     fn refresh_state(&mut self) {
-        if self.session.is_none() {
+        if self.backend.is_none() {
             return;
         }
-        let (state, focused, stack, breakpoints, mut watches, coverage) = {
-            let s = self.session.as_mut().unwrap();
-            let state = s.app_state().unwrap_or(AppState::Stopped);
-            let focused = s.focused_proc();
-            let stack = if focused.is_some() {
-                s.stack().unwrap_or_default()
+        let (state, stack, breakpoints, watches, coverage) = {
+            let backend = self.backend.as_mut().unwrap();
+            let state = backend.state().unwrap_or(DebugLifecycleState::Paused);
+            let stack = backend
+                .stack_frames()
+                .unwrap_or_default()
+                .into_iter()
+                .map(backend_stack_to_tui)
+                .collect();
+            let breakpoints = backend
+                .breakpoints()
+                .unwrap_or_default()
+                .into_iter()
+                .map(backend_breakpoint_to_tui)
+                .collect();
+            let watches = if state == DebugLifecycleState::Paused {
+                backend
+                    .evaluate_watch_entries(0)
+                    .or_else(|_| backend.watch_entries())
+                    .ok()
             } else {
-                Vec::new()
-            };
-            let breakpoints = s.breakpoints().unwrap_or_default();
-            let watches = if state == AppState::Stopped {
-                s.evaluate_watches(0)
-                    .unwrap_or_else(|_| s.watches().unwrap_or_default())
-            } else {
-                s.watches().unwrap_or_default()
+                backend.watch_entries().ok()
             };
             let coverage = if self.coverage_enabled {
-                s.coverage().unwrap_or_default()
+                backend.coverage_snapshot().unwrap_or_default()
             } else {
                 Vec::new()
             };
-            (state, focused, stack, breakpoints, watches, coverage)
+            (state, stack, breakpoints, watches, coverage)
         };
-        self.app_state = state;
-        self.paused_focus = focused.clone();
-        self.focused_proc = focused;
+        self.app_state = state.into();
         self.stack = stack;
         self.breakpoints = breakpoints;
-        let previous_watches: HashMap<&str, (&Option<String>, &Option<String>)> = self
+        let previous_watches: HashMap<&str, (&Option<String>, &Option<String>, bool)> = self
             .watches
             .iter()
-            .map(|watch| (watch.id.as_str(), (&watch.last_value, &watch.last_error)))
+            .map(|watch| {
+                (
+                    watch.id.as_str(),
+                    (&watch.last_value, &watch.last_error, watch.changed),
+                )
+            })
             .collect();
-        for watch in &mut watches {
-            watch.changed =
-                previous_watches
-                    .get(watch.id.as_str())
-                    .is_some_and(|(value, error)| {
-                        (value.is_some() || error.is_some())
-                            && (*value != &watch.last_value || *error != &watch.last_error)
-                    });
+        if let Some(mut watches) = watches {
+            for watch in &mut watches {
+                watch.changed = previous_watches.get(watch.id.as_str()).is_some_and(
+                    |(value, error, was_changed)| {
+                        *was_changed
+                            || (value.is_some() || error.is_some())
+                                && (*value != &watch.last_value || *error != &watch.last_error)
+                    },
+                );
+            }
+            self.watches = watches;
+        } else {
+            self.evaluate_frontend_watches();
         }
-        self.watches = watches;
         self.coverage = coverage;
+        self.refresh_source_artifacts();
         // Reset inspected frame to bottom (most recent) on each refresh
         // unless the user already pinned a frame in-pane.
-        if let Some((index, top)) = self.stack.iter().enumerate().next_back() {
-            self.inspected_frame = top.level;
+        let selected = if self
+            .capabilities
+            .support(BackendOperation::InstructionBreakpoints)
+            .is_supported()
+        {
+            self.stack.iter().enumerate().next()
+        } else {
+            self.stack.iter().enumerate().next_back()
+        };
+        if let Some((index, frame)) = selected {
+            self.inspected_frame = frame.level;
             self.ui.selections.stack.select(Some(index));
         } else {
             self.inspected_frame = 0;
@@ -627,17 +954,21 @@ impl DebugApp {
     }
 
     fn update_locals(&mut self) {
-        if self.session.is_none() || self.app_state != AppState::Stopped {
+        if self.backend.is_none() || self.app_state != AppState::Stopped {
             self.locals.clear();
             return;
         }
         let level = self.inspected_frame;
         let fresh = self
-            .session
+            .backend
             .as_mut()
             .unwrap()
-            .variables(level)
+            .variables_for_frame(level)
             .unwrap_or_default();
+        let fresh: Vec<(String, String)> = fresh
+            .into_iter()
+            .map(|variable| (variable.name, variable.value))
+            .collect();
         // Diff against the last snapshot for this frame level.
         let prev = self.locals_prev.get(&level).cloned().unwrap_or_default();
         let prev_map: HashMap<&str, &str> =
@@ -674,12 +1005,40 @@ impl DebugApp {
     /// we've cached, show that; otherwise fall back to the user script.
     fn update_source_view(&mut self) {
         let Some(focused) = self.focused_proc.clone() else {
+            self.cache.showing_block_id = None;
             self.cache.showing_qname = None;
             self.cache.origin = self.cache.user_script_origin;
             return;
         };
+        if let Some(unit) = self.cache.source_units.get(&focused.block_id) {
+            self.cache.showing_block_id = Some(focused.block_id.clone());
+            self.cache.showing_qname = unit.registration.qualified_proc.clone();
+            self.cache.origin = match &unit.registration.identity {
+                DebugSourceUnitIdentity::File(path) => {
+                    if path == &self.user_script {
+                        self.cache.user_script_origin
+                    } else {
+                        SourceOrigin::SourcedFile
+                    }
+                }
+                DebugSourceUnitIdentity::Procedure(_)
+                    if self.cache.user_script_origin == SourceOrigin::CompiledSource =>
+                {
+                    SourceOrigin::CompiledSource
+                }
+                DebugSourceUnitIdentity::Procedure(_) => SourceOrigin::ProcBody,
+                DebugSourceUnitIdentity::Anonymous { .. } => SourceOrigin::Anonymous,
+            };
+            let line = focused.line.saturating_sub(1) as usize;
+            if line < self.current_source_lines().len() {
+                self.ui.source_cursor = line;
+                self.ui.center_source_cursor = true;
+            }
+            return;
+        }
         let needs_proc_body = focused.block_id.starts_with("proc:");
         if !needs_proc_body {
+            self.cache.showing_block_id = None;
             self.cache.showing_qname = None;
             self.cache.origin = self.cache.user_script_origin;
             if focused.line > 0 {
@@ -695,15 +1054,16 @@ impl DebugApp {
 
         let qname = focused.qname.clone();
         if !self.cache.proc_bodies.contains_key(&qname)
-            && let Some(session) = self.session.as_mut()
-            && let Ok(body) = session.proc_body(&qname)
+            && let Some(backend) = self.backend.as_mut()
+            && let Ok(source) = backend.procedure_source(&qname)
         {
-            let raw: Vec<String> = body.lines().map(str::to_string).collect();
+            let raw: Vec<String> = source.text.lines().map(str::to_string).collect();
             let highlighted = highlight_lines(&raw, &self.theme);
             self.cache.proc_bodies.insert(qname.clone(), highlighted);
         }
 
         if self.cache.proc_bodies.contains_key(&qname) {
+            self.cache.showing_block_id = None;
             self.cache.showing_qname = Some(qname);
             self.cache.origin = SourceOrigin::ProcBody;
             // Auto-position cursor on the paused line if it lands inside
@@ -714,6 +1074,7 @@ impl DebugApp {
                 self.ui.center_source_cursor = true;
             }
         } else {
+            self.cache.showing_block_id = None;
             self.cache.showing_qname = None;
             self.cache.origin = self.cache.user_script_origin;
         }
@@ -750,6 +1111,141 @@ impl DebugApp {
         let full = msg.into();
         self.last_status_full = full.clone();
         self.status = full;
+    }
+
+    fn require_capability(&mut self, operation: BackendOperation, action: &str) -> bool {
+        match self.capabilities.support(operation) {
+            super::contract::CapabilitySupport::Supported => true,
+            super::contract::CapabilitySupport::Unsupported { reason } => {
+                self.set_status(format!("{action} unavailable: {reason}"));
+                false
+            }
+        }
+    }
+
+    fn reload_breakpoints(&mut self) {
+        self.breakpoints = self
+            .backend
+            .as_mut()
+            .and_then(|backend| backend.breakpoints().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(backend_breakpoint_to_tui)
+            .collect();
+    }
+
+    fn toggle_instruction_breakpoint(&mut self, location: super::contract::DebugCodeLocation) {
+        if !self.require_capability(
+            BackendOperation::InstructionBreakpoints,
+            "instruction breakpoint",
+        ) {
+            return;
+        }
+        let existing = self
+            .backend
+            .as_mut()
+            .and_then(|backend| backend.breakpoints().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .find(|breakpoint| {
+                matches!(
+                    breakpoint.spec,
+                    DebugBreakpointSpec::Instruction { location: candidate, .. }
+                        if candidate == location
+                )
+            });
+        let result = if let Some(existing) = existing {
+            let id = existing.id.clone();
+            self.backend
+                .as_mut()
+                .unwrap()
+                .remove_breakpoint(&id)
+                .map(|_| {
+                    format!(
+                        "cleared instruction breakpoint {} @ pc {}",
+                        id.0, location.pc
+                    )
+                })
+        } else {
+            self.backend
+                .as_mut()
+                .unwrap()
+                .add_breakpoint(DebugBreakpointSpec::Instruction {
+                    location,
+                    condition: None,
+                })
+                .map(|breakpoint| {
+                    format!(
+                        "set instruction breakpoint {} @ code {} pc {}",
+                        breakpoint.id.0, location.code_id.0, location.pc
+                    )
+                })
+        };
+        match result {
+            Ok(status) => self.set_status(status),
+            Err(error) => self.set_status(format!("instruction breakpoint failed: {error}")),
+        }
+        self.reload_breakpoints();
+    }
+
+    fn run_to_cursor(&mut self) {
+        if self.app_state != AppState::Stopped {
+            self.set_status(format!(
+                "run-to unavailable: debugger is {:?}",
+                self.app_state
+            ));
+            return;
+        }
+        if !self.require_capability(BackendOperation::RunToLocation, "run to cursor") {
+            return;
+        }
+        let line = u32::try_from(self.ui.source_cursor + 1).unwrap_or(u32::MAX);
+        if !self
+            .capabilities
+            .support(BackendOperation::DirectBytecode)
+            .is_supported()
+        {
+            let command = self
+                .current_source_lines()
+                .get(self.ui.source_cursor)
+                .and_then(|source_line| {
+                    source_line.commands.get(
+                        self.ui
+                            .source_command_cursor
+                            .min(source_line.commands.len().saturating_sub(1)),
+                    )
+                })
+                .cloned();
+            let unit = self
+                .displayed_source_unit()
+                .map(|unit| unit.registration.clone());
+            if let (Some(command), Some(unit)) = (command, unit) {
+                let source = tcld_debug_wire::SourceLocation {
+                    block_id: unit.block_id,
+                    block_kind: if unit.qualified_proc.is_some() {
+                        tcld_debug_wire::SourceBlockKind::Proc
+                    } else {
+                        tcld_debug_wire::SourceBlockKind::File
+                    },
+                    source_path: unit.path.map(|path| path.display().to_string()),
+                    qualified_proc: unit.qualified_proc,
+                    line,
+                    offset_start: command.target_offset,
+                    offset_end: command.target_offset.saturating_add(command.len.max(1)),
+                };
+                self.run_backend_action("run to cursor", |backend| {
+                    backend.run_to_location(DebugLocation::source(source))
+                });
+                return;
+            }
+        }
+        let Some(location) = self.cache.line_to_code.get(&line).copied() else {
+            self.set_status("run to cursor unavailable: selected disassembly row has no PC");
+            return;
+        };
+        self.run_backend_action("run to cursor", |backend| {
+            backend.run_to_location(DebugLocation::code(location))
+        });
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -893,19 +1389,53 @@ impl DebugApp {
             DebugAction::IgnoreError => self.do_ignore_error(),
             DebugAction::ToggleCoverage => self.toggle_coverage(),
             DebugAction::ListSlaves => self.do_list_slaves(),
-            DebugAction::PreInstrument => self.open_prompt_full(
-                PromptKind::PreInstrument,
-                "instrument <qname> <body…>",
-                None,
-                None,
-            ),
+            DebugAction::PreInstrument => {
+                if self.require_capability(BackendOperation::SourceAccess, "pre-instrument") {
+                    self.open_prompt_full(
+                        PromptKind::PreInstrument,
+                        "instrument <qname> <body…>",
+                        None,
+                        None,
+                    );
+                }
+            }
             DebugAction::ToggleBreakpoint => self.toggle_breakpoint_at_cursor(),
-            DebugAction::AddBreakpoint => self.open_prompt(PromptKind::AddBreakpoint, "bp add"),
-            DebugAction::GotoProc => self.open_prompt(PromptKind::GotoProc, "goto proc"),
+            DebugAction::AddBreakpoint => {
+                let label = if self
+                    .capabilities
+                    .support(BackendOperation::InstructionBreakpoints)
+                    .is_supported()
+                {
+                    "bp add <pc> [condition]"
+                } else {
+                    "bp add <qname> <offset> [condition]"
+                };
+                self.open_prompt(PromptKind::AddBreakpoint, label);
+            }
+            DebugAction::GotoProc => {
+                if self.require_capability(BackendOperation::ProcedureList, "go to procedure") {
+                    self.open_prompt(PromptKind::GotoProc, "goto proc");
+                }
+            }
+            DebugAction::RunToCursor => self.run_to_cursor(),
             DebugAction::ProcPicker => self.open_proc_picker(),
-            DebugAction::AddWatch => self.open_prompt(PromptKind::AddWatch, "watch add"),
-            DebugAction::AddWatchpoint => self.open_prompt(PromptKind::AddWatchpoint, "wp add"),
-            DebugAction::Eval => self.open_prompt(PromptKind::EvalExpr, "eval"),
+            DebugAction::AddWatch => {
+                if self.require_capability(BackendOperation::Watches, "add watch") {
+                    self.open_prompt(PromptKind::AddWatch, "watch add");
+                }
+            }
+            DebugAction::AddWatchpoint => {
+                if self
+                    .require_capability(BackendOperation::SourceBreakpoints, "variable watchpoint")
+                {
+                    self.open_prompt(PromptKind::AddWatchpoint, "wp add");
+                }
+            }
+            DebugAction::Eval => {
+                if self.require_capability(BackendOperation::Evaluate, "evaluate") {
+                    self.open_prompt(PromptKind::EvalExpr, "eval");
+                }
+            }
             DebugAction::Command => self.open_prompt(PromptKind::Command, "dbg"),
             DebugAction::EventFilter => self.open_prompt_full(
                 PromptKind::EventFilter,
@@ -1104,8 +1634,17 @@ impl DebugApp {
             frame.block_kind,
             Some(tcld_tui::debug::SourceBlockKind::File)
         ) {
+            self.cache.showing_block_id = frame
+                .block
+                .as_ref()
+                .filter(|block| self.cache.source_units.contains_key(*block))
+                .cloned();
             self.cache.showing_qname = None;
-            self.cache.origin = self.cache.user_script_origin;
+            self.cache.origin = self
+                .cache
+                .showing_block_id
+                .as_ref()
+                .map_or(self.cache.user_script_origin, |_| SourceOrigin::SourcedFile);
             if let Some(line) = frame.line {
                 self.ui.source_cursor = line.saturating_sub(1) as usize;
                 self.ui.source_cursor = self
@@ -1122,14 +1661,19 @@ impl DebugApp {
         {
             let qname = qname.to_string();
             if !self.cache.proc_bodies.contains_key(&qname)
-                && let Some(session) = self.session.as_mut()
-                && let Ok(body) = session.proc_body(&qname)
+                && let Some(backend) = self.backend.as_mut()
+                && let Ok(source) = backend.procedure_source(&qname)
             {
-                let raw: Vec<String> = body.lines().map(str::to_string).collect();
+                let raw: Vec<String> = source.text.lines().map(str::to_string).collect();
                 let highlighted = highlight_lines(&raw, &self.theme);
                 self.cache.proc_bodies.insert(qname.clone(), highlighted);
             }
             if self.cache.proc_bodies.contains_key(&qname) {
+                self.cache.showing_block_id = frame
+                    .block
+                    .as_ref()
+                    .filter(|block| self.cache.source_units.contains_key(*block))
+                    .cloned();
                 self.cache.showing_qname = Some(qname);
                 self.cache.origin = SourceOrigin::ProcBody;
                 if let Some(line) = frame.line {
@@ -1140,6 +1684,7 @@ impl DebugApp {
                 }
             }
         }
+        self.update_source_view();
         self.update_locals();
     }
 
@@ -1213,15 +1758,14 @@ impl DebugApp {
     }
 
     fn open_proc_picker(&mut self) {
-        if self.session.is_none() {
-            self.set_status("no nub attached");
+        if !self.require_capability(BackendOperation::ProcedureList, "procedure picker") {
             return;
         }
         let list = self
-            .session
+            .backend
             .as_mut()
             .unwrap()
-            .proc_list()
+            .procedures()
             .unwrap_or_default();
         self.proc_picker = list;
         self.update_proc_picker_filter("");
@@ -1288,8 +1832,8 @@ impl DebugApp {
         self.proc_picker_filtered = self
             .proc_picker
             .iter()
-            .filter(|p| q.is_empty() || p.qname.to_lowercase().contains(&q))
-            .map(|p| p.qname.clone())
+            .filter(|p| q.is_empty() || p.qualified_name.to_lowercase().contains(&q))
+            .map(|p| p.qualified_name.clone())
             .take(20)
             .collect();
         self.proc_picker_selected = if self.proc_picker_filtered.is_empty() {
@@ -1381,6 +1925,7 @@ impl DebugApp {
     }
 
     fn reset_to_user_script(&mut self) {
+        self.cache.showing_block_id = None;
         self.cache.showing_qname = None;
         self.cache.origin = self.cache.user_script_origin;
         self.set_status("source view → user script");
@@ -1441,8 +1986,11 @@ impl DebugApp {
             ));
             return;
         }
+        if !self.require_capability(BackendOperation::Continue, "continue") {
+            return;
+        }
         self.record_action(RepeatableAction::Continue);
-        let _ = self.send_op_log(Op::Continue, "continue");
+        self.run_backend_action("continue", |backend| backend.continue_execution());
     }
     fn do_step_into(&mut self) {
         if self.app_state != AppState::Stopped {
@@ -1452,8 +2000,23 @@ impl DebugApp {
             ));
             return;
         }
+        let (operation, step) = if self
+            .capabilities
+            .support(BackendOperation::StepInto)
+            .is_supported()
+        {
+            (BackendOperation::StepInto, DebugStepKind::Into)
+        } else {
+            (
+                BackendOperation::StepInstruction,
+                DebugStepKind::InstructionInto,
+            )
+        };
+        if !self.require_capability(operation, "step into") {
+            return;
+        }
         self.record_action(RepeatableAction::StepInto);
-        let _ = self.send_op_log(Op::StepInto, "step into");
+        self.run_backend_action("step into", |backend| backend.step(step));
     }
     fn do_step_over(&mut self) {
         if self.app_state != AppState::Stopped {
@@ -1463,8 +2026,23 @@ impl DebugApp {
             ));
             return;
         }
+        let (operation, step) = if self
+            .capabilities
+            .support(BackendOperation::StepOver)
+            .is_supported()
+        {
+            (BackendOperation::StepOver, DebugStepKind::Over)
+        } else {
+            (
+                BackendOperation::StepOverInstruction,
+                DebugStepKind::InstructionOver,
+            )
+        };
+        if !self.require_capability(operation, "step over") {
+            return;
+        }
         self.record_action(RepeatableAction::StepOver);
-        let _ = self.send_op_log(Op::StepOver, "step over");
+        self.run_backend_action("step over", |backend| backend.step(step));
     }
     fn do_step_out(&mut self) {
         if self.app_state != AppState::Stopped {
@@ -1474,8 +2052,23 @@ impl DebugApp {
             ));
             return;
         }
+        let (operation, step) = if self
+            .capabilities
+            .support(BackendOperation::StepOut)
+            .is_supported()
+        {
+            (BackendOperation::StepOut, DebugStepKind::Out)
+        } else {
+            (
+                BackendOperation::StepOutInstruction,
+                DebugStepKind::InstructionOut,
+            )
+        };
+        if !self.require_capability(operation, "step out") {
+            return;
+        }
         self.record_action(RepeatableAction::StepOut);
-        let _ = self.send_op_log(Op::StepOut, "step out");
+        self.run_backend_action("step out", |backend| backend.step(step));
     }
     fn do_pause(&mut self) {
         if self.app_state != AppState::Running {
@@ -1485,113 +2078,97 @@ impl DebugApp {
             ));
             return;
         }
+        if !self.require_capability(BackendOperation::Pause, "pause") {
+            return;
+        }
         self.record_action(RepeatableAction::Pause);
-        let _ = self.send_op_log(Op::Interrupt, "pause");
+        self.run_backend_action("pause", |backend| backend.pause_execution());
     }
 
-    fn send_op_log(&mut self, op: Op, label: &str) -> Option<String> {
-        if self.session.is_none() {
-            self.set_status("no nub attached — press r to start");
-            return None;
-        }
-        let result = self.session.as_mut().unwrap().send(op);
+    fn run_backend_action(
+        &mut self,
+        label: &str,
+        action: impl FnOnce(&mut dyn DebugBackend) -> Result<(), super::backend::BackendError>,
+    ) {
+        let result = match self.backend.as_mut() {
+            Some(backend) => action(&mut **backend),
+            None => Err(super::backend::BackendError::Message(
+                "debug backend is closed".into(),
+            )),
+        };
         match result {
-            Ok(resp) => {
-                self.set_status(format!("{label} → {}", trim_status(&resp)));
-                self.push_event_text(
-                    tcld_tui::debug::EventSeverity::Info,
-                    &format!("{label} → {resp}"),
-                );
-                Some(resp)
+            Ok(()) => {
+                // Change markers describe the transition caused by this
+                // execution action. Clear the preceding transition now; once
+                // a new value is observed, keep its marker durable across any
+                // identical refreshes until the next execution action.
+                for watch in &mut self.watches {
+                    watch.changed = false;
+                }
+                self.set_status(label);
+                self.push_event(EventLine::info(label));
+                let processed_events = self.tick();
+                // A pause event refreshes the complete snapshot in `tick`.
+                // Refreshing again here erases one-frame change markers for
+                // watches and locals before the terminal ever renders them.
+                if !processed_events && self.app_state == AppState::Stopped {
+                    self.refresh_state();
+                }
             }
             Err(e) => {
                 self.set_status(format!("{label} failed: {e}"));
                 self.push_event(EventLine::error(format!("{label}: {e}")));
-                None
             }
         }
     }
 
     fn do_restart(&mut self) {
-        let exported_breakpoints = self
-            .session
-            .as_mut()
-            .and_then(|session| session.export_breakpoints().ok());
-        let restart_state =
-            exported_breakpoints.map(|breakpoints| self.serialize_persisted_state(breakpoints));
-        if let Some(session) = self.session.take() {
-            session.close();
+        if !self.require_capability(BackendOperation::Restart, "restart") {
+            return;
         }
-        match Session::connect(self.paths.clone()) {
-            Ok(session) => {
-                self.push_event(EventLine::info("nub reconnected"));
-                self.session = Some(session);
-                self.app_state = AppState::Ready;
-                self.focused_proc = None;
-                self.paused_focus = None;
-                self.stack.clear();
-                self.locals.clear();
-                self.breakpoints.clear();
-                self.watches.clear();
-                self.coverage.clear();
-                self.cache.proc_bodies.clear();
-                self.cache.showing_qname = None;
-                self.cache.origin = self.cache.user_script_origin;
-                self.set_status("Ready");
-                if let Some(serialized) = restart_state.as_deref() {
-                    match self.import_persisted_state(serialized) {
-                        Ok(()) => {
-                            self.breakpoints = self
-                                .session
-                                .as_mut()
-                                .unwrap()
-                                .breakpoints()
-                                .unwrap_or_default();
-                            self.watches =
-                                self.session.as_mut().unwrap().watches().unwrap_or_default();
-                            self.push_event(EventLine::info(
-                                "restored in-memory breakpoints and watches",
-                            ));
+        let saved_watches: Vec<(String, String)> = self
+            .watches
+            .iter()
+            .map(|watch| (watch.name.clone(), watch.expr.clone()))
+            .collect();
+        self.clear_execution_state();
+        self.cache.proc_bodies.clear();
+        let result = self.backend.as_mut().unwrap().restart_target(true);
+        match result {
+            Ok(()) => {
+                let backend_managed = self.backend.as_mut().unwrap().watch_entries().is_ok();
+                if backend_managed {
+                    for (name, expression) in &saved_watches {
+                        if let Err(error) =
+                            self.backend.as_mut().unwrap().add_watch(name, expression)
+                        {
+                            self.push_event(EventLine::error(format!(
+                                "restart watch restore failed for {name}: {error}"
+                            )));
                         }
-                        Err(error) => self.push_event(EventLine::error(format!(
-                            "restart state restore failed: {error}"
-                        ))),
-                    }
-                } else {
-                    self.try_autoload_persisted_breakpoints();
-                }
-                let start = self
-                    .session
-                    .as_mut()
-                    .expect("reconnected session")
-                    .start_target(&self.user_script, true);
-                match start {
-                    Ok(ack) => {
-                        self.app_state = AppState::Loading;
-                        self.set_status("Loading");
-                        self.push_event(EventLine::info(format!("target rescheduled: {ack}")));
-                    }
-                    Err(error) => {
-                        self.set_status(format!("restart target failed: {error}"));
-                        self.push_event(EventLine::error(format!(
-                            "restart target failed: {error}"
-                        )));
                     }
                 }
+                self.push_event(EventLine::info("restart"));
+                self.tick();
+                self.refresh_state();
             }
-            Err(e) => {
-                self.set_status(format!("restart failed: {e}"));
-                self.push_event(EventLine::error(format!("restart error: {e}")));
+            Err(error) => {
+                self.set_status(format!("restart failed: {error}"));
+                self.push_event(EventLine::error(format!("restart: {error}")));
             }
         }
     }
 
     fn do_ignore_error(&mut self) {
-        if self.session.is_none() {
-            self.set_status("no nub attached");
-            return;
-        }
-        let result = self.session.as_mut().unwrap().ignore_error();
+        let result = self
+            .backend
+            .as_mut()
+            .ok_or_else(|| "debug backend is closed".to_owned())
+            .and_then(|backend| {
+                backend
+                    .ignore_current_error()
+                    .map_err(|error| error.to_string())
+            });
         match result {
             Ok(_) => self.set_status("next exception will not pause"),
             Err(e) => self.set_status(format!("ignore_error failed: {e}")),
@@ -1599,12 +2176,11 @@ impl DebugApp {
     }
 
     fn toggle_coverage(&mut self) {
-        if self.session.is_none() {
-            self.set_status("no nub attached");
+        if !self.require_capability(BackendOperation::Coverage, "coverage") {
             return;
         }
         let new = !self.coverage_enabled;
-        let result = self.session.as_mut().unwrap().coverage_enable(new);
+        let result = self.backend.as_mut().unwrap().set_coverage_enabled(new);
         match result {
             Ok(_) => {
                 self.coverage_enabled = new;
@@ -1615,10 +2191,10 @@ impl DebugApp {
                 });
                 if new {
                     self.coverage = self
-                        .session
+                        .backend
                         .as_mut()
                         .unwrap()
-                        .coverage()
+                        .coverage_snapshot()
                         .unwrap_or_default();
                 } else {
                     self.coverage.clear();
@@ -1629,15 +2205,11 @@ impl DebugApp {
     }
 
     fn do_list_slaves(&mut self) {
-        if self.session.is_none() {
-            self.set_status("no nub attached");
-            return;
-        }
         let list = self
-            .session
+            .backend
             .as_mut()
             .unwrap()
-            .slave_list()
+            .slave_interpreters()
             .unwrap_or_default();
         if list.is_empty() {
             self.set_status("no slave interps registered");
@@ -1649,6 +2221,18 @@ impl DebugApp {
     fn toggle_breakpoint_at_cursor(&mut self) {
         self.record_action(RepeatableAction::ToggleBp);
         let line_no = (self.ui.source_cursor + 1) as u32;
+        if self
+            .capabilities
+            .support(BackendOperation::DirectBytecode)
+            .is_supported()
+            && let Some(location) = self.cache.line_to_code.get(&line_no).copied()
+        {
+            self.toggle_instruction_breakpoint(location);
+            return;
+        }
+        if !self.require_capability(BackendOperation::SourceBreakpoints, "source breakpoint") {
+            return;
+        }
         let command = self
             .current_source_lines()
             .get(self.ui.source_cursor)
@@ -1664,8 +2248,24 @@ impl DebugApp {
             self.toggle_command_breakpoint(line_no, &command);
             return;
         }
-        if self.cache.showing_qname.is_none() {
+        let displayed_is_file = self.displayed_source_unit().is_none_or(|unit| {
+            matches!(unit.registration.identity, DebugSourceUnitIdentity::File(_))
+        });
+        if self.cache.showing_qname.is_none() && displayed_is_file {
             self.toggle_file_breakpoint_at_line(line_no);
+            return;
+        }
+        if self.cache.showing_qname.is_none()
+            && self.displayed_source_unit().is_some_and(|unit| {
+                matches!(
+                    unit.registration.identity,
+                    DebugSourceUnitIdentity::Anonymous { .. }
+                )
+            })
+        {
+            self.set_status(
+                "eval source unit is session-only; durable breakpoint rebinding is unavailable",
+            );
             return;
         }
         let qname = self
@@ -1681,30 +2281,35 @@ impl DebugApp {
             );
             return;
         }
-        if self.session.is_none() {
-            self.set_status("no nub attached — press r to start");
-            return;
-        }
-        let (status, bps, severity_error) = {
-            let session = self.session.as_mut().unwrap();
-            let existing = session
-                .line_breakpoints_for(&qname)
-                .ok()
-                .and_then(|list| list.into_iter().find(|bp| bp.offset == u64::from(line_no)));
-            let (status, was_error) = match existing {
-                Some(bp) => match session.remove_breakpoint(&bp.id) {
-                    Ok(_) => (format!("removed {} @ {qname}:{line_no}", bp.id), false),
-                    Err(e) => (format!("remove failed: {e}"), true),
-                },
-                None => match session.add_breakpoint(&qname, u64::from(line_no), None) {
-                    Ok(resp) => (
-                        format!("breakpoint @ {qname}:{line_no} → {}", trim_status(&resp)),
-                        false,
-                    ),
-                    Err(e) => (format!("breakpoint add failed: {e}"), true),
-                },
-            };
-            (status, session.breakpoints().unwrap_or_default(), was_error)
+        let existing = self
+            .breakpoints
+            .iter()
+            .find(|bp| bp.qname == qname && bp.offset == u64::from(line_no))
+            .cloned();
+        let result = match existing {
+            Some(bp) => self
+                .backend
+                .as_mut()
+                .unwrap()
+                .remove_breakpoint(&DebugBreakpointId(bp.id.clone()))
+                .map(|_| format!("removed {} @ {qname}:{line_no}", bp.id)),
+            None => self
+                .backend
+                .as_mut()
+                .unwrap()
+                .add_breakpoint(DebugBreakpointSpec::SourceCommand {
+                    block_id: format!("proc:{qname}"),
+                    source_path: None,
+                    qualified_proc: Some(qname.clone()),
+                    span: SourceCommandSpan::new(u64::from(line_no), u64::from(line_no) + 1)
+                        .expect("line span"),
+                    condition: None,
+                })
+                .map(|bp| format!("breakpoint {} @ {qname}:{line_no}", bp.id.0)),
+        };
+        let (status, severity_error) = match result {
+            Ok(status) => (status, false),
+            Err(error) => (format!("breakpoint failed: {error}"), true),
         };
         if severity_error {
             self.push_event(EventLine::error(status.clone()));
@@ -1712,7 +2317,7 @@ impl DebugApp {
             self.push_event(EventLine::info(status.clone()));
         }
         self.set_status(status);
-        self.breakpoints = bps;
+        self.reload_breakpoints();
     }
 
     fn move_source_command(&mut self, delta: isize) {
@@ -1747,14 +2352,17 @@ impl DebugApp {
     }
 
     fn toggle_command_breakpoint(&mut self, line_no: u32, command: &SourceCommand) {
-        if self.session.is_none() {
-            self.set_status("no nub attached - press r to start");
+        if !self.require_capability(BackendOperation::SourceBreakpoints, "command breakpoint") {
             return;
         }
 
         let target_qname = command
             .qname
             .clone()
+            .or_else(|| {
+                self.displayed_source_unit()
+                    .and_then(|unit| unit.registration.qualified_proc.clone())
+            })
             .or_else(|| self.cache.showing_qname.clone());
         let preinstrument_body = command.qname.as_ref().and_then(|qname| {
             let mut source = self
@@ -1781,7 +2389,23 @@ impl DebugApp {
             return;
         }
 
-        let target_path = self.user_script.to_string_lossy().into_owned();
+        let target_file = target_qname
+            .is_none()
+            .then(|| self.displayed_file_path())
+            .flatten();
+        if target_qname.is_none() && target_file.is_none() {
+            self.set_status(
+                "eval source unit is session-only; durable source breakpoints are unavailable",
+            );
+            self.push_event(EventLine::warn(
+                "breakpoint not armed: anonymous eval identity cannot be rebound safely",
+            ));
+            return;
+        }
+        let target_path = target_file
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let existing = self
             .breakpoints
             .iter()
@@ -1799,10 +2423,10 @@ impl DebugApp {
             && let (Some(qname), Some(body)) =
                 (command.qname.as_deref(), preinstrument_body.as_deref())
             && let Err(error) = self
-                .session
+                .backend
                 .as_mut()
                 .unwrap()
-                .pre_instrument_proc(qname, body)
+                .preinstrument_procedure(qname, body)
         {
             self.finish_command_breakpoint_toggle(
                 format!("breakpoint pre-instrument failed: {error}"),
@@ -1812,45 +2436,47 @@ impl DebugApp {
         }
 
         let (status, failed) = {
-            let session = self.session.as_mut().unwrap();
+            let backend = self.backend.as_mut().unwrap();
             match existing {
-                Some(breakpoint) => match session.remove_breakpoint(&breakpoint.id) {
-                    Ok(_) => (
-                        format!(
-                            "removed {} @ line {line_no}, {} (bytes {}..{})",
-                            breakpoint.id,
-                            command.label,
-                            command.offset,
-                            command.offset + command.len
-                        ),
-                        false,
-                    ),
-                    Err(error) => (format!("remove failed: {error}"), true),
-                },
-                None => {
-                    let result = if let Some(qname) = target_qname.as_deref() {
-                        session.add_command_breakpoint(
-                            qname,
-                            command.target_offset,
-                            command.len,
-                            None,
-                        )
-                    } else {
-                        session.add_file_command_breakpoint(
-                            &self.user_script,
-                            command.target_offset,
-                            command.len,
-                            None,
-                        )
-                    };
-                    match result {
-                        Ok(response) => (
+                Some(breakpoint) => {
+                    match backend.remove_breakpoint(&DebugBreakpointId(breakpoint.id.clone())) {
+                        Ok(_) => (
                             format!(
-                                "breakpoint @ line {line_no}, {} (bytes {}..{}) -> {}",
+                                "removed {} @ line {line_no}, {} (bytes {}..{})",
+                                breakpoint.id,
                                 command.label,
                                 command.offset,
-                                command.offset + command.len,
-                                trim_status(&response)
+                                command.offset + command.len
+                            ),
+                            false,
+                        ),
+                        Err(error) => (format!("remove failed: {error}"), true),
+                    }
+                }
+                None => {
+                    let result = backend.add_breakpoint(DebugBreakpointSpec::SourceCommand {
+                        block_id: self.cache.showing_block_id.clone().unwrap_or_else(|| {
+                            target_qname.as_ref().map_or_else(
+                                || format!("file:{target_path}"),
+                                |qname| format!("proc:{qname}"),
+                            )
+                        }),
+                        source_path: target_file.clone(),
+                        qualified_proc: target_qname.clone(),
+                        span: SourceCommandSpan::new(
+                            command.target_offset,
+                            command.target_offset.saturating_add(command.len.max(1)),
+                        )
+                        .expect("source command span"),
+                        condition: None,
+                    });
+                    match result {
+                        Ok(_breakpoint) => (
+                            format!(
+                                "breakpoint @ line {line_no}, {} (bytes {}..{})",
+                                command.label,
+                                command.offset,
+                                command.offset + command.len
                             ),
                             false,
                         ),
@@ -1859,12 +2485,7 @@ impl DebugApp {
                 }
             }
         };
-        self.breakpoints = self
-            .session
-            .as_mut()
-            .unwrap()
-            .breakpoints()
-            .unwrap_or_default();
+        self.reload_breakpoints();
         self.push_event(if failed {
             EventLine::error(status.clone())
         } else {
@@ -1874,11 +2495,7 @@ impl DebugApp {
     }
 
     fn finish_command_breakpoint_toggle(&mut self, status: String, failed: bool) {
-        self.breakpoints = self
-            .session
-            .as_mut()
-            .map(|session| session.breakpoints().unwrap_or_default())
-            .unwrap_or_default();
+        self.reload_breakpoints();
         self.push_event(if failed {
             EventLine::error(status.clone())
         } else {
@@ -1888,35 +2505,44 @@ impl DebugApp {
     }
 
     fn toggle_file_breakpoint_at_line(&mut self, line_no: u32) {
-        if self.session.is_none() {
-            self.set_status("no nub attached - press r to start");
+        if !self.require_capability(BackendOperation::SourceBreakpoints, "file breakpoint") {
             return;
         }
-        let target_path = self.user_script.to_string_lossy().into_owned();
+        let Some(target_file) = self.displayed_file_path() else {
+            self.set_status("current source unit is not a durable file breakpoint target");
+            return;
+        };
+        let target_path = target_file.to_string_lossy().into_owned();
         let existing = self.breakpoints.iter().find(|breakpoint| {
             breakpoint.source_path.as_deref() == Some(target_path.as_str())
                 && breakpoint.line == Some(line_no)
         });
         let (status, failed) = {
-            let session = self.session.as_mut().unwrap();
+            let backend = self.backend.as_mut().unwrap();
             match existing {
-                Some(breakpoint) => match session.remove_breakpoint(&breakpoint.id) {
-                    Ok(_) => (
-                        format!(
-                            "removed {} @ {}:{line_no}",
-                            breakpoint.id,
-                            self.display_path.display()
+                Some(breakpoint) => {
+                    match backend.remove_breakpoint(&DebugBreakpointId(breakpoint.id.clone())) {
+                        Ok(_) => (
+                            format!(
+                                "removed {} @ {}:{line_no}",
+                                breakpoint.id,
+                                self.display_path.display()
+                            ),
+                            false,
                         ),
-                        false,
-                    ),
-                    Err(error) => (format!("remove failed: {error}"), true),
-                },
-                None => match session.add_file_breakpoint(&self.user_script, line_no, None) {
-                    Ok(response) => (
+                        Err(error) => (format!("remove failed: {error}"), true),
+                    }
+                }
+                None => match backend.add_breakpoint(DebugBreakpointSpec::SourceLine {
+                    path: target_file.clone(),
+                    line: line_no,
+                    condition: None,
+                }) {
+                    Ok(breakpoint) => (
                         format!(
-                            "breakpoint @ {}:{line_no} -> {}",
-                            self.display_path.display(),
-                            trim_status(&response)
+                            "breakpoint {} @ {}:{line_no}",
+                            breakpoint.id.0,
+                            target_file.display(),
                         ),
                         false,
                     ),
@@ -1924,12 +2550,7 @@ impl DebugApp {
                 },
             }
         };
-        self.breakpoints = self
-            .session
-            .as_mut()
-            .unwrap()
-            .breakpoints()
-            .unwrap_or_default();
+        self.reload_breakpoints();
         self.push_event(if failed {
             EventLine::error(status.clone())
         } else {
@@ -1945,22 +2566,12 @@ impl DebugApp {
         let Some(bp) = self.breakpoints.get(idx).cloned() else {
             return;
         };
-        if self.session.is_none() {
-            self.set_status("no nub attached");
-            return;
-        }
         let target = !bp.enabled;
         let result = self
-            .session
+            .backend
             .as_mut()
             .unwrap()
-            .enable_breakpoint(&bp.id, target);
-        let bps = self
-            .session
-            .as_mut()
-            .unwrap()
-            .breakpoints()
-            .unwrap_or_default();
+            .set_breakpoint_enabled(&DebugBreakpointId(bp.id.clone()), target);
         match result {
             Ok(_) => self.set_status(format!(
                 "{} {} ",
@@ -1973,7 +2584,7 @@ impl DebugApp {
                 self.set_status(message);
             }
         }
-        self.breakpoints = bps;
+        self.reload_breakpoints();
     }
 
     fn delete_selected_bp(&mut self) {
@@ -1983,23 +2594,18 @@ impl DebugApp {
         let Some(bp) = self.breakpoints.get(idx).cloned() else {
             return;
         };
-        if self.session.is_none() {
-            self.set_status("no nub attached");
-            return;
-        }
-        let (status, bps, failed) = {
-            let session = self.session.as_mut().unwrap();
-            let (status, failed) = match session.remove_breakpoint(&bp.id) {
+        let (status, failed) = {
+            let backend = self.backend.as_mut().unwrap();
+            match backend.remove_breakpoint(&DebugBreakpointId(bp.id.clone())) {
                 Ok(_) => (format!("removed {}", bp.id), false),
                 Err(e) => (format!("delete failed: {e}"), true),
-            };
-            (status, session.breakpoints().unwrap_or_default(), failed)
+            }
         };
         if failed {
             self.push_event(EventLine::error(status.clone()));
         }
         self.set_status(status);
-        self.breakpoints = bps;
+        self.reload_breakpoints();
         if self.breakpoints.is_empty() {
             self.ui.selections.breakpoints.select(None);
         } else if idx >= self.breakpoints.len() {
@@ -2017,20 +2623,26 @@ impl DebugApp {
         let Some(w) = self.watches.get(idx).cloned() else {
             return;
         };
-        if self.session.is_none() {
-            self.set_status("no nub attached");
-            return;
-        }
-        let (status, watches) = {
-            let session = self.session.as_mut().unwrap();
-            let status = match session.watch_remove(&w.id) {
+        let backend_managed = self.backend.as_mut().unwrap().watch_entries().is_ok();
+        let status = if backend_managed {
+            match self.backend.as_mut().unwrap().remove_watch(&w.id) {
                 Ok(_) => format!("watch {} removed", w.id),
                 Err(e) => format!("watch remove failed: {e}"),
-            };
-            (status, session.watches().unwrap_or_default())
+            }
+        } else {
+            format!("watch {} removed", w.id)
         };
         self.set_status(status);
-        self.watches = watches;
+        if backend_managed {
+            self.watches = self
+                .backend
+                .as_mut()
+                .unwrap()
+                .watch_entries()
+                .unwrap_or_default();
+        } else {
+            self.watches.remove(idx);
+        }
         if self.watches.is_empty() {
             self.ui.selections.watches.select(None);
         } else if idx >= self.watches.len() {
@@ -2042,11 +2654,7 @@ impl DebugApp {
     }
 
     fn do_export_breakpoints(&mut self) {
-        if self.session.is_none() {
-            self.set_status("no nub attached");
-            return;
-        }
-        let serialized = match self.session.as_mut().unwrap().export_breakpoints() {
+        let serialized = match self.backend.as_mut().unwrap().export_breakpoint_state() {
             Ok(s) => s,
             Err(e) => {
                 let message = format!("export failed: {e}");
@@ -2068,10 +2676,6 @@ impl DebugApp {
     }
 
     fn do_import_breakpoints(&mut self) {
-        if self.session.is_none() {
-            self.set_status("no nub attached");
-            return;
-        }
         let path = persist_path(&self.user_script);
         let serialized = match std::fs::read_to_string(&path) {
             Ok(s) => s,
@@ -2083,13 +2687,6 @@ impl DebugApp {
             }
         };
         let result = self.import_persisted_state(&serialized);
-        let bps = self
-            .session
-            .as_mut()
-            .unwrap()
-            .breakpoints()
-            .unwrap_or_default();
-        let watches = self.session.as_mut().unwrap().watches().unwrap_or_default();
         match result {
             Ok(_) => self.set_status(format!("breakpoints imported from {}", path.display())),
             Err(e) => {
@@ -2098,14 +2695,13 @@ impl DebugApp {
                 self.set_status(message);
             }
         }
-        self.breakpoints = bps;
-        self.watches = watches;
+        self.reload_breakpoints();
     }
 
     fn try_autoload_persisted_breakpoints(&mut self) {
         let path = persist_path(&self.user_script);
         if path.exists()
-            && self.session.is_some()
+            && self.backend.is_some()
             && let Ok(serialized) = std::fs::read_to_string(&path)
             && self.import_persisted_state(&serialized).is_ok()
         {
@@ -2113,13 +2709,7 @@ impl DebugApp {
                 "auto-imported breakpoints from {}",
                 path.display()
             )));
-            self.breakpoints = self
-                .session
-                .as_mut()
-                .unwrap()
-                .breakpoints()
-                .unwrap_or_default();
-            self.watches = self.session.as_mut().unwrap().watches().unwrap_or_default();
+            self.reload_breakpoints();
         }
     }
 
@@ -2127,10 +2717,10 @@ impl DebugApp {
         // Best-effort: if we still have a session and any breakpoints,
         // round-trip them through `bp_export` and write next to the
         // user script so the next launch auto-imports.
-        if self.session.is_none() || (self.breakpoints.is_empty() && self.watches.is_empty()) {
+        if self.backend.is_none() || (self.breakpoints.is_empty() && self.watches.is_empty()) {
             return;
         }
-        let serialized = match self.session.as_mut().unwrap().export_breakpoints() {
+        let serialized = match self.backend.as_mut().unwrap().export_breakpoint_state() {
             Ok(s) => s,
             Err(_) => return,
         };
@@ -2172,19 +2762,24 @@ impl DebugApp {
             .as_ref()
             .map(|state| state.breakpoints.as_str())
             .unwrap_or(serialized);
-        let session = self
-            .session
+        let backend = self
+            .backend
             .as_mut()
-            .ok_or_else(|| "no nub attached".to_string())?;
-        session.import_breakpoints(breakpoints)?;
+            .ok_or_else(|| "debug backend is closed".to_string())?;
+        backend
+            .import_breakpoint_state(breakpoints)
+            .map_err(|error| error.to_string())?;
         if let Some(state) = parsed {
-            let existing = session.watches().unwrap_or_default();
+            let existing = backend.watch_entries().unwrap_or_default();
             for watch in existing {
-                let _ = session.watch_remove(&watch.id);
+                let _ = backend.remove_watch(&watch.id);
             }
             for watch in state.watches {
-                session.watch_add(&watch.name, &watch.expression)?;
+                backend
+                    .add_watch(&watch.name, &watch.expression)
+                    .map_err(|error| error.to_string())?;
             }
+            self.watches = backend.watch_entries().unwrap_or_default();
         }
         Ok(())
     }
@@ -2249,8 +2844,8 @@ impl Drop for DebugSurface {
         if let Some(path) = self.app.maybe_save_transcript() {
             eprintln!("transcript saved: {}", path.display());
         }
-        if let Some(session) = self.app.session.take() {
-            session.close();
+        if let Some(backend) = self.app.backend.take() {
+            backend.close();
         }
     }
 }
@@ -2408,30 +3003,37 @@ fn execute_dbg_command(app: &mut DebugApp, line: &str) {
         }
         return;
     }
-    if app.session.is_none() {
-        app.set_status("no nub attached — press r to start");
+    if app.backend.is_none() {
+        app.set_status("debug backend is closed");
         return;
     }
 
     let result: Result<String, String> = {
-        let session = app.session.as_mut().unwrap();
+        let backend = app.backend.as_mut().unwrap();
         match sub.as_str() {
-            "events" => {
-                let evs = session.drain_events();
-                Ok(if evs.is_empty() {
-                    "(no events)".to_string()
-                } else {
-                    evs.iter()
-                        .map(|e| format_event(e).1)
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-            }
-            "state" => session.app_state().map(|s| s.label().to_string()),
-            "stack" => session.send(Op::InspectStack),
+            "events" => Ok(if app.events.is_empty() {
+                "(no events)".to_owned()
+            } else {
+                app.events
+                    .iter()
+                    .map(|event| event.text.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }),
+            "state" => backend
+                .state()
+                .map(|state| AppState::from(state).label().to_owned())
+                .map_err(|error| error.to_string()),
+            "stack" => backend
+                .stack_frames()
+                .map(|frames| format!("{frames:#?}"))
+                .map_err(|error| error.to_string()),
             "vars" => {
                 let lvl: i64 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-                session.send(Op::GetVariables { level: lvl })
+                backend
+                    .variables_for_frame(lvl)
+                    .map(|variables| format!("{variables:#?}"))
+                    .map_err(|error| error.to_string())
             }
             "get" => {
                 let Some(name) = rest.first().cloned() else {
@@ -2439,11 +3041,9 @@ fn execute_dbg_command(app: &mut DebugApp, line: &str) {
                     return;
                 };
                 let level: i64 = rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                session.send(Op::GetVar {
-                    level,
-                    name,
-                    maxlen: None,
-                })
+                backend
+                    .get_variable(level, &name)
+                    .map_err(|error| error.to_string())
             }
             "set" => {
                 let Some(name) = rest.first().cloned() else {
@@ -2455,43 +3055,105 @@ fn execute_dbg_command(app: &mut DebugApp, line: &str) {
                     return;
                 };
                 let level: i64 = rest.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-                session.send(Op::SetVar {
-                    level,
-                    name,
-                    value: val,
-                })
+                backend
+                    .set_variable(level, &name, &val)
+                    .map(|_| val)
+                    .map_err(|error| error.to_string())
             }
             "eval" => {
                 if rest.is_empty() {
                     app.set_status("usage: eval <script>");
                     return;
                 }
-                session.send(Op::EvalInFrame {
-                    level: 0,
-                    script: rest.join(" "),
-                })
+                backend
+                    .evaluate(0, &rest.join(" "))
+                    .map(|result| result.result)
+                    .map_err(|error| error.to_string())
             }
-            "procs" => session.send(Op::ProcList),
+            "procs" => backend
+                .procedures()
+                .map(|procedures| {
+                    procedures
+                        .into_iter()
+                        .map(|procedure| procedure.qualified_name)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .map_err(|error| error.to_string()),
             "ploc" => {
                 let Some(qname) = rest.first().cloned() else {
                     app.set_status("usage: ploc <qname>");
                     return;
                 };
-                session.send(Op::ProcLocation { qname })
+                backend
+                    .procedure_location(&qname)
+                    .map(|location| format!("{location:?}"))
+                    .map_err(|error| error.to_string())
             }
             "pbody" => {
                 let Some(qname) = rest.first().cloned() else {
                     app.set_status("usage: pbody <qname>");
                     return;
                 };
-                session.send(Op::ProcBody { qname })
+                backend
+                    .procedure_source(&qname)
+                    .map(|source| source.text)
+                    .map_err(|error| error.to_string())
             }
-            "cont" | "continue" => session.send(Op::Continue),
-            "step" => session.send(Op::StepInto),
-            "over" => session.send(Op::StepOver),
-            "out" => session.send(Op::StepOut),
-            "pause" => session.send(Op::Interrupt),
-            "coverage" => session.send(Op::Coverage),
+            "cont" | "continue" => backend
+                .continue_execution()
+                .map(|_| "continued".into())
+                .map_err(|error| error.to_string()),
+            "step" => backend
+                .step(
+                    if backend
+                        .capabilities()
+                        .support(BackendOperation::StepInto)
+                        .is_supported()
+                    {
+                        DebugStepKind::Into
+                    } else {
+                        DebugStepKind::InstructionInto
+                    },
+                )
+                .map(|_| "stepped".into())
+                .map_err(|error| error.to_string()),
+            "over" => backend
+                .step(
+                    if backend
+                        .capabilities()
+                        .support(BackendOperation::StepOver)
+                        .is_supported()
+                    {
+                        DebugStepKind::Over
+                    } else {
+                        DebugStepKind::InstructionOver
+                    },
+                )
+                .map(|_| "stepped over".into())
+                .map_err(|error| error.to_string()),
+            "out" => backend
+                .step(
+                    if backend
+                        .capabilities()
+                        .support(BackendOperation::StepOut)
+                        .is_supported()
+                    {
+                        DebugStepKind::Out
+                    } else {
+                        DebugStepKind::InstructionOut
+                    },
+                )
+                .map(|_| "stepped out".into())
+                .map_err(|error| error.to_string()),
+            "pause" => backend
+                .pause_execution()
+                .map(|_| "pause requested".into())
+                .map_err(|error| error.to_string()),
+            "coverage" => backend
+                .coverage_snapshot()
+                .map(|coverage| format!("{coverage:#?}"))
+                .map_err(|error| error.to_string()),
             other => Err(format!("unknown command: {other}")),
         }
     };
@@ -2510,20 +3172,29 @@ fn execute_dbg_command(app: &mut DebugApp, line: &str) {
 }
 
 fn goto_proc(app: &mut DebugApp, qname: &str) {
-    if app.session.is_none() {
-        app.set_status("no nub attached");
+    if !app.require_capability(BackendOperation::ProcedureList, "go to procedure") {
         return;
     }
-    let result = app.session.as_mut().unwrap().proc_location(qname);
+    let result = app.backend.as_mut().unwrap().procedure_location(qname);
     match result {
         Ok(Some(off)) => {
             // Try to fetch the body so the source pane shows the actual proc.
-            let body = app.session.as_mut().unwrap().proc_body(qname).ok();
-            if let Some(body) = body {
-                let raw: Vec<String> = body.lines().map(str::to_string).collect();
+            let source = app.backend.as_mut().unwrap().procedure_source(qname).ok();
+            if let Some(source) = source {
+                let raw: Vec<String> = source.text.lines().map(str::to_string).collect();
                 let highlighted = highlight_lines(&raw, &app.theme);
                 let _ = raw;
-                app.cache.proc_bodies.insert(qname.to_string(), highlighted);
+                app.cache
+                    .proc_bodies
+                    .insert(qname.to_string(), highlighted.clone());
+                app.cache.showing_block_id = Some(source.source.block_id.clone());
+                app.cache.source_units.insert(
+                    source.source.block_id.clone(),
+                    CachedSourceUnit {
+                        registration: source.source,
+                        lines: highlighted,
+                    },
+                );
                 app.cache.showing_qname = Some(qname.to_string());
                 app.cache.origin = SourceOrigin::ProcBody;
             }
@@ -2542,9 +3213,9 @@ fn proc_picker_select(app: &mut DebugApp, query: &str) {
     if let Some(entry) = app
         .proc_picker
         .iter()
-        .find(|p| p.qname.to_lowercase().contains(&q))
+        .find(|p| p.qualified_name.to_lowercase().contains(&q))
     {
-        let qname = entry.qname.clone();
+        let qname = entry.qualified_name.clone();
         goto_proc(app, &qname);
     } else {
         app.set_status(format!("no proc matching {query:?}"));
@@ -2556,20 +3227,36 @@ fn add_watch_from_prompt(app: &mut DebugApp, raw: &str) {
         Some((n, e)) => (n.trim().to_string(), e.trim().to_string()),
         None => (raw.to_string(), raw.to_string()),
     };
-    if app.session.is_none() {
-        app.set_status("no nub attached");
+    if !app.require_capability(BackendOperation::Watches, "add watch") {
         return;
     }
-    let (status, watches) = {
-        let session = app.session.as_mut().unwrap();
-        let status = match session.watch_add(&name, &expr) {
-            Ok(resp) => format!("watch added: {}", trim_status(&resp)),
-            Err(e) => format!("watch add failed: {e}"),
-        };
-        (status, session.watches().unwrap_or_default())
-    };
-    app.set_status(status);
-    app.watches = watches;
+    let backend_managed = app.backend.as_mut().unwrap().watch_entries().is_ok();
+    if backend_managed {
+        match app.backend.as_mut().unwrap().add_watch(&name, &expr) {
+            Ok(()) => {
+                app.watches = app
+                    .backend
+                    .as_mut()
+                    .unwrap()
+                    .watch_entries()
+                    .unwrap_or_default();
+                app.set_status(format!("watch added: {name} = {expr}"));
+            }
+            Err(error) => app.set_status(format!("watch add failed: {error}")),
+        }
+    } else {
+        let id = format!("ui-watch-{}", app.watches.len() + 1);
+        app.watches.push(WatchEntry {
+            id,
+            name: name.clone(),
+            expr: expr.clone(),
+            last_value: None,
+            last_error: None,
+            changed: false,
+        });
+        app.evaluate_frontend_watches();
+        app.set_status(format!("watch added: {name} = {expr}"));
+    }
 }
 
 fn add_watchpoint_from_prompt(app: &mut DebugApp, raw: &str) {
@@ -2578,44 +3265,36 @@ fn add_watchpoint_from_prompt(app: &mut DebugApp, raw: &str) {
         Some((n, o)) => (n.trim().to_string(), o.trim().to_string()),
         None => (raw.to_string(), "w".to_string()),
     };
-    if app.session.is_none() {
-        app.set_status("no nub attached");
+    if !app.require_capability(BackendOperation::SourceBreakpoints, "variable watchpoint") {
         return;
     }
-    let result = app.session.as_mut().unwrap().watchpoint_add(&name, &ops);
-    let bps = app
-        .session
-        .as_mut()
-        .unwrap()
-        .breakpoints()
-        .unwrap_or_default();
+    let result = app.backend.as_mut().unwrap().add_watchpoint(&name, &ops);
     match result {
-        Ok(resp) => app.set_status(format!(
-            "var-write watchpoint on {name}: {}",
-            trim_status(&resp)
-        )),
+        Ok(()) => app.set_status(format!("var-write watchpoint on {name}")),
         Err(e) => app.set_status(format!("wp_add: {e}")),
     }
-    app.breakpoints = bps;
+    app.reload_breakpoints();
 }
 
 fn eval_in_current_frame(app: &mut DebugApp, script: &str) {
-    if app.session.is_none() {
-        app.set_status("no nub attached");
+    if !app.require_capability(BackendOperation::Evaluate, "evaluate") {
         return;
     }
     let level = app.inspected_frame;
-    let result = app.session.as_mut().unwrap().send(Op::EvalInFrame {
-        level,
-        script: script.to_string(),
-    });
+    let result = app.backend.as_mut().unwrap().evaluate(level, script);
     match result {
-        Ok(resp) => {
-            app.set_status(format!("eval(level={level}) → {}", trim_status(&resp)));
+        Ok(result) => {
+            app.set_status(format!(
+                "eval(level={level}) code={} → {}",
+                result.completion_code,
+                trim_status(&result.result)
+            ));
             app.push_event_text(
                 tcld_tui::debug::EventSeverity::Info,
-                &format!("eval@{level} {script} = {resp}"),
+                &format!("eval@{level} {script} = {}", result.result),
             );
+            app.update_locals();
+            app.evaluate_frontend_watches();
         }
         Err(e) => app.set_status(format!("eval failed: {e}")),
     }
@@ -2623,17 +3302,29 @@ fn eval_in_current_frame(app: &mut DebugApp, script: &str) {
 
 fn add_bp_from_prompt(app: &mut DebugApp, raw: &str) {
     let mut tokens = raw.split_whitespace();
-    let qname = match tokens.next() {
-        Some(q) => q.to_string(),
-        None => {
-            app.set_status("usage: B <qname> <offset> [condition]");
-            return;
+    let instruction_backend = app
+        .capabilities
+        .support(BackendOperation::InstructionBreakpoints)
+        .is_supported();
+    let qname = if instruction_backend {
+        None
+    } else {
+        match tokens.next() {
+            Some(q) => Some(q.to_string()),
+            None => {
+                app.set_status("usage: B <qname> <offset> [condition]");
+                return;
+            }
         }
     };
     let off_tok = match tokens.next() {
         Some(t) => t.to_string(),
         None => {
-            app.set_status("usage: B <qname> <offset> [condition]");
+            app.set_status(if instruction_backend {
+                "usage: B <pc> [condition]"
+            } else {
+                "usage: B <qname> <offset> [condition]"
+            });
             return;
         }
     };
@@ -2654,20 +3345,51 @@ fn add_bp_from_prompt(app: &mut DebugApp, raw: &str) {
             Some(rest.join(" "))
         }
     };
-    if app.session.is_none() {
-        app.set_status("no nub attached");
-        return;
-    }
-    let (status, bps) = {
-        let session = app.session.as_mut().unwrap();
-        let status = match session.add_breakpoint(&qname, offset, condition.as_deref()) {
-            Ok(resp) => format!("breakpoint added: {}", trim_status(&resp)),
-            Err(e) => format!("breakpoint add failed: {e}"),
-        };
-        (status, session.breakpoints().unwrap_or_default())
+    let result = if instruction_backend {
+        let code_id = app
+            .stack
+            .first()
+            .and_then(|frame| frame.block.as_deref())
+            .and_then(|block| block.strip_prefix("code:"))
+            .and_then(|id| id.parse::<u64>().ok())
+            .map(super::contract::DebugCodeId);
+        match code_id {
+            Some(code_id) => {
+                app.backend
+                    .as_mut()
+                    .unwrap()
+                    .add_breakpoint(DebugBreakpointSpec::Instruction {
+                        location: super::contract::DebugCodeLocation {
+                            code_id,
+                            pc: offset,
+                        },
+                        condition,
+                    })
+            }
+            None => Err(super::backend::BackendError::Message(
+                "no current code object".into(),
+            )),
+        }
+    } else {
+        let qname = qname.expect("source breakpoint parser requires a procedure name");
+        app.backend
+            .as_mut()
+            .unwrap()
+            .add_breakpoint(DebugBreakpointSpec::SourceCommand {
+                block_id: format!("proc:{qname}"),
+                source_path: None,
+                qualified_proc: Some(qname),
+                span: SourceCommandSpan::new(offset, offset.saturating_add(1))
+                    .expect("breakpoint span"),
+                condition,
+            })
+    };
+    let status = match result {
+        Ok(breakpoint) => format!("breakpoint added: {}", breakpoint.id.0),
+        Err(error) => format!("breakpoint add failed: {error}"),
     };
     app.set_status(status);
-    app.breakpoints = bps;
+    app.reload_breakpoints();
 }
 
 fn edit_condition(app: &mut DebugApp, target_id: Option<String>, raw: &str) {
@@ -2679,27 +3401,17 @@ fn edit_condition(app: &mut DebugApp, target_id: Option<String>, raw: &str) {
         app.set_status("breakpoint vanished");
         return;
     };
-    if app.session.is_none() {
-        app.set_status("no nub attached");
-        return;
-    }
     let condition = if raw.is_empty() { None } else { Some(raw) };
     let result = app
-        .session
+        .backend
         .as_mut()
         .unwrap()
-        .update_condition(&bp, condition);
-    let bps = app
-        .session
-        .as_mut()
-        .unwrap()
-        .breakpoints()
-        .unwrap_or_default();
+        .set_breakpoint_condition(&DebugBreakpointId(bp.id), condition);
     match result {
         Ok(new_id) => app.set_status(if condition.is_some() {
-            format!("condition updated on {new_id}: {raw}")
+            format!("condition updated on {}: {raw}", new_id.0)
         } else {
-            format!("condition cleared on {new_id}")
+            format!("condition cleared on {}", new_id.0)
         }),
         Err(e) => {
             let message = format!("condition update failed: {e}");
@@ -2707,7 +3419,7 @@ fn edit_condition(app: &mut DebugApp, target_id: Option<String>, raw: &str) {
             app.set_status(message);
         }
     }
-    app.breakpoints = bps;
+    app.reload_breakpoints();
 }
 
 fn set_ignore(app: &mut DebugApp, target_id: Option<String>, raw: &str) {
@@ -2723,17 +3435,11 @@ fn set_ignore(app: &mut DebugApp, target_id: Option<String>, raw: &str) {
             return;
         }
     };
-    if app.session.is_none() {
-        app.set_status("no nub attached");
-        return;
-    }
-    let result = app.session.as_mut().unwrap().set_ignore(&id, count);
-    let bps = app
-        .session
+    let result = app
+        .backend
         .as_mut()
         .unwrap()
-        .breakpoints()
-        .unwrap_or_default();
+        .set_breakpoint_ignore_count(&DebugBreakpointId(id.clone()), count);
     match result {
         Ok(_) => app.set_status(format!("ignore_count({id}) = {count}")),
         Err(e) => {
@@ -2742,7 +3448,7 @@ fn set_ignore(app: &mut DebugApp, target_id: Option<String>, raw: &str) {
             app.set_status(message);
         }
     }
-    app.breakpoints = bps;
+    app.reload_breakpoints();
 }
 
 fn pre_instrument(app: &mut DebugApp, _body_buffer: Option<String>, raw: &str) {
@@ -2761,22 +3467,175 @@ fn pre_instrument(app: &mut DebugApp, _body_buffer: Option<String>, raw: &str) {
             return;
         }
     };
-    if app.session.is_none() {
-        app.set_status("no nub attached");
-        return;
-    }
     let result = app
-        .session
+        .backend
         .as_mut()
         .unwrap()
-        .pre_instrument_proc(&qname, &body);
+        .preinstrument_procedure(&qname, &body);
     match result {
-        Ok(resp) => app.set_status(format!("pre-instrumented {qname}: {}", trim_status(&resp))),
+        Ok(()) => app.set_status(format!("pre-instrumented {qname}")),
         Err(e) => app.set_status(format!("pre_instrument: {e}")),
     }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+fn backend_stack_to_tui(frame: super::contract::DebugStackFrame) -> StackFrame {
+    let source = frame.location.source;
+    let code = frame.location.code;
+    StackFrame {
+        level: frame.level,
+        kind: frame.kind,
+        proc_name: frame.proc_name,
+        block: source
+            .as_ref()
+            .map(|location| location.block_id.clone())
+            .or_else(|| code.map(|location| format!("code:{}", location.code_id.0))),
+        block_kind: source.as_ref().map(|location| match location.block_kind {
+            tcld_debug_wire::SourceBlockKind::File => tcld_tui::debug::SourceBlockKind::File,
+            tcld_debug_wire::SourceBlockKind::Proc => tcld_tui::debug::SourceBlockKind::Proc,
+            tcld_debug_wire::SourceBlockKind::Anonymous => {
+                tcld_tui::debug::SourceBlockKind::Anonymous
+            }
+        }),
+        source_path: source
+            .as_ref()
+            .and_then(|location| location.source_path.clone())
+            .map(|path| path.to_string()),
+        line: source.as_ref().map(|location| location.line),
+        offset_start: source
+            .as_ref()
+            .map(|location| location.offset_start)
+            .or_else(|| code.map(|location| location.pc))
+            .or(frame.location.observed_pc),
+        offset_end: source
+            .as_ref()
+            .map(|location| location.offset_end)
+            .or_else(|| code.map(|location| location.pc.saturating_add(1)))
+            .or_else(|| frame.location.observed_pc.map(|pc| pc.saturating_add(1))),
+    }
+}
+
+fn backend_breakpoint_to_tui(breakpoint: DebugBreakpoint) -> ProcBreakpoint {
+    let (
+        pending,
+        pending_reason,
+        resolved_block,
+        resolved_line,
+        resolved_offset,
+        resolved_len,
+        resolution_generation,
+    ) = match &breakpoint.resolution {
+        DebugBreakpointResolution::Pending { reason } => {
+            (true, Some(reason.clone()), None, None, None, None, None)
+        }
+        DebugBreakpointResolution::Resolved {
+            generation,
+            locations,
+        } => {
+            let source = locations
+                .first()
+                .and_then(|location| location.source.as_ref());
+            (
+                false,
+                None,
+                source.map(|source| source.block_id.clone()),
+                source.map(|source| source.line),
+                source.map(|source| source.offset_start),
+                source.map(|source| source.offset_end.saturating_sub(source.offset_start)),
+                *generation,
+            )
+        }
+    };
+    let (qname, source_path, line, offset, len) = match &breakpoint.spec {
+        DebugBreakpointSpec::SourceLine { path, line, .. } => (
+            String::new(),
+            Some(path.display().to_string()),
+            Some(*line),
+            u64::from(*line),
+            1,
+        ),
+        DebugBreakpointSpec::SourceCommand {
+            qualified_proc,
+            source_path,
+            span,
+            ..
+        } => (
+            qualified_proc.clone().unwrap_or_default(),
+            source_path.as_ref().map(|path| path.display().to_string()),
+            None,
+            span.offset_start,
+            span.byte_len(),
+        ),
+        DebugBreakpointSpec::Instruction { location, .. } => (
+            format!("code:{}", location.code_id.0),
+            Some(format!("bytecode object {}", location.code_id.0)),
+            None,
+            location.pc,
+            1,
+        ),
+    };
+    let condition = match &breakpoint.spec {
+        DebugBreakpointSpec::SourceLine { condition, .. }
+        | DebugBreakpointSpec::SourceCommand { condition, .. }
+        | DebugBreakpointSpec::Instruction { condition, .. } => condition.clone(),
+    };
+    ProcBreakpoint {
+        id: breakpoint.id.0,
+        qname,
+        source_path,
+        line,
+        pending,
+        pending_reason,
+        offset,
+        len,
+        resolved_block,
+        resolved_line,
+        resolved_offset,
+        resolved_len,
+        resolution_generation,
+        enabled: breakpoint.enabled,
+        hits: breakpoint.hit_count,
+        ignore_count: breakpoint.ignore_count,
+        condition,
+        kind: tcld_tui::debug::BreakpointKindLabel::Line,
+    }
+}
+
+fn parse_disassembly_pc(line: &str) -> Option<u64> {
+    let rest = line.trim_start().strip_prefix('(')?;
+    let end = rest.find(')')?;
+    rest[..end].trim().parse().ok()
+}
+
+fn format_debug_location(location: &DebugLocation) -> String {
+    if let Some(source) = &location.source {
+        return format!("{}:{}", source.block_id, source.line);
+    }
+    if let Some(code) = location.code {
+        return format!("code:{} pc:{}", code.code_id.0, code.pc);
+    }
+    location
+        .observed_pc
+        .map_or_else(|| "unknown location".into(), |pc| format!("pc:{pc}"))
+}
+
+fn quote_tcl_word(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for character in value.chars() {
+        match character {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '$' => quoted.push_str("\\$"),
+            '[' => quoted.push_str("\\["),
+            '\n' => quoted.push_str("\\n"),
+            character => quoted.push(character),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
 
 fn list_row(pane: Pane, hit: &tcld_tui::debug::HitTargets, y: u16) -> Option<usize> {
     let r = match pane {
@@ -2970,6 +3829,129 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    struct TestBackend;
+
+    impl DebugBackend for TestBackend {
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities::wire_host()
+        }
+        fn start_target(
+            &mut self,
+            _: &std::path::Path,
+            _: bool,
+        ) -> Result<(), super::super::backend::BackendError> {
+            Ok(())
+        }
+        fn restart_target(&mut self, _: bool) -> Result<(), super::super::backend::BackendError> {
+            Ok(())
+        }
+        fn continue_execution(&mut self) -> Result<(), super::super::backend::BackendError> {
+            Ok(())
+        }
+        fn pause_execution(&mut self) -> Result<(), super::super::backend::BackendError> {
+            Ok(())
+        }
+        fn step(&mut self, _: DebugStepKind) -> Result<(), super::super::backend::BackendError> {
+            Ok(())
+        }
+        fn run_to_location(
+            &mut self,
+            _: DebugLocation,
+        ) -> Result<(), super::super::backend::BackendError> {
+            Ok(())
+        }
+        fn stack_frames(
+            &mut self,
+        ) -> Result<Vec<super::super::contract::DebugStackFrame>, super::super::backend::BackendError>
+        {
+            Ok(Vec::new())
+        }
+        fn variables_for_frame(
+            &mut self,
+            _: i64,
+        ) -> Result<Vec<super::super::contract::DebugVariable>, super::super::backend::BackendError>
+        {
+            Ok(Vec::new())
+        }
+        fn evaluate(
+            &mut self,
+            _: i64,
+            _: &str,
+        ) -> Result<super::super::contract::DebugEvaluation, super::super::backend::BackendError>
+        {
+            Ok(super::super::contract::DebugEvaluation {
+                completion_code: 0,
+                result: String::new(),
+            })
+        }
+        fn add_breakpoint(
+            &mut self,
+            spec: DebugBreakpointSpec,
+        ) -> Result<DebugBreakpoint, super::super::backend::BackendError> {
+            Ok(DebugBreakpoint {
+                id: DebugBreakpointId("test-bp".into()),
+                spec,
+                enabled: true,
+                resolution: DebugBreakpointResolution::Pending {
+                    reason: "test".into(),
+                },
+                hit_count: 0,
+                ignore_count: 0,
+            })
+        }
+        fn remove_breakpoint(
+            &mut self,
+            _: &DebugBreakpointId,
+        ) -> Result<(), super::super::backend::BackendError> {
+            Ok(())
+        }
+        fn breakpoints(
+            &mut self,
+        ) -> Result<Vec<DebugBreakpoint>, super::super::backend::BackendError> {
+            Ok(Vec::new())
+        }
+        fn set_breakpoint_enabled(
+            &mut self,
+            _: &DebugBreakpointId,
+            _: bool,
+        ) -> Result<(), super::super::backend::BackendError> {
+            Ok(())
+        }
+        fn drain_events(&mut self) -> Vec<DebugEvent> {
+            Vec::new()
+        }
+        fn state(&mut self) -> Result<DebugLifecycleState, super::super::backend::BackendError> {
+            Ok(DebugLifecycleState::Ready)
+        }
+        fn sources(
+            &mut self,
+        ) -> Result<Vec<super::super::contract::SourceSnapshot>, super::super::backend::BackendError>
+        {
+            Ok(Vec::new())
+        }
+        fn companion_sources(
+            &mut self,
+        ) -> Result<
+            Vec<super::super::contract::CompanionSourceSnapshot>,
+            super::super::backend::BackendError,
+        > {
+            Ok(Vec::new())
+        }
+        fn disassembly(
+            &mut self,
+        ) -> Result<
+            Vec<super::super::contract::DisassemblySnapshot>,
+            super::super::backend::BackendError,
+        > {
+            Ok(Vec::new())
+        }
+        fn close(self: Box<Self>) {}
+    }
+
+    fn test_app(target: PreparedDebugTarget, theme: Theme) -> DebugApp {
+        DebugApp::with_backend(target, Box::new(TestBackend), "test host backend", theme).unwrap()
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         let modifiers = match code {
             KeyCode::BackTab => KeyModifiers::SHIFT,
@@ -2987,12 +3969,7 @@ mod tests {
         let theme = Theme::with_palette(true, "obsidian").unwrap();
         let user_script = std::env::temp_dir().join("tcld-debug-keymap-test.tcl");
         let _ = std::fs::write(&user_script, "puts hi\n");
-        let paths = NubPaths::explicit(
-            PathBuf::from("/bin/false"),
-            PathBuf::from("/dev/null"),
-            PathBuf::from("/dev/null"),
-        );
-        DebugApp::new(DebugTarget::user_script(user_script), paths, theme).unwrap()
+        test_app(PreparedDebugTarget::user_script(user_script), theme)
     }
 
     #[test]
@@ -3072,10 +4049,15 @@ mod tests {
     }
 
     #[test]
-    fn b_in_target_source_uses_file_line_path() {
+    fn b_in_target_source_uses_source_location() {
         let mut app = fake_app();
         app.handle_key(key(KeyCode::Char('b')));
-        assert!(app.status.contains("no nub attached"));
+        assert!(
+            app.status.contains("breakpoint")
+                && (app.status.contains("line 1") || app.status.contains(".tcl:1")),
+            "the canonical app should route b to a source breakpoint: {}",
+            app.status
+        );
     }
 
     #[test]
@@ -3236,7 +4218,7 @@ mod tests {
         std::fs::write(&runtime, "puts hi\n").unwrap();
         assert!(dir_path.exists());
         let provenance =
-            SourceProvenance::decompiled(runtime.clone(), PathBuf::from("/tmp/orig.tbc"), dir);
+            TargetProvenance::decompiled(runtime.clone(), PathBuf::from("/tmp/orig.tbc"), dir);
         // The temp dir is still alive while the provenance owns it.
         assert!(dir_path.exists());
         drop(provenance);
@@ -3257,13 +4239,8 @@ mod tests {
         let runtime = dir_path.join("decompiled.tcl");
         std::fs::write(&runtime, "puts hi\n").unwrap();
         let provenance =
-            SourceProvenance::decompiled(runtime.clone(), PathBuf::from("/tmp/orig.tbc"), dir);
-        let paths = NubPaths::explicit(
-            PathBuf::from("/bin/false"),
-            PathBuf::from("/dev/null"),
-            PathBuf::from("/dev/null"),
-        );
-        let app = DebugApp::new(DebugTarget::new(provenance, None), paths, theme).unwrap();
+            TargetProvenance::decompiled(runtime.clone(), PathBuf::from("/tmp/orig.tbc"), dir);
+        let app = test_app(PreparedDebugTarget::new(provenance, None), theme);
         assert!(dir_path.exists(), "DebugApp should keep the dir alive");
         drop(app);
         assert!(
@@ -3288,16 +4265,11 @@ mod tests {
         // the runtime path doesn't have to live inside it for this
         // test — we're verifying the synthetic-origin plumbing.
         let temp_dir = tempfile::TempDir::with_prefix("tcld-debug-test-").unwrap();
-        let provenance = SourceProvenance::decompiled(runtime.clone(), display.clone(), temp_dir);
+        let provenance = TargetProvenance::decompiled(runtime.clone(), display.clone(), temp_dir);
         // Re-target runtime_path for clarity (decompiled() already
         // accepted it).
         let _ = display;
-        let paths = NubPaths::explicit(
-            PathBuf::from("/bin/false"),
-            PathBuf::from("/dev/null"),
-            PathBuf::from("/dev/null"),
-        );
-        let app = DebugApp::new(DebugTarget::new(provenance, None), paths, theme).unwrap();
+        let app = test_app(PreparedDebugTarget::new(provenance, None), theme);
         assert_eq!(app.cache.user_script_origin, SourceOrigin::Synthetic);
         assert_eq!(app.cache.origin, SourceOrigin::Synthetic);
         assert!(
@@ -3331,12 +4303,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::write(&user_script, text).unwrap();
-        let paths = NubPaths::explicit(
-            PathBuf::from("/bin/false"),
-            PathBuf::from("/dev/null"),
-            PathBuf::from("/dev/null"),
-        );
-        DebugApp::new(DebugTarget::user_script(user_script), paths, theme).unwrap()
+        test_app(PreparedDebugTarget::user_script(user_script), theme)
     }
 
     #[test]
@@ -3359,6 +4326,73 @@ mod tests {
 
         app.search_next(-1);
         assert_eq!(app.search_cursor, Some(1));
+    }
+
+    #[test]
+    fn canonical_source_cache_follows_sourced_and_anonymous_owner_units() {
+        let mut app = fake_app_with_source("set entry 1\n");
+        let child_path = PathBuf::from("/tmp/canonical-child.tcl");
+        let child_block = format!("file:{}", child_path.display());
+        app.cache.source_units.insert(
+            child_block.clone(),
+            CachedSourceUnit {
+                registration: super::super::contract::RegisteredSource {
+                    identity: DebugSourceUnitIdentity::File(child_path.clone()),
+                    block_id: child_block.clone(),
+                    generation: 2,
+                    path: Some(child_path),
+                    qualified_proc: None,
+                    definition_path: Some(PathBuf::from("/tmp/canonical-child.tcl")),
+                    restart_limitation: None,
+                },
+                lines: vec![SourceLine::raw("set child 1")],
+            },
+        );
+        app.focused_proc = Some(FocusedProc {
+            block_id: child_block.clone(),
+            block_kind: tcld_tui::debug::SourceBlockKind::File,
+            source_path: Some("/tmp/canonical-child.tcl".into()),
+            qname: String::new(),
+            line: 1,
+            offset_start: 0,
+            offset_end: 11,
+            pause_reason: tcld_tui::debug::PauseReasonLabel::Step,
+            frame_count: 1,
+            breakpoint: None,
+            pause_kind: tcld_tui::debug::PauseKind::Normal,
+            error_message: None,
+        });
+        app.update_source_view();
+        assert_eq!(app.cache.origin, SourceOrigin::SourcedFile);
+        assert_eq!(app.current_source_lines()[0].raw, "set child 1");
+
+        let anonymous_block = "anon:0123456789abcdef".to_owned();
+        app.cache.source_units.insert(
+            anonymous_block.clone(),
+            CachedSourceUnit {
+                registration: super::super::contract::RegisteredSource {
+                    identity: DebugSourceUnitIdentity::Anonymous {
+                        session_key: anonymous_block.clone(),
+                    },
+                    block_id: anonymous_block.clone(),
+                    generation: 0,
+                    path: None,
+                    qualified_proc: None,
+                    definition_path: Some(PathBuf::from("/tmp/entry.tcl")),
+                    restart_limitation: Some("session-only".into()),
+                },
+                lines: vec![SourceLine::raw("set dynamic 1")],
+            },
+        );
+        app.focused_proc.as_mut().unwrap().block_id = anonymous_block.clone();
+        app.focused_proc.as_mut().unwrap().block_kind = tcld_tui::debug::SourceBlockKind::Anonymous;
+        app.update_source_view();
+        assert_eq!(app.cache.origin, SourceOrigin::Anonymous);
+        assert_eq!(app.current_source_lines()[0].raw, "set dynamic 1");
+
+        app.invalidate_block(&anonymous_block);
+        assert!(!app.cache.source_units.contains_key(&anonymous_block));
+        assert!(app.cache.showing_block_id.is_none());
     }
 
     #[test]
@@ -3438,12 +4472,7 @@ mod tests {
         let theme = Theme::with_palette(false, "obsidian").unwrap();
         let user_script = std::env::temp_dir().join("tcld-debug-theme-test.tcl");
         std::fs::write(&user_script, "set a 1\n").unwrap();
-        let paths = NubPaths::explicit(
-            PathBuf::from("/bin/false"),
-            PathBuf::from("/dev/null"),
-            PathBuf::from("/dev/null"),
-        );
-        let mut app = DebugApp::new(DebugTarget::user_script(user_script), paths, theme).unwrap();
+        let mut app = test_app(PreparedDebugTarget::user_script(user_script), theme);
         let initial = app.theme_name.clone();
         app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
         assert_ne!(
@@ -3490,19 +4519,19 @@ mod tests {
     fn proc_picker_filter_narrows_entries_as_user_types() {
         let mut app = fake_app_with_source("\n");
         app.proc_picker = vec![
-            ProcEntry {
-                qname: "alpha".into(),
-                block: None,
+            DebugProcedure {
+                qualified_name: "alpha".into(),
+                block_id: None,
                 first_offset: None,
             },
-            ProcEntry {
-                qname: "beta".into(),
-                block: None,
+            DebugProcedure {
+                qualified_name: "beta".into(),
+                block_id: None,
                 first_offset: None,
             },
-            ProcEntry {
-                qname: "::ns::alpha".into(),
-                block: None,
+            DebugProcedure {
+                qualified_name: "::ns::alpha".into(),
+                block_id: None,
                 first_offset: None,
             },
         ];
@@ -3581,5 +4610,159 @@ mod tests {
         app.handle_key(key(KeyCode::Esc));
         assert!(!app.ui.show_help);
         assert_eq!(app.ui.help_scroll, 0);
+    }
+
+    fn rendered_text(app: &mut DebugApp, width: u16, height: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend as RenderBackend;
+        let backend = RenderBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()))
+            .expect("draw debugger");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer.cell((x, y)).expect("cell").symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn source_backend_renders_the_canonical_debugger_chrome() {
+        let mut app = fake_app_with_source("set answer 42\nputs $answer\n");
+        app.app_state = AppState::Stopped;
+        let text = rendered_text(&mut app, 120, 32);
+        for expected in [
+            "tcld debug",
+            "Source",
+            "Stack",
+            "Locals",
+            "Breakpoints",
+            "Watches",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?}:\n{text}");
+        }
+        assert!(
+            text.contains("set answer 42"),
+            "source text missing:\n{text}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hybrid")]
+    fn hybrid_backend_uses_the_same_chrome_with_tcl9_disassembly_and_capability_reason() {
+        use super::super::planning::{
+            DebugBackendPolicy, DebugRequest, plan_debug, prepare_debug_target,
+        };
+        use tcld_vm::RuntimeMode;
+
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testing/fixtures/bytecode/tcl9/tc1.tbc")
+            .canonicalize()
+            .expect("Tcl 9 fixture");
+        let target = prepare_debug_target(
+            plan_debug(DebugRequest::new(path, DebugBackendPolicy::VmStrict), true)
+                .expect("hybrid plan"),
+        )
+        .expect("prepared hybrid target");
+        let backend = super::super::backend::HybridInProcessBackend::new(RuntimeMode::VmStrict)
+            .expect("hybrid backend");
+        let theme = Theme::with_palette(true, "obsidian").unwrap();
+        let mut app =
+            DebugApp::with_backend(target, Box::new(backend), "hybrid TEBC (VmStrict)", theme)
+                .expect("canonical debugger app");
+        app.start_debug_target();
+        let text = rendered_text(&mut app, 120, 32);
+        assert!(
+            text.contains("source-image.tcl [compiled source]"),
+            "compiled-source identity is explicit:\n{text}"
+        );
+        assert!(
+            text.contains("Source · compiled source"),
+            "compiled source pane label:\n{text}"
+        );
+        assert!(
+            app.backend_label.contains("compiled Tcl source")
+                && app.backend_label.contains("VmStrict"),
+            "backend mode is named: {}",
+            app.backend_label
+        );
+        for expected in [
+            "tcld debug",
+            "Source",
+            "Stack",
+            "Locals",
+            "Breakpoints",
+            "Watches",
+            "returnImm",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?}:\n{text}");
+        }
+        assert!(
+            text.contains("tcl9.0"),
+            "opcode table provenance missing:\n{text}"
+        );
+
+        app.handle_key(key(KeyCode::Char('e')));
+        assert!(
+            app.status.contains("unavailable") && app.status.contains("vm-strict"),
+            "unsupported action must explain its capability reason: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "hybrid")]
+    fn compiled_source_hybrid_renders_original_source_as_canonical_with_disassembly() {
+        use super::super::planning::{
+            DebugBackendPolicy, DebugRequest, plan_debug, prepare_debug_target,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source-image.tcl");
+        std::fs::write(&path, "set answer 40\nset answer [expr {$answer + 2}]\n").unwrap();
+        let path = path.canonicalize().unwrap();
+        let target = prepare_debug_target(
+            plan_debug(DebugRequest::new(&path, DebugBackendPolicy::VmStrict), true).unwrap(),
+        )
+        .unwrap();
+        let image = target
+            .compiled_image
+            .clone()
+            .expect("prepared source image");
+        let backend = super::super::backend::HybridInProcessBackend::new_with_image(
+            tcld_vm::RuntimeMode::VmStrict,
+            image,
+        )
+        .unwrap();
+        let theme = Theme::with_palette(true, "obsidian").unwrap();
+        let mut app = DebugApp::with_backend(
+            target,
+            Box::new(backend),
+            "compiled Tcl source (VmStrict)",
+            theme,
+        )
+        .unwrap();
+        app.start_debug_target();
+        let text = rendered_text(&mut app, 120, 32);
+        assert!(
+            text.contains("set answer 40"),
+            "original source is primary:\n{text}"
+        );
+        assert!(
+            text.contains("expr {$answer + 2}"),
+            "canonical command text:\n{text}"
+        );
+        assert!(
+            text.contains("nop") && text.contains("invokeStk1"),
+            "secondary disassembly remains accessible:\n{text}"
+        );
+        assert!(
+            !text.contains("companion (unverified)"),
+            "compiled source must not be mislabeled:\n{text}"
+        );
     }
 }

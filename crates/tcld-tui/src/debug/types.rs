@@ -104,9 +104,19 @@ pub struct ProcBreakpoint {
     pub source_path: Option<String>,
     pub line: Option<u32>,
     pub pending: bool,
+    pub pending_reason: Option<String>,
     /// Byte range within the source block that the breakpoint is armed on.
+    /// For a durable source breakpoint this is the requested command span;
+    /// it never changes when a runtime generation is rebound.
     pub offset: u64,
     pub len: u64,
+    /// Current generation-specific binding, kept separate from the durable
+    /// requested coordinates above.
+    pub resolved_block: Option<String>,
+    pub resolved_line: Option<u32>,
+    pub resolved_offset: Option<u64>,
+    pub resolved_len: Option<u64>,
+    pub resolution_generation: Option<u64>,
     pub enabled: bool,
     pub hits: u64,
     pub ignore_count: u64,
@@ -240,7 +250,10 @@ impl SourceLine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceOrigin {
     UserScript,
+    CompiledSource,
+    SourcedFile,
     ProcBody,
+    Anonymous,
     Synthetic,
 }
 
@@ -248,7 +261,10 @@ impl SourceOrigin {
     pub fn label(self) -> &'static str {
         match self {
             Self::UserScript => "user script",
+            Self::CompiledSource => "compiled source",
+            Self::SourcedFile => "sourced file",
             Self::ProcBody => "proc body",
+            Self::Anonymous => "eval session-only",
             Self::Synthetic => "synthetic",
         }
     }

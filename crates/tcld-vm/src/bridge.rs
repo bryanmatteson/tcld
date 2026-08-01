@@ -8,11 +8,11 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tcl_sys::{
-    TCL_ERROR, TCL_LEAVE_ERR_MSG, TCL_OK, Tcl_CreateObjCommand, Tcl_DecrRefCount, Tcl_DictObjGet,
-    Tcl_EvalObjEx, Tcl_EvalObjv, Tcl_ExprObj, Tcl_GetBooleanFromObj, Tcl_GetObjResult,
-    Tcl_GetReturnOptions, Tcl_GetStringFromObj, Tcl_IncrRefCount, Tcl_ListObjGetElements,
-    Tcl_NewStringObj, Tcl_Obj, Tcl_ObjGetVar2, Tcl_ObjSetVar2, Tcl_ResetResult, Tcl_SetObjResult,
-    Tcl_SetReturnOptions, Tcl_Size,
+    TCL_ERROR, TCL_LEAVE_ERR_MSG, TCL_OK, Tcl_CreateObjCommand, Tcl_DecrRefCount,
+    Tcl_DeleteCommand, Tcl_DictObjGet, Tcl_EvalObjEx, Tcl_EvalObjv, Tcl_ExprObj,
+    Tcl_GetBooleanFromObj, Tcl_GetObjResult, Tcl_GetReturnOptions, Tcl_GetStringFromObj,
+    Tcl_IncrRefCount, Tcl_ListObjGetElements, Tcl_NewStringObj, Tcl_Obj, Tcl_ObjGetVar2,
+    Tcl_ObjSetVar2, Tcl_ResetResult, Tcl_SetObjResult, Tcl_SetReturnOptions, Tcl_Size,
 };
 use tcld_interp::{EvalResult, Interpreter};
 
@@ -403,6 +403,18 @@ impl HostBridge {
                 client_ptr,
                 Some(stub_delete),
             );
+        }
+        Ok(())
+    }
+
+    /// Remove an Option B command owned by the current debug image.
+    pub fn uninstall_stub_command(&self, name: &str) -> Result<(), VmError> {
+        let c_name = CString::new(name)
+            .map_err(|_| VmError::Internal(format!("stub name contains NUL: {name}")))?;
+        unsafe {
+            // Tcl_DeleteCommand returns -1 only when the command is absent.
+            // Absence is harmless while replacing a closed image generation.
+            let _ = Tcl_DeleteCommand(self.interp.raw(), c_name.as_ptr());
         }
         Ok(())
     }

@@ -173,6 +173,7 @@ unsafe extern "C" {
         client_data: *mut c_void,
         delete_proc: Option<unsafe extern "C" fn(client_data: *mut c_void)>,
     ) -> *mut c_void;
+    pub fn Tcl_DeleteCommand(interp: *mut Tcl_Interp, cmd_name: *const c_char) -> c_int;
 
     pub fn Tcl_FindCommand(
         interp: *mut Tcl_Interp,

@@ -2740,6 +2740,203 @@ unsafe extern "C" fn proc_body_cmd(
     }
 }
 
+unsafe extern "C" fn block_source_cmd(
+    _cd: *mut c_void,
+    interp: *mut Tcl_Interp,
+    objc: c_int,
+    objv: *const *mut Tcl_Obj,
+) -> c_int {
+    if objc != 2 {
+        return set_error(
+            interp,
+            "wrong # args: should be \"::tcld::dbg::block_source owner_block_id\"",
+        );
+    }
+    let token = match unsafe { objv_to_string(objv, 1) } {
+        Some(token) => token,
+        None => return set_error(interp, "owner block id missing"),
+    };
+    let id = if let Some(path) = token.strip_prefix("file:") {
+        BlockId::File(Arc::from(path))
+    } else if let Some(qname) = token.strip_prefix("proc:") {
+        BlockId::ProcBody(Arc::from(qname.trim_start_matches("::")))
+    } else if let Some(hash) = token.strip_prefix("anon:") {
+        match u64::from_str_radix(hash, 16) {
+            Ok(content_hash) => BlockId::Anonymous { content_hash },
+            Err(_) => return set_error(interp, "invalid anonymous owner block id"),
+        }
+    } else {
+        return set_error(interp, "unknown owner block id kind");
+    };
+    let Some(state) = step_engine_state(interp) else {
+        return set_error(interp, "step engine not installed");
+    };
+    let guard = match state.lock() {
+        Ok(guard) => guard,
+        Err(_) => return set_error(interp, "state mutex poisoned"),
+    };
+    match guard.blocks.get(&id) {
+        Some(block) => set_result(interp, block.source()),
+        None => set_error(interp, &format!("source unit unavailable: {token}")),
+    }
+}
+
+unsafe extern "C" fn block_generation_cmd(
+    _cd: *mut c_void,
+    interp: *mut Tcl_Interp,
+    objc: c_int,
+    objv: *const *mut Tcl_Obj,
+) -> c_int {
+    if objc != 2 {
+        return set_error(
+            interp,
+            "wrong # args: should be \"::tcld::dbg::block_generation owner_block_id\"",
+        );
+    }
+    let token = match unsafe { objv_to_string(objv, 1) } {
+        Some(token) => token,
+        None => return set_error(interp, "owner block id missing"),
+    };
+    let id = if let Some(path) = token.strip_prefix("file:") {
+        BlockId::File(Arc::from(path))
+    } else if let Some(qname) = token.strip_prefix("proc:") {
+        BlockId::ProcBody(Arc::from(qname.trim_start_matches("::")))
+    } else if let Some(hash) = token.strip_prefix("anon:") {
+        match u64::from_str_radix(hash, 16) {
+            Ok(content_hash) => BlockId::Anonymous { content_hash },
+            Err(_) => return set_error(interp, "invalid anonymous owner block id"),
+        }
+    } else {
+        return set_error(interp, "unknown owner block id kind");
+    };
+    let Some(state) = step_engine_state(interp) else {
+        return set_error(interp, "step engine not installed");
+    };
+    let guard = match state.lock() {
+        Ok(guard) => guard,
+        Err(_) => return set_error(interp, "state mutex poisoned"),
+    };
+    match guard.blocks.get(&id) {
+        Some(block) => set_result(interp, &block.version().to_string()),
+        None => set_error(interp, &format!("source unit unavailable: {token}")),
+    }
+}
+
+unsafe extern "C" fn block_command_span_cmd(
+    _cd: *mut c_void,
+    interp: *mut Tcl_Interp,
+    objc: c_int,
+    objv: *const *mut Tcl_Obj,
+) -> c_int {
+    if objc != 4 {
+        return set_error(
+            interp,
+            "wrong # args: block_command_span owner_block_id offset requested_len",
+        );
+    }
+    let Some(token) = (unsafe { objv_to_string(objv, 1) }) else {
+        return set_error(interp, "owner block id missing");
+    };
+    let Some(offset) =
+        (unsafe { objv_to_int(objv, 2) }).and_then(|value| usize::try_from(value).ok())
+    else {
+        return set_error(interp, "command offset must be non-negative");
+    };
+    let Some(requested_len) =
+        (unsafe { objv_to_int(objv, 3) }).and_then(|value| usize::try_from(value).ok())
+    else {
+        return set_error(interp, "command length must be non-negative");
+    };
+    let id = if let Some(path) = token.strip_prefix("file:") {
+        BlockId::File(Arc::from(path))
+    } else if let Some(qname) = token.strip_prefix("proc:") {
+        BlockId::ProcBody(Arc::from(qname.trim_start_matches("::")))
+    } else {
+        return set_error(interp, "command span requires a file or proc owner");
+    };
+    let Some(state) = step_engine_state(interp) else {
+        return set_error(interp, "step engine not installed");
+    };
+    let guard = match state.lock() {
+        Ok(guard) => guard,
+        Err(_) => return set_error(interp, "state mutex poisoned"),
+    };
+    let Some(block) = guard.blocks.get(&id) else {
+        return set_error(interp, &format!("source unit unavailable: {token}"));
+    };
+    let parse_source;
+    let source = if block.source().ends_with('\n') {
+        block.source()
+    } else {
+        parse_source = format!("{}\n", block.source());
+        &parse_source
+    };
+    let mut candidates: Vec<_> = tcld_syntax::command_spans(source)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|span| span.start_byte == offset && span.end_byte > span.start_byte)
+        .collect();
+    if candidates.is_empty() {
+        return set_error(
+            interp,
+            &format!("no executable command starts at {token}+{offset}"),
+        );
+    }
+    candidates.sort_by_key(|span| {
+        let len = span.end_byte - span.start_byte;
+        (usize::from(len != requested_len), len)
+    });
+    let span = &candidates[0];
+    let text = &source[span.start_byte..span.end_byte];
+    let payload = tcld_debug_wire::tcl_list_format([
+        "offset".to_string(),
+        span.start_byte.to_string(),
+        "len".to_string(),
+        (span.end_byte - span.start_byte).to_string(),
+        "text".to_string(),
+        text.to_string(),
+    ]);
+    set_result(interp, &payload)
+}
+
+unsafe extern "C" fn bind_logical_breakpoint_cmd(
+    _cd: *mut c_void,
+    interp: *mut Tcl_Interp,
+    objc: c_int,
+    objv: *const *mut Tcl_Obj,
+) -> c_int {
+    if objc != 3 {
+        return set_error(
+            interp,
+            "wrong # args: __bind_logical_breakpoint logical_id core_id",
+        );
+    }
+    let Some(logical_id) = (unsafe { objv_to_string(objv, 1) }) else {
+        return set_error(interp, "logical breakpoint id missing");
+    };
+    let Some(core_id) = (unsafe { objv_to_string(objv, 2) }) else {
+        return set_error(interp, "core breakpoint id missing");
+    };
+    step_engine::bind_logical_breakpoint(interp, logical_id, core_id);
+    set_result(interp, "ok")
+}
+
+unsafe extern "C" fn unbind_logical_breakpoint_cmd(
+    _cd: *mut c_void,
+    interp: *mut Tcl_Interp,
+    objc: c_int,
+    objv: *const *mut Tcl_Obj,
+) -> c_int {
+    if objc != 2 {
+        return set_error(interp, "wrong # args: __unbind_logical_breakpoint core_id");
+    }
+    let Some(core_id) = (unsafe { objv_to_string(objv, 1) }) else {
+        return set_error(interp, "core breakpoint id missing");
+    };
+    step_engine::unbind_logical_breakpoint(interp, &core_id);
+    set_result(interp, "ok")
+}
+
 unsafe extern "C" fn proc_location_cmd(
     _cd: *mut c_void,
     interp: *mut Tcl_Interp,
@@ -4304,6 +4501,17 @@ pub unsafe extern "C" fn Tcld_dbg_Init(interp: *mut Tcl_Interp) -> c_int {
         ("::tcld::dbg::get_result", get_result_cmd),
         ("::tcld::dbg::list_procs", list_procs_cmd),
         ("::tcld::dbg::proc_body", proc_body_cmd),
+        ("::tcld::dbg::block_source", block_source_cmd),
+        ("::tcld::dbg::block_generation", block_generation_cmd),
+        ("::tcld::dbg::block_command_span", block_command_span_cmd),
+        (
+            "::tcld::dbg::__bind_logical_breakpoint",
+            bind_logical_breakpoint_cmd,
+        ),
+        (
+            "::tcld::dbg::__unbind_logical_breakpoint",
+            unbind_logical_breakpoint_cmd,
+        ),
         ("::tcld::dbg::proc_location", proc_location_cmd),
         ("::tcld::dbg::block_disable", block_disable_cmd),
         ("::tcld::dbg::block_enable", block_enable_cmd),

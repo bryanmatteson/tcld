@@ -79,6 +79,7 @@ pub enum DebugAction {
     ToggleBreakpoint,
     AddBreakpoint,
     GotoProc,
+    RunToCursor,
     ProcPicker,
     AddWatch,
     AddWatchpoint,
@@ -586,7 +587,7 @@ pub static DEBUG_BINDINGS: &[Binding] = &[
         DebugAction::ToggleBreakpoint,
         "Breakpoints",
         "b",
-        "toggle source breakpoint",
+        "toggle breakpoint at cursor",
         "b bp"
     ),
     binding!(
@@ -596,7 +597,7 @@ pub static DEBUG_BINDINGS: &[Binding] = &[
         DebugAction::AddBreakpoint,
         "Breakpoints",
         "B",
-        "add breakpoint by name"
+        "add breakpoint by name or address"
     ),
     binding!(
         NORMAL,
@@ -607,6 +608,16 @@ pub static DEBUG_BINDINGS: &[Binding] = &[
         "g",
         "go to proc",
         "g goto"
+    ),
+    binding!(
+        NORMAL,
+        KeyCode::Char('g'),
+        KeyModifiers::CONTROL,
+        DebugAction::RunToCursor,
+        "Navigation",
+        "Ctrl-G",
+        "run to executable cursor location",
+        "Ctrl-G run-to"
     ),
     binding!(
         NORMAL,

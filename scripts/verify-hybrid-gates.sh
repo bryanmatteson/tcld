@@ -68,6 +68,7 @@ cargo test -p tcld-core -- get_instructions_raw
 
 log "==> hybrid CLI/debug/PTY contracts"
 cargo test -p tcld --features hybrid \
+  --test debug_planning_contract \
   --test hybrid_run_contract \
   --test hybrid_debug_contract \
   --test debug_pty_terminal_contract
@@ -87,7 +88,7 @@ log "==> I1 structural (hybrid modules)"
 if rg -n 'decompile_to_temp' \
   apps/tcld/src/run.rs \
   apps/tcld/src/debug/backend.rs \
-  apps/tcld/src/debug/hybrid_app.rs 2>/dev/null; then
+  apps/tcld/src/debug/app.rs; then
   die "I1 violation: decompile_to_temp appears in hybrid modules"
 fi
 log "    OK (no decompile_to_temp in hybrid modules)"

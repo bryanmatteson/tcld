@@ -181,6 +181,136 @@ fn debug_tui_drives_target_lifecycle_under_real_pty() {
 
 #[test]
 #[cfg(feature = "integration_tclsh")]
+fn debug_tui_tracks_sourced_proc_and_eval_units_with_durable_pending_intent() {
+    let session_dir = tempfile::tempdir().expect("create multi-unit PTY directory");
+    let child = session_dir.path().join("child.tcl");
+    fs::write(
+        &child,
+        "namespace eval ::child {}\nset ::child::file_marker child_file\nproc ::child::work {} {\n    set proc_marker child_proc\n    return $proc_marker\n}\n",
+    )
+    .expect("write sourced child fixture");
+    let child = child.canonicalize().expect("canonical child fixture");
+    let target = session_dir.path().join("entry.tcl");
+    fs::write(
+        &target,
+        "set here [file dirname [info script]]\nsource [file join $here child.tcl]\n::child::work\neval {set dynamic_marker eval_unit\nset dynamic_result [string length $dynamic_marker]}\nset completed 1\n",
+    )
+    .expect("write multi-unit entry fixture");
+    let target = target.canonicalize().expect("canonical multi-unit entry");
+
+    let persisted = json!({
+        "version": 1,
+        "breakpoints": format!(
+            "{{kind file_line path {{{}}} line 2 enabled 1 ignore 0 condition {{}}}} {{kind line block {{proc:child::work}} offset 5 len 1 enabled 1 ignore 0 temporary 0 condition {{}}}}",
+            child.display()
+        ),
+        "watches": []
+    });
+    fs::write(
+        session_dir.path().join(".tcld-debug.tcl"),
+        serde_json::to_string_pretty(&persisted).unwrap(),
+    )
+    .expect("persist pre-load file and proc breakpoint intent");
+
+    let mut pty = DebugPty::spawn_debug(
+        &target,
+        Path::new("/tmp/tcld-debug-unused-entry"),
+        Path::new("/tmp/tcld-debug-unused-breakpoint"),
+        None,
+    );
+    pty.capture("multi_unit_entry", Duration::from_secs(8), |text| {
+        require(text, "[Paused]")?;
+        require(text, "entry.tcl [user script]")?;
+        require(text, "bp0")?;
+        require(text, "bp1")?;
+        require(text, "child.tcl:2 [pending]")?;
+        require(text, "child::work:5 [pending]")
+    });
+
+    pty.send(b"c");
+    pty.capture(
+        "sourced_file_pending_resolved",
+        Duration::from_secs(8),
+        |text| {
+            require(text, "[Paused]")?;
+            require(text, "child.tcl [sourced file]")?;
+            require(text, "bp0")?;
+            require(text, "set ::child::file_marker child_file")?;
+            require(text, "▶●    2")
+        },
+    );
+
+    pty.send(b"c");
+    pty.capture(
+        "dynamic_proc_pending_resolved",
+        Duration::from_secs(8),
+        |text| {
+            require(text, "[Paused]")?;
+            require(text, "proc child::work [proc body]")?;
+            require(text, "bp1")?;
+            require(text, "set proc_marker child_proc")?;
+            require(text, "▶●    2")
+        },
+    );
+
+    pty.send(b"\x1b[23;2~");
+    pty.capture("return_to_eval_callsite", Duration::from_secs(8), |text| {
+        require(text, "[Paused]")?;
+        require(text, "entry.tcl [user script]")?;
+        require(text, "eval {set dynamic_marker eval_unit")
+    });
+    pty.send(b"\x1b[23~");
+    pty.capture("anonymous_eval_identity", Duration::from_secs(8), |text| {
+        require(text, "[Paused]")?;
+        require(text, "eval anon:")?;
+        require(text, "[eval session-only]")?;
+        require(text, "Source · eval (session-only)")?;
+        require(text, "set dynamic_marker eval_unit")
+    });
+
+    pty.send(b"\x1b[23;2~");
+    pty.capture(
+        "eval_returns_to_entry_owner",
+        Duration::from_secs(8),
+        |text| {
+            require(text, "[Paused]")?;
+            require(text, "entry.tcl [user script]")?;
+            require(text, "bp0")?;
+            require(text, "bp1")?;
+            require(text, "set completed 1")
+        },
+    );
+
+    pty.send(b"r");
+    pty.capture(
+        "multi_unit_fresh_restart",
+        Duration::from_secs(10),
+        |text| {
+            require(text, "[Paused]")?;
+            require(text, "entry.tcl [user script]")?;
+            require(text, "child.tcl:2 [pending]")?;
+            require(text, "child::work:5 [pending]")?;
+            require(text, "session-only")
+        },
+    );
+    pty.send(b"c");
+    pty.capture(
+        "fresh_restart_file_line_intent_rebound",
+        Duration::from_secs(8),
+        |text| {
+            require(text, "[Paused]")?;
+            require(text, "child.tcl [sourced file]")?;
+            require(text, "bp0")?;
+            require(text, "set ::child::file_marker child_file")?;
+            require(text, "▶●    2")
+        },
+    );
+    pty.send(b"\x03");
+    pty.wait_for_exit(Duration::from_secs(5));
+}
+
+#[test]
+#[cfg(feature = "integration_tclsh")]
 fn public_bytecode_starts_in_the_real_host_debugger_under_pty() {
     let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../testing/fixtures/public/public_complex_fixture.tbc")
@@ -225,16 +355,16 @@ fn public_bytecode_starts_in_the_real_host_debugger_under_pty() {
         Duration::from_secs(8),
         |text| {
             require(text, "[Paused]")?;
-            require(text, "▶    14")?;
-            require(text, "set debug_types")
+            require(text, "▶     3")?;
+            require(text, "variable baseDir")
         },
     );
 
     pty.send(b"\x1b[21~");
     pty.capture("soc_step_over_nested_set", Duration::from_secs(8), |text| {
         require(text, "[Paused]")?;
-        require(text, "▶    17")?;
-        require(text, "foreach el $debug_types")
+        require(text, "▶     4")?;
+        require(text, "variable debug_types")
     });
     pty.send(b"\x03");
     pty.wait_for_exit(Duration::from_secs(5));
@@ -501,21 +631,26 @@ fn debug_panic_is_printed_after_terminal_restore() {
 fn hybrid_debug_tui_exposes_dual_code_frames_eval_watch_and_nested_controls() {
     let mut pty = DebugPty::spawn_hybrid_debug(&fixture("proc.tbc"));
     pty.capture("hybrid_entry", Duration::from_secs(8), |text| {
-        require(text, "tcld debug · hybrid")?;
+        require(text, "tcld debug")?;
         if text.contains("screen 1/1") {
             return Err("TurtleTap Shell chrome leaked into the hybrid viewport".to_string());
         }
         require(text, "[Paused]")?;
         require(text, "Source · synthetic")?;
-        require(text, "Source · original")?;
+        require(text, "Source · companion (unverified)")?;
         require(text, "tbcload::bcproc")
     });
 
-    pty.send(b"B");
-    pty.capture("hybrid_source_breakpoint", Duration::from_secs(3), |text| {
-        require(text, "toggled source line")?;
-        require(text, "qualified address")
-    });
+    pty.send(b"b");
+    pty.capture(
+        "hybrid_instruction_breakpoint",
+        Duration::from_secs(3),
+        |text| {
+            require(text, "set instruction breakpoint")?;
+            require(text, "code")?;
+            require(text, "pc")
+        },
+    );
 
     pty.send(b"e");
     pty.send(b"set hybrid_probe 41\r");
@@ -529,6 +664,24 @@ fn hybrid_debug_tui_exposes_dual_code_frames_eval_watch_and_nested_controls() {
     pty.capture("hybrid_watch", Duration::from_secs(3), |text| {
         require(text, "answer = 40+2")?;
         require(text, "42")
+    });
+
+    pty.send(b"r");
+    pty.capture(
+        "hybrid_restart_restores_ui_state",
+        Duration::from_secs(4),
+        |text| {
+            require(text, "[Paused]")?;
+            require(text, "answer = 40+2")?;
+            require(text, "code:")
+        },
+    );
+
+    pty.send(b"\x1b[B\x1b[B");
+    pty.send(b"\x07");
+    pty.capture("hybrid_run_to_cursor", Duration::from_secs(4), |text| {
+        require(text, "[Paused]")?;
+        require(text, "RunToLocation")
     });
 
     pty.send(b"\x1b[21~");
@@ -560,6 +713,149 @@ fn hybrid_debug_tui_exposes_dual_code_frames_eval_watch_and_nested_controls() {
     pty.wait_for_exit(Duration::from_secs(5));
 }
 
+#[test]
+#[cfg(feature = "hybrid")]
+fn compiled_source_hybrid_pty_keeps_source_and_pc_truth_in_one_debugger() {
+    let dir = tempfile::tempdir().expect("compiled source PTY dir");
+    let target = dir.path().join("compiled-source.tcl");
+    fs::write(
+        &target,
+        "proc inc {x} {\n    return [expr {$x + 1}]\n}\nset value 1\nset value [inc $value]\nset done $value\n",
+    ).unwrap();
+    let target = target.canonicalize().unwrap();
+    let mut pty = DebugPty::spawn_vm_strict_debug(&target);
+    pty.capture("compiled_source_entry", Duration::from_secs(8), |text| {
+        require(text, "compiled-source.tcl [compiled source]")?;
+        require(text, "Source · compiled source")?;
+        require(text, "Disassembly · executable")?;
+        require(text, "set value 1")?;
+        require(text, "(0) nop")?;
+        require(text, "[Paused]")
+    });
+
+    for _ in 0..4 {
+        pty.send(b"\x1b[B");
+    }
+    pty.send(b"b");
+    pty.capture(
+        "compiled_source_line_breakpoint",
+        Duration::from_secs(3),
+        |text| {
+            require(text, "breakpoint @ line 5")?;
+            require(text, "line 5")
+        },
+    );
+    pty.send(b"c");
+    pty.capture(
+        "compiled_source_breakpoint_hit",
+        Duration::from_secs(5),
+        |text| {
+            require(text, "[Paused]")?;
+            require(text, "▶●    5")?;
+            require(text, "set value [inc $value]")
+        },
+    );
+
+    pty.send(b"\x1b[23~");
+    pty.capture(
+        "compiled_source_f11_nested_command",
+        Duration::from_secs(5),
+        |text| {
+            require(text, "[Paused]")?;
+            require(text, "line 5")?;
+            require(text, "inc")
+        },
+    );
+    pty.send(b"\x1b[23~");
+    pty.capture("compiled_source_f11_proc", Duration::from_secs(5), |text| {
+        require(text, "[Paused]")?;
+        require(text, "inc : line 2")?;
+        require(text, "x = 1")
+    });
+
+    pty.send(b"\x1b[21~");
+    pty.capture(
+        "compiled_source_f10_over_return",
+        Duration::from_secs(5),
+        |text| {
+            require(text, "[Paused]")?;
+            require(text, "▶     6")?;
+            require(text, "set done $value")
+        },
+    );
+
+    pty.send(b"e");
+    pty.capture(
+        "compiled_source_vm_strict_eval_reason",
+        Duration::from_secs(3),
+        |text| {
+            require(text, "vm-strict")?;
+            require(text, "dynamic evaluation")
+        },
+    );
+
+    pty.send(b"r");
+    pty.capture(
+        "compiled_source_restart_entry",
+        Duration::from_secs(6),
+        |text| {
+            require(text, "[Paused]")?;
+            require(text, "▶     1")?;
+            require(text, "proc inc {x}")?;
+            require(text, "compiled source")
+        },
+    );
+    pty.send(b"c");
+    pty.capture(
+        "compiled_source_restart_breakpoint",
+        Duration::from_secs(6),
+        |text| {
+            require(text, "[Paused]")?;
+            require(text, "▶●    5")
+        },
+    );
+    pty.send(b"\x03");
+    pty.wait_for_exit(Duration::from_secs(5));
+}
+
+#[test]
+#[cfg(feature = "hybrid")]
+fn compiled_source_hybrid_worldhost_output_and_error_keep_canonical_location() {
+    let dir = tempfile::tempdir().expect("compiled hybrid PTY dir");
+    let target = dir.path().join("compiled-hybrid.tcl");
+    fs::write(&target, "puts hello\nerror boom\n").unwrap();
+    let target = target.canonicalize().unwrap();
+    let mut pty = DebugPty::spawn_hybrid_debug(&target);
+    pty.capture("compiled_hybrid_entry", Duration::from_secs(8), |text| {
+        require(text, "compiled-hybrid.tcl [compiled source]")?;
+        require(text, "▶     1")?;
+        require(text, "puts hello")?;
+        require(text, "Disassembly · executable")
+    });
+    pty.send(b"\x1b[23~");
+    pty.capture(
+        "compiled_hybrid_worldhost_output",
+        Duration::from_secs(5),
+        |text| {
+            require(text, "▶     2")?;
+            require(text, "error boom")?;
+            require(text, "hello")
+        },
+    );
+    pty.send(b"c");
+    pty.capture(
+        "compiled_hybrid_mapped_error",
+        Duration::from_secs(5),
+        |text| {
+            require(text, "[Paused]")?;
+            require(text, "line 2")?;
+            require(text, "boom")
+        },
+    );
+    pty.send(b"\x03");
+    pty.wait_for_exit(Duration::from_secs(5));
+}
+
 struct DebugPty {
     parser: vt100::Parser,
     rows: u16,
@@ -584,6 +880,18 @@ impl DebugPty {
         command.arg(target);
         command.arg("--backend");
         command.arg("hybrid");
+        command.env("TERM", "xterm-256color");
+        command.cwd(env!("CARGO_MANIFEST_DIR"));
+        Self::spawn_command(command, None)
+    }
+
+    #[cfg(feature = "hybrid")]
+    fn spawn_vm_strict_debug(target: &Path) -> Self {
+        let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_tcld"));
+        command.arg("debug");
+        command.arg(target);
+        command.arg("--backend");
+        command.arg("vm-strict");
         command.env("TERM", "xterm-256color");
         command.cwd(env!("CARGO_MANIFEST_DIR"));
         Self::spawn_command(command, None)

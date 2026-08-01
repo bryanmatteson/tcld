@@ -1,13 +1,13 @@
 [package]
 name = "tcld-syntax"
-edition = "2024"
+edition.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-tcld-core = { path = "../tcld-core" }
-streaming-iterator = "0.1"
-tree-sitter = "0.25"
-tree-sitter-tcl = { git = "https://github.com/tree-sitter-grammars/tree-sitter-tcl.git", rev = "8f11ac7206a54ed11210491cee1e0657e2962c47" }
+tcld-core.workspace = true
+streaming-iterator.workspace = true
+tree-sitter.workspace = true
+tree-sitter-tcl.workspace = true

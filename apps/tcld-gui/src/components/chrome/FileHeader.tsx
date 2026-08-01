@@ -139,23 +139,23 @@ export function FileHeader({
               type="button"
               className="tcld-no-file-tab"
               data-testid="topbar-empty-open-file"
-              aria-label="Open a .tbc file to begin"
-              title="Open a .tbc file to begin"
+              aria-label="Open Tcl bytecode or source to begin"
+              title="Open Tcl bytecode or source to begin"
               onClick={onOpenFile}
               disabled={!onOpenFile}
             >
               <FileCode2 size={12} aria-hidden />
               <span>No file loaded</span>
               <span className="tcld-no-file-tab-separator" aria-hidden />
-              <span>Open a .tbc to begin</span>
+              <span>Open Tcl bytecode or source</span>
             </button>
           )}
           <button
             type="button"
             className="tcld-tab-open-button"
             data-testid="topbar-open-another-file"
-            aria-label={documents.length > 0 ? "Open another .tbc file" : "Open a .tbc file"}
-            title={documents.length > 0 ? "Open another .tbc file" : "Open a .tbc file"}
+            aria-label={documents.length > 0 ? "Open another Tcl file" : "Open Tcl bytecode or source"}
+            title={documents.length > 0 ? "Open another Tcl file" : "Open Tcl bytecode or source"}
             onClick={onOpenFile}
             disabled={!onOpenFile}
           >
@@ -168,7 +168,7 @@ export function FileHeader({
         {!meta && (
           <span className="hidden min-w-0 items-center gap-1.5 font-mono text-label text-tcld-fg-dim lg:flex">
             <FileCode2 size={12} aria-hidden />
-            Open a .tbc or Tcl wrapper to populate the workspace.
+            Open Tcl bytecode or source to populate the workspace.
           </span>
         )}
 

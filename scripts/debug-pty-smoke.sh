@@ -112,6 +112,6 @@ TCLD_DEBUG_PTY_TCLSH="$tclsh" \
 TCLD_DEBUG_PTY_DYLIB="$dylib" \
 TCLD_DEBUG_PTY_FRAME="$frame" \
   cargo test -p tcld --features integration_tclsh \
-    --test debug_pty_terminal_contract -- --nocapture
+    --test debug_pty_terminal_contract -- --nocapture --test-threads=1
 
 printf 'Debugger PTY frame captures: %s\n' "$frame"

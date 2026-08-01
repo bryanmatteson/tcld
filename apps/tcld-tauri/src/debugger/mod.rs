@@ -187,10 +187,14 @@ impl BytecodeHookMode {
     }
 }
 
-/// Which debugger backend a launch should use.
+/// Which host-debugger transport a native desktop launch should use.
 ///
-/// - `Embedded` (default): in-process Tcl interpreter on a dedicated
-///   thread (`embedded.rs`) — unchanged behavior.
+/// This is not the CLI Auto/Host/Hybrid/VmStrict execution policy. The native
+/// desktop debugger executes Tcl source in a host interpreter; Hybrid/VmStrict
+/// source-image compilation is exposed by a hybrid-capable CLI build.
+///
+/// - `Embedded` (default): host Tcl interpreter on a dedicated thread
+///   (`embedded.rs`).
 /// - `External`: spawns an external `tclsh` running the tcld nub and
 ///   drives it over the tcld-debug-wire protocol (`remote.rs`).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -212,7 +216,7 @@ pub struct DebugLaunchOptions {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub cwd: Option<String>,
-    /// Backend selector; `embedded` when omitted.
+    /// Host transport selector; `embedded` when omitted.
     #[serde(default)]
     pub backend: DebugBackendKind,
     /// External-backend override for the `tclsh` binary (falls back to

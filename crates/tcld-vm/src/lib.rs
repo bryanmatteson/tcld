@@ -37,6 +37,20 @@ pub use mode::RuntimeMode;
 pub use policy::ExecPolicy;
 pub use value::VmObj;
 
+#[cfg(feature = "debug")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugImageBinding {
+    pub logical_unit_id: String,
+    pub code_id: load::CodeId,
+}
+
+#[cfg(feature = "debug")]
+#[derive(Debug)]
+pub struct DebugImageStart {
+    pub outcome: DebugOutcome,
+    pub bindings: Vec<DebugImageBinding>,
+}
+
 use std::marker::PhantomData;
 use std::path::Path;
 
@@ -72,6 +86,10 @@ impl HybridEngine {
     /// Number of VmProc registrations (for F8 / tests).
     pub fn vm_proc_count(&self) -> usize {
         self.inner.registry().vm_proc_count()
+    }
+
+    pub fn vm_proc_names(&self) -> Vec<String> {
+        self.inner.registry().vm_proc_names()
     }
 
     /// Bootstrap embedded host (FindExecutable, tbcload façade).
@@ -149,6 +167,20 @@ impl HybridEngine {
         let code = load::LoadedCode::from_bytecode(top)?;
         self.inner
             .debug_start_code(code, engine::FrameKind::Toplevel, None, &[])
+    }
+
+    /// Start a compiler-owned source image. Procedure bytecode is loaded for
+    /// stable code binding up front, but each command becomes callable only
+    /// when its mapped top-level declaration executes. Every fresh runtime
+    /// `CodeId` is returned alongside its stable logical image identity.
+    #[cfg(feature = "debug")]
+    pub fn debug_start_image(
+        &mut self,
+        image: &tcld_compile::DebugImage,
+        stop_on_entry: bool,
+    ) -> Result<DebugImageStart, VmError> {
+        image.verify().map_err(VmError::Decode)?;
+        self.inner.debug_start_image(image, stop_on_entry)
     }
 
     /// Execute the current instruction and pause before the next (Model B).
@@ -272,6 +304,187 @@ mod tests {
         let bc = hand_arith_bytecode();
         let result = eng.run_tbc(bc).expect("arith");
         assert_eq!(result.as_i64().unwrap(), 5);
+    }
+
+    #[test]
+    fn compiled_source_image_executes_nested_proc_without_host() {
+        let image = tcld_compile::compile_source(
+            std::path::PathBuf::from("/tmp/compiled-image.tcl"),
+            "proc inc {x} { return [expr {$x + 1}] }\nset n 2\nset n [inc $n]\n".into(),
+            tcld_compile::CompileMode::VmStrict,
+        )
+        .expect("compile strict image");
+        let mut engine = HybridEngine::new(RuntimeMode::VmStrict).expect("strict engine");
+        let started = engine
+            .debug_start_image(&image, false)
+            .expect("execute image");
+        assert_eq!(started.bindings.len(), 2);
+        let DebugOutcome::Finished { result } = started.outcome else {
+            panic!("image should finish when stop-on-entry is disabled")
+        };
+        assert_eq!(result.as_i64().unwrap(), 3);
+        assert_eq!(engine.coverage_snapshot().host_command_invocations, 0);
+    }
+
+    #[test]
+    fn compiled_proc_activation_and_declaration_breakpoint_match_source_truth() {
+        let image = tcld_compile::compile_source(
+            std::path::PathBuf::from("/tmp/declarations.tcl"),
+            "proc first {} { return 1 }\nproc second {} { return 2 }\nset done [second]\n".into(),
+            tcld_compile::CompileMode::Hybrid,
+        )
+        .unwrap();
+        let second_declaration = image
+            .units
+            .iter()
+            .find_map(|unit| match &unit.kind {
+                tcld_compile::DebugCodeUnitKind::Procedure {
+                    qname,
+                    declaration_span,
+                    ..
+                } if qname == "::second" => Some(declaration_span.clone()),
+                _ => None,
+            })
+            .unwrap();
+
+        let mut engine = HybridEngine::new(RuntimeMode::Hybrid).unwrap();
+        engine.bootstrap(None).unwrap();
+        let started = engine.debug_start_image(&image, true).unwrap();
+        let DebugOutcome::Paused(entry) = started.outcome else {
+            panic!("stop on entry")
+        };
+        assert_eq!(entry.reason, PauseReason::Entry);
+        assert_eq!(engine.vm_proc_count(), 0, "line 1 has not executed yet");
+        let before = engine
+            .eval_in_frame(0, VmObj::from_str("info commands ::first"))
+            .unwrap();
+        assert_eq!(before.result.as_string().unwrap(), "");
+
+        let top_code = started
+            .bindings
+            .iter()
+            .find(|binding| binding.logical_unit_id == "file:toplevel")
+            .unwrap()
+            .code_id;
+        let second_map = image
+            .top_level()
+            .commands
+            .iter()
+            .find(|map| map.source_span == second_declaration)
+            .unwrap();
+        let second_address = CodeAddress {
+            code_id: top_code,
+            pc: second_map.anchor_pc,
+        };
+        engine.add_breakpoint(second_address);
+
+        let DebugOutcome::Paused(_) = engine.step_instruction().unwrap() else {
+            panic!("step after first declaration")
+        };
+        assert_eq!(engine.vm_proc_count(), 1);
+        let after_first = engine
+            .eval_in_frame(0, VmObj::from_str("info commands ::first"))
+            .unwrap();
+        assert_eq!(after_first.result.as_string().unwrap(), "::first");
+
+        let DebugOutcome::Paused(second_pause) = engine.continue_run().unwrap() else {
+            panic!("second declaration breakpoint")
+        };
+        assert_eq!(second_pause.reason, PauseReason::Breakpoint);
+        assert_eq!(second_pause.address, Some(second_address));
+        assert_eq!(
+            engine.vm_proc_count(),
+            1,
+            "second is pending at its breakpoint"
+        );
+        let before_second = engine
+            .eval_in_frame(0, VmObj::from_str("info commands ::second"))
+            .unwrap();
+        assert_eq!(before_second.result.as_string().unwrap(), "");
+
+        let DebugOutcome::Paused(_) = engine.step_instruction().unwrap() else {
+            panic!("step after second declaration")
+        };
+        assert_eq!(engine.vm_proc_count(), 2);
+        let after_second = engine
+            .eval_in_frame(0, VmObj::from_str("info commands ::second"))
+            .unwrap();
+        assert_eq!(after_second.result.as_string().unwrap(), "::second");
+    }
+
+    #[test]
+    fn source_compile_failure_cannot_start_or_mutate_the_vm() {
+        let engine = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        for (source, mode) in [
+            ("puts not-admitted\n", tcld_compile::CompileMode::VmStrict),
+            ("source child.tcl\n", tcld_compile::CompileMode::Hybrid),
+            ("if {1} {set hidden 1}\n", tcld_compile::CompileMode::Hybrid),
+            (
+                "package require hidden\n",
+                tcld_compile::CompileMode::Hybrid,
+            ),
+            (
+                "oo::class new {method x {} {}}\n",
+                tcld_compile::CompileMode::Hybrid,
+            ),
+        ] {
+            let failure = tcld_compile::compile_source(
+                std::path::PathBuf::from("/tmp/rejected.tcl"),
+                source.into(),
+                mode,
+            );
+            assert!(failure.is_err());
+        }
+        assert_eq!(engine.vm_proc_count(), 0);
+        assert_eq!(engine.coverage_snapshot().executed_instruction_total, 0);
+    }
+
+    #[test]
+    fn compiled_source_return_routes_normal_top_level_and_error_completions() {
+        let compile = |source: &str| {
+            tcld_compile::compile_source(
+                std::path::PathBuf::from("/tmp/compiled-return.tcl"),
+                source.into(),
+                tcld_compile::CompileMode::VmStrict,
+            )
+            .unwrap()
+        };
+        let mut top = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        let started = top
+            .debug_start_image(&compile("return 7\n"), false)
+            .unwrap();
+        let DebugOutcome::Finished { result } = started.outcome else {
+            panic!("finished")
+        };
+        assert_eq!(result.as_i64().unwrap(), 7);
+
+        let mut error = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        let failure = error
+            .debug_start_image(&compile("return -code error boom\n"), false)
+            .unwrap_err();
+        assert!(matches!(failure, VmError::TclError { ref message, .. } if message == "boom"));
+    }
+
+    #[test]
+    fn compiled_source_hybrid_world_host_dispatch_preserves_mapped_command_execution() {
+        let image = tcld_compile::compile_source(
+            std::path::PathBuf::from("/tmp/compiled-hybrid.tcl"),
+            "puts hello\nset result 42\n".into(),
+            tcld_compile::CompileMode::Hybrid,
+        )
+        .unwrap();
+        let mut engine = HybridEngine::new(RuntimeMode::Hybrid).unwrap();
+        engine.bootstrap(None).unwrap();
+        engine.begin_output_capture().unwrap();
+        let started = engine.debug_start_image(&image, false).unwrap();
+        let DebugOutcome::Finished { result } = started.outcome else {
+            panic!("finished")
+        };
+        assert_eq!(result.as_i64().unwrap(), 42);
+        let (stdout, stderr) = engine.captured_output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello\n");
+        assert!(stderr.is_empty());
+        assert_eq!(engine.coverage_snapshot().host_command_invocations, 1);
     }
 
     #[test]

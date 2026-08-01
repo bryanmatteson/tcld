@@ -29,7 +29,7 @@ use tcl_sys::{
     TCL_ERROR, TCL_OK, Tcl_EvalEx, Tcl_GetObjResult, Tcl_GetStringFromObj, Tcl_Interp, Tcl_Obj,
     Tcl_SetObjResult,
 };
-use tcld_debug_state::{BlockId, DebugEvent, DebugState, register_body_block};
+use tcld_debug_state::{BlockChange, BlockId, DebugEvent, DebugState, register_body_block};
 
 const WRAPPER_INSTALL_SCRIPT: &str = r#"
 namespace eval ::tcld::dbg::__wrap__ {}
@@ -44,7 +44,12 @@ set ::tcld::dbg::__wrap__::installed 1
 rename ::proc ::tcld::dbg::__wrap__::orig_proc
 ::tcld::dbg::__wrap__::orig_proc ::proc {name args body} {
     set qname [uplevel 1 [list ::tcld::dbg::__wrap__::resolve_qname $name]]
-    ::tcld::dbg::__on_proc_define $qname $body
+    set owner [info script]
+    if {$owner ne ""} { set owner [file normalize $owner] }
+    ::tcld::dbg::__on_proc_define $qname $body $owner
+    if {[llength [info commands ::tcld::dbg::__nub__::resolve_pending_proc_breakpoints]]} {
+        ::tcld::dbg::__nub__::resolve_pending_proc_breakpoints $qname
+    }
     uplevel 1 [list ::tcld::dbg::__wrap__::orig_proc $name $args $body]
 }
 
@@ -63,14 +68,27 @@ rename ::source ::tcld::dbg::__wrap__::orig_source
 ::tcld::dbg::__wrap__::orig_proc ::source {args} {
     # Last argument is the path; preceding args are options. Mirror the
     # built-in's interface without enumerating all of -encoding etc.
-    set path [lindex $args end]
+    set path [file normalize [lindex $args end]]
+    set tracked 0
     if {[file readable $path]} {
         set fd [::tcld::dbg::__wrap__::orig_source_open $path]
         set body [read $fd]
         close $fd
         ::tcld::dbg::__on_source_load $path $body
+        set tracked 1
+        # File/line breakpoint intent is durable and may be staged before
+        # this sourced unit exists. Resolve it only after the owner registry
+        # has accepted the canonical file block, before any command runs.
+        if {[llength [info commands ::tcld::dbg::__nub__::resolve_pending_breakpoints]]} {
+            ::tcld::dbg::__nub__::resolve_pending_breakpoints $path
+        }
     }
-    uplevel 1 [list ::tcld::dbg::__wrap__::orig_source {*}$args]
+    set normalized_args [lreplace $args end end $path]
+    set rc [::tcld::dbg::__wrap__::orig_catch \
+        {::tcld::dbg::__wrap__::orig_uplevel 1 \
+            [list ::tcld::dbg::__wrap__::orig_source {*}$normalized_args]} result options]
+    if {$tracked} { ::tcld::dbg::__on_source_exit }
+    return -options $options $result
 }
 ::tcld::dbg::__wrap__::orig_proc ::tcld::dbg::__wrap__::orig_source_open {path} {
     open $path r
@@ -106,10 +124,18 @@ rename ::catch ::tcld::dbg::__wrap__::orig_catch
 # call; anonymous IDs collide on identical content so this is cheap.
 rename ::apply ::tcld::dbg::__wrap__::orig_apply
 ::tcld::dbg::__wrap__::orig_proc ::apply {lambda args} {
+    set tracked 0
     if {[llength $lambda] >= 2} {
-        ::tcld::dbg::__on_anonymous_body [lindex $lambda 1]
+        set owner [info script]
+        if {$owner ne ""} { set owner [file normalize $owner] }
+        ::tcld::dbg::__on_anonymous_body [lindex $lambda 1] $owner
+        set tracked 1
     }
-    uplevel 1 [list ::tcld::dbg::__wrap__::orig_apply $lambda {*}$args]
+    set rc [::tcld::dbg::__wrap__::orig_catch \
+        {::tcld::dbg::__wrap__::orig_uplevel 1 \
+            [list ::tcld::dbg::__wrap__::orig_apply $lambda {*}$args]} result options]
+    if {$tracked} { ::tcld::dbg::__on_anonymous_exit }
+    return -options $options $result
 }
 
 # --- namespace eval -------------------------------------------------
@@ -120,7 +146,9 @@ rename ::namespace ::tcld::dbg::__wrap__::orig_namespace
     if {$sub eq "eval" && [llength $args] >= 2} {
         set ns [lindex $args 0]
         set body [join [lrange $args 1 end] \n]
-        ::tcld::dbg::__on_namespace_eval $ns $body
+        set owner [info script]
+        if {$owner ne ""} { set owner [file normalize $owner] }
+        ::tcld::dbg::__on_namespace_eval $ns $body $owner
     }
     uplevel 1 [list ::tcld::dbg::__wrap__::orig_namespace $sub {*}$args]
 }
@@ -128,10 +156,19 @@ rename ::namespace ::tcld::dbg::__wrap__::orig_namespace
 # --- eval -----------------------------------------------------------
 rename ::eval ::tcld::dbg::__wrap__::orig_eval
 ::tcld::dbg::__wrap__::orig_proc ::eval {args} {
+    set tracked 0
     if {[llength $args] >= 1} {
-        ::tcld::dbg::__on_anonymous_body [join $args \n]
+        set body [join $args \n]
+        set owner [info script]
+        if {$owner ne ""} { set owner [file normalize $owner] }
+        ::tcld::dbg::__on_anonymous_body $body $owner
+        set tracked 1
     }
-    uplevel 1 [list ::tcld::dbg::__wrap__::orig_eval {*}$args]
+    set rc [::tcld::dbg::__wrap__::orig_catch \
+        {::tcld::dbg::__wrap__::orig_uplevel 1 \
+            [list ::tcld::dbg::__wrap__::orig_eval {*}$args]} result options]
+    if {$tracked} { ::tcld::dbg::__on_anonymous_exit }
+    return -options $options $result
 }
 
 # --- vwait / update -------------------------------------------------
@@ -254,10 +291,16 @@ pub unsafe fn install_command_wrappers(interp: *mut Tcl_Interp) -> Result<(), St
     // Helper commands first — the wrappers below call them.
     create_helper_cmd(interp, "::tcld::dbg::__on_proc_define", on_proc_define_cmd)?;
     create_helper_cmd(interp, "::tcld::dbg::__on_source_load", on_source_load_cmd)?;
+    create_helper_cmd(interp, "::tcld::dbg::__on_source_exit", on_source_exit_cmd)?;
     create_helper_cmd(
         interp,
         "::tcld::dbg::__on_anonymous_body",
         on_anonymous_body_cmd,
+    )?;
+    create_helper_cmd(
+        interp,
+        "::tcld::dbg::__on_anonymous_exit",
+        on_anonymous_exit_cmd,
     )?;
     create_helper_cmd(
         interp,
@@ -381,14 +424,18 @@ unsafe extern "C" fn on_proc_define_cmd(
     objc: c_int,
     objv: *const *mut Tcl_Obj,
 ) -> c_int {
-    if objc != 3 {
-        return err_result(interp, "wrong # args: __on_proc_define qname body");
+    if objc != 4 {
+        return err_result(
+            interp,
+            "wrong # args: __on_proc_define qname body source_path",
+        );
     }
     let qname = match unsafe { objv_string(objv, 1) } {
         Some(s) => s,
         None => return err_result(interp, "qname missing"),
     };
     let body = unsafe { objv_string(objv, 2) }.unwrap_or_default();
+    let source_path = unsafe { objv_string(objv, 3) }.filter(|path| !path.is_empty());
     let Some(state) = lookup_state(interp) else {
         return ok_result(interp);
     };
@@ -397,15 +444,27 @@ unsafe extern "C" fn on_proc_define_cmd(
         // reports for proc names (info frame returns "::name", but the
         // rest of our wiring uses unprefixed qnames).
         let bare = qname.trim_start_matches("::");
+        let id = BlockId::ProcBody(Arc::from(bare));
+        let existed = guard.blocks.get(&id).is_some();
         let registered = register_body_block(&mut guard.blocks, Some(bare), &body);
         if let Ok(id) = registered {
             let block = guard.blocks.get(&id).cloned();
             if let Some(block) = block {
+                let generation = block.version();
                 let _ = guard.with_breakpoints_mut(|store, _| store.validate_against(&block));
                 drop(guard);
                 tcld_debug_state::fire_event_unlocked(
                     &state,
-                    DebugEvent::BlocksRevalidated { block: id.clone() },
+                    DebugEvent::BlocksRevalidated {
+                        block: id.clone(),
+                        generation,
+                        source_path: source_path.map(Arc::from),
+                        change: if existed {
+                            BlockChange::Revalidated
+                        } else {
+                            BlockChange::Registered
+                        },
+                    },
                 );
             }
         }
@@ -430,7 +489,7 @@ unsafe extern "C" fn on_source_load_cmd(
     let Some(state) = lookup_state(interp) else {
         return ok_result(interp);
     };
-    let id_for_event = if let Ok(mut guard) = state.lock() {
+    let event = if let Ok(mut guard) = state.lock() {
         let parse_input = if body.ends_with('\n') {
             body.clone()
         } else {
@@ -441,22 +500,63 @@ unsafe extern "C" fn on_source_load_cmd(
         offsets.sort_unstable();
         offsets.dedup();
         let id = BlockId::File(Arc::from(path.as_str()));
-        let already_registered = guard
+        let existed = guard.blocks.get(&id).is_some();
+        let source_unchanged = guard
             .blocks
             .get(&id)
             .is_some_and(|block| block.source() == body);
-        if !already_registered {
+        if !source_unchanged {
             let _ =
                 guard
                     .blocks
                     .register_replacement(id.clone(), Arc::from(body.as_str()), offsets);
         }
-        Some(id)
+        guard.blocks.get(&id).map(|block| {
+            (
+                id,
+                block.version(),
+                if existed {
+                    BlockChange::Revalidated
+                } else {
+                    BlockChange::Registered
+                },
+            )
+        })
     } else {
         None
     };
-    if let Some(id) = id_for_event {
-        tcld_debug_state::fire_event_unlocked(&state, DebugEvent::BlocksRevalidated { block: id });
+    if let Some((id, generation, change)) = event {
+        if let Some(ctx_ptr) = step_engine::lookup_ctx(interp) {
+            unsafe {
+                (*ctx_ptr).active_source_files.push(id.clone());
+            }
+        }
+        tcld_debug_state::fire_event_unlocked(
+            &state,
+            DebugEvent::BlocksRevalidated {
+                block: id,
+                generation,
+                source_path: Some(Arc::from(path)),
+                change,
+            },
+        );
+    }
+    ok_result(interp)
+}
+
+unsafe extern "C" fn on_source_exit_cmd(
+    _client_data: *mut c_void,
+    interp: *mut Tcl_Interp,
+    objc: c_int,
+    _objv: *const *mut Tcl_Obj,
+) -> c_int {
+    if objc != 1 {
+        return err_result(interp, "wrong # args: __on_source_exit");
+    }
+    if let Some(ctx_ptr) = step_engine::lookup_ctx(interp) {
+        unsafe {
+            (*ctx_ptr).active_source_files.pop();
+        }
     }
     ok_result(interp)
 }
@@ -467,15 +567,64 @@ unsafe extern "C" fn on_anonymous_body_cmd(
     objc: c_int,
     objv: *const *mut Tcl_Obj,
 ) -> c_int {
-    if objc != 2 {
-        return err_result(interp, "wrong # args: __on_anonymous_body body");
+    if objc != 3 {
+        return err_result(interp, "wrong # args: __on_anonymous_body body source_path");
     }
     let body = unsafe { objv_string(objv, 1) }.unwrap_or_default();
+    let source_path = unsafe { objv_string(objv, 2) }.filter(|path| !path.is_empty());
     let Some(state) = lookup_state(interp) else {
         return ok_result(interp);
     };
-    if let Ok(mut guard) = state.lock() {
+    let event = if let Ok(mut guard) = state.lock() {
+        let id = BlockId::anonymous_for(&body);
+        let existed = guard.blocks.get(&id).is_some();
         let _ = register_body_block(&mut guard.blocks, None, &body);
+        guard.blocks.get(&id).map(|block| {
+            (
+                id,
+                block.version(),
+                if existed {
+                    BlockChange::Revalidated
+                } else {
+                    BlockChange::Registered
+                },
+            )
+        })
+    } else {
+        None
+    };
+    if let Some((block, generation, change)) = event {
+        if let Some(ctx_ptr) = step_engine::lookup_ctx(interp) {
+            unsafe {
+                (*ctx_ptr).active_dynamic_blocks.push(block.clone());
+            }
+        }
+        tcld_debug_state::fire_event_unlocked(
+            &state,
+            DebugEvent::BlocksRevalidated {
+                block,
+                generation,
+                source_path: source_path.map(Arc::from),
+                change,
+            },
+        );
+    }
+    ok_result(interp)
+}
+
+unsafe extern "C" fn on_anonymous_exit_cmd(
+    _client_data: *mut c_void,
+    interp: *mut Tcl_Interp,
+    objc: c_int,
+    _objv: *const *mut Tcl_Obj,
+) -> c_int {
+    if objc != 1 {
+        return err_result(interp, "wrong # args: __on_anonymous_exit");
+    }
+    if let Some(ctx_ptr) = step_engine::lookup_ctx(interp) {
+        unsafe {
+            (*ctx_ptr).active_dynamic_blocks.pop();
+        }
     }
     ok_result(interp)
 }
@@ -486,19 +635,49 @@ unsafe extern "C" fn on_namespace_eval_cmd(
     objc: c_int,
     objv: *const *mut Tcl_Obj,
 ) -> c_int {
-    if objc != 3 {
-        return err_result(interp, "wrong # args: __on_namespace_eval ns body");
+    if objc != 4 {
+        return err_result(
+            interp,
+            "wrong # args: __on_namespace_eval ns body source_path",
+        );
     }
     let _ns = unsafe { objv_string(objv, 1) }.unwrap_or_default();
     let body = unsafe { objv_string(objv, 2) }.unwrap_or_default();
+    let source_path = unsafe { objv_string(objv, 3) }.filter(|path| !path.is_empty());
     let Some(state) = lookup_state(interp) else {
         return ok_result(interp);
     };
-    if let Ok(mut guard) = state.lock() {
+    let event = if let Ok(mut guard) = state.lock() {
         // Anonymous body — namespace eval bodies don't have a stable
         // qname. The host can attach them to the namespace via a
         // separate API once we expose it.
+        let id = BlockId::anonymous_for(&body);
+        let existed = guard.blocks.get(&id).is_some();
         let _ = register_body_block(&mut guard.blocks, None, &body);
+        guard.blocks.get(&id).map(|block| {
+            (
+                id,
+                block.version(),
+                if existed {
+                    BlockChange::Revalidated
+                } else {
+                    BlockChange::Registered
+                },
+            )
+        })
+    } else {
+        None
+    };
+    if let Some((block, generation, change)) = event {
+        tcld_debug_state::fire_event_unlocked(
+            &state,
+            DebugEvent::BlocksRevalidated {
+                block,
+                generation,
+                source_path: source_path.map(Arc::from),
+                change,
+            },
+        );
     }
     ok_result(interp)
 }

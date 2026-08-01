@@ -31,7 +31,7 @@ pub mod tcl_list;
 pub use codec::{decode_frame, encode_frame};
 pub use controller::{Controller, ControllerError, ControllerState, NubChild};
 pub use error::{ErrorCode, WireError};
-pub use event::{PauseReason, WireEvent};
+pub use event::{PauseReason, SourceUnitChange, WireEvent};
 pub use frame::{FrameKind, WireFrame};
 pub use handshake::{Hello, HelloAck, NubTclAbi, PROTOCOL_VERSION, validate_nub_tcl_abi};
 pub use location::{SourceBlockKind, SourceLocation, SourceLocationParseError};

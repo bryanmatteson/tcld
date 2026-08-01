@@ -1,10 +1,10 @@
 [package]
-name = "tcld-core"
-edition = "2024"
-version.workspace = true
-license.workspace = true
-repository.workspace = true
-authors.workspace = true
+    authors.workspace    = true
+    edition.workspace    = true
+    license.workspace    = true
+    name                 = "tcld-core"
+    repository.workspace = true
+    version.workspace    = true
 
 [dependencies]
-thiserror = "1"
+    thiserror.workspace = true

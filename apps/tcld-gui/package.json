@@ -1,6 +1,6 @@
 {
   "name": "tcld-gui",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -25,10 +25,10 @@
     "clsx": "^2.1.1",
     "framer-motion": "^12.33.0",
     "lucide-react": "^0.563.0",
-    "next": "16.1.6",
+    "next": "16.2.12",
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "react-mosaic-component": "^6.1.1",
+    "react-mosaic-component": "^6.2.0",
     "zustand": "^5.0.11"
   },
   "devDependencies": {
@@ -38,9 +38,14 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.1.6",
+    "eslint-config-next": "16.2.12",
     "puppeteer": "^24.42.0",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "overrides": {
+    "postcss": "8.5.25",
+    "sharp": "0.35.3",
+    "uuid": "11.1.1"
   }
 }

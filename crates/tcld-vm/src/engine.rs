@@ -363,6 +363,14 @@ pub(crate) struct HybridEngineInner {
     first_failure: Option<String>,
     #[cfg(feature = "debug")]
     observations: Vec<OpcodeObservation>,
+    /// Compiler-owned procedures loaded for this image but not callable until
+    /// their mapped top-level declaration boundary executes.
+    #[cfg(feature = "debug")]
+    pending_image_procs: std::collections::BTreeMap<CodeAddress, crate::cmd::VmProc>,
+    /// Host stubs activated by the current image, removed on restart/image
+    /// replacement so pre-declaration host state remains truthful.
+    #[cfg(feature = "debug")]
+    image_stub_commands: std::collections::BTreeSet<String>,
     #[cfg(feature = "host")]
     host: Option<HostBridge>,
     #[cfg(feature = "debug")]
@@ -388,6 +396,10 @@ impl HybridEngineInner {
             first_failure: None,
             #[cfg(feature = "debug")]
             observations: Vec::new(),
+            #[cfg(feature = "debug")]
+            pending_image_procs: Default::default(),
+            #[cfg(feature = "debug")]
+            image_stub_commands: Default::default(),
             #[cfg(feature = "host")]
             host: None,
             #[cfg(feature = "debug")]
@@ -720,6 +732,101 @@ impl HybridEngineInner {
                 Err(completion_to_error(completion))
             }
         }
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn debug_start_image(
+        &mut self,
+        image: &tcld_compile::DebugImage,
+        stop_on_entry: bool,
+    ) -> Result<crate::DebugImageStart, VmError> {
+        use crate::cmd::VmProc;
+        use tcld_compile::DebugCodeUnitKind;
+
+        let mut bindings = Vec::with_capacity(image.units.len());
+        // An image is a closed executable generation. Do not retain procedure
+        // registrations from an earlier image/restart.
+        #[cfg(feature = "host")]
+        if let Some(host) = self.host.as_ref() {
+            for qname in &self.image_stub_commands {
+                host.uninstall_stub_command(qname)?;
+            }
+        }
+        self.image_stub_commands.clear();
+        self.registry = CommandRegistry::new();
+        self.pending_image_procs.clear();
+        let mut pending = Vec::new();
+        for unit in &image.units {
+            let DebugCodeUnitKind::Procedure {
+                qname,
+                args_spec,
+                declaration_span,
+            } = &unit.kind
+            else {
+                continue;
+            };
+            let code = LoadedCode::from_bytecode(unit.bytecode.clone())?;
+            bindings.push(crate::DebugImageBinding {
+                logical_unit_id: unit.logical_id.clone(),
+                code_id: code.id,
+            });
+            pending.push((
+                declaration_span.clone(),
+                VmProc {
+                    qname: ByteString::from(qname.as_str()),
+                    args_spec: ByteString::from(args_spec.as_str()),
+                    num_args: code.bytecode.proc_num_args,
+                    num_locals: code.bytecode.proc_num_locals,
+                    code,
+                },
+            ));
+        }
+        let top = LoadedCode::from_bytecode(image.top_level().bytecode.clone())?;
+        bindings.push(crate::DebugImageBinding {
+            logical_unit_id: image.top_level().logical_id.clone(),
+            code_id: top.id,
+        });
+        for (declaration_span, proc) in pending {
+            let declaration = image
+                .top_level()
+                .commands
+                .iter()
+                .find(|map| map.source_span == declaration_span)
+                .ok_or_else(|| {
+                    VmError::Decode(format!(
+                        "procedure {} has no top-level declaration map",
+                        proc.qname.as_str_lossy()
+                    ))
+                })?;
+            let address = CodeAddress {
+                code_id: top.id,
+                pc: declaration.anchor_pc,
+            };
+            if self.pending_image_procs.insert(address, proc).is_some() {
+                return Err(VmError::Decode(format!(
+                    "multiple procedure activations at code {} pc {}",
+                    address.code_id.0, address.pc
+                )));
+            }
+        }
+        self.enable_debug(stop_on_entry);
+        let outcome = self.debug_start_code(top, FrameKind::Toplevel, None, &[])?;
+        Ok(crate::DebugImageStart { outcome, bindings })
+    }
+
+    #[cfg(feature = "debug")]
+    fn activate_image_proc(&mut self, address: CodeAddress) -> Result<(), VmError> {
+        let Some(proc) = self.pending_image_procs.remove(&address) else {
+            return Ok(());
+        };
+        #[cfg(feature = "host")]
+        if let Some(host) = self.host.as_ref() {
+            let qname = proc.qname.as_str_lossy().into_owned();
+            host.install_stub_command(&qname)?;
+            self.image_stub_commands.insert(qname);
+        }
+        self.registry.register_vm_proc(proc);
+        Ok(())
     }
 
     #[cfg(feature = "debug")]
@@ -1111,6 +1218,12 @@ impl HybridEngineInner {
             }
             #[cfg(not(feature = "debug"))]
             let _ = allow_debug_pause;
+
+            #[cfg(feature = "debug")]
+            self.activate_image_proc(CodeAddress {
+                code_id: code.id,
+                pc: inst.pc,
+            })?;
 
             self.frames[fi].pc_index = pc_index + 1;
 

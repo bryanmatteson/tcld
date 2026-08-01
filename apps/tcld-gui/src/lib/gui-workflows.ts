@@ -103,7 +103,7 @@ export function buildDebugLaunchRequest(
       ...baseOptions,
       cwd: launchConfig.cwd || null,
       env: parseLaunchEnv(launchConfig.env),
-      // Only the non-default backend is sent so embedded launches keep
+      // Only the non-default host transport is sent so embedded launches keep
       // their existing wire shape (the Rust side defaults to embedded).
       ...(launchConfig.backend === "external" ? { backend: "external" as const } : {}),
     },

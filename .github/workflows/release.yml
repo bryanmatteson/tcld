@@ -5,7 +5,9 @@ name: Release
 # + a GitHub release whose body comes from the annotated tag. The dmg job is
 # present but gated.
 #
-# Every CLI archive carries loadable Tcl 8.6 and Tcl 9 debugger nubs. The
+# Every CLI archive is the no-embedded-Tcl host-debugger distribution and
+# carries loadable Tcl 8.6 and Tcl 9 debugger nubs. Hybrid/VmStrict remains the
+# explicit Tcl 9-linked source-build profile documented in COMPAT.md. The
 # libraries resolve Tcl symbols from the selected tclsh at load time and are
 # rejected before spawn unless their ABI/protocol/target/checksum manifest is
 # valid.
@@ -72,7 +74,7 @@ jobs:
           name="tcld-${version}-${TARGET}"
           mkdir -p "dist/${name}"
           cp "target/${TARGET}/release/tcld" "dist/${name}/"
-          cp LICENSE README.md COMPAT.md "dist/${name}/"
+          cp LICENSE README.md COMPAT.md DEBUGGING.md "dist/${name}/"
           ext=so
           if [[ "$TARGET" == *apple-darwin ]]; then ext=dylib; fi
           scripts/package-debug-nubs.sh \

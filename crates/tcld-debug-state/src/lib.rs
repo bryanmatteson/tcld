@@ -39,7 +39,8 @@ pub use breakpoint::{
 };
 pub use coverage::CoverageMap;
 pub use event::{
-    ConditionEvalError, DebugEvent, EventCallback, EventQueue, PauseReason, SubscriptionId,
+    BlockChange, ConditionEvalError, DebugEvent, EventCallback, EventQueue, PauseReason,
+    SubscriptionId,
 };
 pub use frame::{FrameKind, FrameSnapshot, UplevelHop};
 pub use identity::{register_body_block, synthetic_to_location};

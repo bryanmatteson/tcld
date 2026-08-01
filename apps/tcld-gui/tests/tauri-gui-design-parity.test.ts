@@ -509,7 +509,10 @@ test("V3 top bar open controls and read-only dirty-state deviation stay wired to
 
   assert.match(fileHeader, /data-testid="topbar-empty-open-file"[\s\S]*onClick=\{onOpenFile\}/);
   assert.match(fileHeader, /No file loaded/);
-  assert.match(fileHeader, /Open a \.tbc to begin/);
+  assert.match(fileHeader, /Open Tcl bytecode or source/);
+  const tauriApi = readProductionFile("lib/tauri-api.ts");
+  assert.match(tauriApi, /Tcl Bytecode and Source/);
+  assert.match(tauriApi, /Debug Targets[\s\S]*"tbc", "tcl", "tk", "itcl", "tm"/);
   assert.match(fileHeader, /data-testid="topbar-open-another-file"[\s\S]*onClick=\{onOpenFile\}/);
   assert.match(fileHeader, /<FilePlus2 size=\{13\} aria-hidden \/>/);
   assert.match(fileHeader, /data-document-dirty="false"/);

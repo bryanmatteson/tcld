@@ -7,9 +7,9 @@
     version.workspace = true
 
 [dependencies]
-    crossterm         = "0.29"
-    ratatui           = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
-    termosaic         = { version = "0.3.0", path = "../../../termosaic/crates/termosaic", default-features = false }
-    termosaic-ratatui = { version = "0.2.0", path = "../../../termosaic/crates/termosaic-ratatui" }
-    turtletap.version = "0.3.0"
-    unicode-width     = "0.2.2"
+    crossterm.workspace         = true
+    ratatui.workspace           = true
+    termosaic.workspace         = true
+    termosaic-ratatui.workspace = true
+    turtletap.workspace         = true
+    unicode-width.workspace     = true

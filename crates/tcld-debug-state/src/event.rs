@@ -15,6 +15,14 @@ use crate::breakpoint::BreakpointId;
 use crate::location::Location;
 use std::sync::Arc;
 
+/// Whether an owner-reported executable source unit is entering the registry
+/// for the first time or replacing an earlier runtime generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockChange {
+    Registered,
+    Revalidated,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PauseReason {
     Entry,
@@ -66,7 +74,17 @@ pub enum DebugEvent {
     },
     /// Block source changed; breakpoints may have been snapped or
     /// disabled.
-    BlocksRevalidated { block: BlockId },
+    BlocksRevalidated {
+        block: BlockId,
+        /// Runtime-owned generation of this block. It is monotonic only
+        /// within the current interpreter and must not be persisted as a
+        /// restart identity.
+        generation: u64,
+        /// File that caused this unit to be registered, when Tcl can report
+        /// one. For a proc this is definition provenance, not its identity.
+        source_path: Option<Arc<str>>,
+        change: BlockChange,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

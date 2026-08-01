@@ -21,7 +21,7 @@ fn tcl9_fixture(name: &str) -> PathBuf {
 #[test]
 #[cfg(feature = "hybrid")]
 fn hybrid_debug_attach_never_decompiles() {
-    use tcld::debug::{DebugBackend, HybridInProcessBackend};
+    use tcld::debug::{BackendOperation, DebugBackend, HybridInProcessBackend};
     use tcld_vm::RuntimeMode;
 
     let before = tcld::debug::DECOMPILE_TO_TEMP_CALLS.load(Ordering::SeqCst);
@@ -37,72 +37,241 @@ fn hybrid_debug_attach_never_decompiles() {
     );
 
     // Model B pause shape (F12).
-    let pauses = backend.drain_pauses();
+    let events = backend.drain_events();
+    let pauses: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            tcld::debug::DebugEvent::Paused(pause) => Some(pause.as_ref()),
+            _ => None,
+        })
+        .collect();
     assert!(
         !pauses.is_empty(),
         "stop_on_entry should produce a pause event"
     );
     let p = &pauses[0];
-    assert!(p.pc.is_some(), "pc-primary");
+    assert!(p.location.code.is_some(), "pc-primary");
     assert!(
-        p.source_line.is_some(),
+        p.location.source_hint.is_some(),
         "top-level command source range should map into sibling proc.tcl"
     );
-    assert!(p.location.is_none(), "Location=None");
+    assert!(p.location.code.is_some(), "PC must be code-qualified");
+    assert!(
+        p.location.source.is_none(),
+        "a sibling file is not a canonical source map"
+    );
+    assert!(
+        p.location.source_hint.is_some(),
+        "sibling source remains available as an explicit unverified hint"
+    );
     assert!(!p.in_host, "in_host=false on TEBC pause");
 
-    let source_addresses = backend
-        .toggle_source_breakpoint(p.source_line.expect("mapped source line"))
-        .expect("source breakpoint resolution");
-    assert!(
-        !source_addresses.is_empty(),
-        "mapped source line must resolve to qualified command addresses"
-    );
-    let current_code = backend.current_code_id().expect("current code");
-    assert!(
-        source_addresses
-            .iter()
-            .all(|address| address.code_id == current_code)
-    );
-    let command_address = backend
-        .add_command_breakpoint(0)
-        .expect("command breakpoint resolution");
-    assert_eq!(command_address.code_id, current_code);
-    assert!(backend.qualified_breakpoints().contains(&command_address));
-
     backend
-        .step_instruction()
+        .step(tcld::debug::DebugStepKind::InstructionInto)
         .expect("step_instruction advances");
-    let pauses = backend.drain_pauses();
-    if let Some(p) = pauses.first() {
-        assert!(p.location.is_none());
+    let events = backend.drain_events();
+    if let Some(p) = events.iter().find_map(|event| match event {
+        tcld::debug::DebugEvent::Paused(pause) => Some(pause.as_ref()),
+        _ => None,
+    }) {
+        assert!(p.location.code.is_some());
         assert!(!p.in_host);
     }
 
     // capabilities
     let caps = backend.capabilities();
-    assert!(caps.instruction_step);
-    assert!(caps.nested_step);
-    assert!(caps.step_over);
-    assert!(caps.step_out);
-    assert!(caps.run_to_pc);
-    assert!(caps.code_qualified_breakpoints);
-    assert!(caps.bytecode_direct);
-    assert!(caps.nested_frames);
-    assert!(caps.eval_in_frame);
-    assert!(caps.watches);
-    assert!(caps.source_disassembly);
+    assert!(
+        caps.support(BackendOperation::StepInstruction)
+            .is_supported()
+    );
+    assert!(
+        !caps.support(BackendOperation::StepInto).is_supported(),
+        "hybrid must not claim source-command stepping before that map is implemented"
+    );
+    assert!(
+        caps.support(BackendOperation::StepOverInstruction)
+            .is_supported()
+    );
+    assert!(
+        caps.support(BackendOperation::StepOutInstruction)
+            .is_supported()
+    );
+    assert!(caps.support(BackendOperation::RunToLocation).is_supported());
+    assert!(
+        caps.support(BackendOperation::InstructionBreakpoints)
+            .is_supported()
+    );
+    assert!(
+        caps.support(BackendOperation::DirectBytecode)
+            .is_supported()
+    );
+    assert!(caps.support(BackendOperation::Stack).is_supported());
+    assert!(caps.support(BackendOperation::Evaluate).is_supported());
+    assert!(caps.support(BackendOperation::Watches).is_supported());
+    assert!(
+        caps.support(BackendOperation::DisassemblyAccess)
+            .is_supported()
+    );
 
-    let (code, value) = backend
-        .eval_in_frame(0, "set hybrid_debug_probe 41")
+    let result = backend
+        .evaluate(0, "set hybrid_debug_probe 41")
         .expect("eval in suspended frame");
-    assert_eq!((code, value.as_str()), (0, "41"));
-    let (code, value) = backend
-        .expr_in_frame(0, "$hybrid_debug_probe + 1")
+    assert_eq!((result.completion_code, result.result.as_str()), (0, "41"));
+    let result = backend
+        .evaluate(0, "expr {$hybrid_debug_probe + 1}")
         .expect("expr in suspended frame");
-    assert_eq!((code, value.as_str()), (0, "42"));
+    assert_eq!((result.completion_code, result.result.as_str()), (0, "42"));
 
     Box::new(backend).close();
+}
+
+#[test]
+#[cfg(feature = "hybrid")]
+fn hybrid_neutral_contract_exposes_typed_events_locations_and_breakpoints() {
+    use tcld::debug::{
+        BackendError, CapabilitySupport, DebugBackend, DebugBreakpointResolution,
+        DebugBreakpointSpec, DebugEvent, DebugLifecycleState, DebugStepKind,
+        HybridInProcessBackend,
+    };
+    use tcld_vm::RuntimeMode;
+
+    let path = fixture("proc.tbc");
+    let source_path = path.with_extension("tcl");
+    let mut backend = HybridInProcessBackend::new(RuntimeMode::Hybrid).expect("hybrid backend");
+    backend.start_target(&path, true).expect("start target");
+
+    let events = backend.drain_events();
+    assert!(events.iter().any(|event| {
+        matches!(event, DebugEvent::CompanionSourceDiscovered(source) if source.path == source_path)
+    }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, DebugEvent::SourceRegistered(_)))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, DebugEvent::CodeRegistered(_)))
+    );
+    let pause = events
+        .iter()
+        .find_map(|event| match event {
+            DebugEvent::Paused(pause) => Some(pause),
+            _ => None,
+        })
+        .expect("typed pause event");
+    assert!(pause.location.source.is_none());
+    let source_hint = pause
+        .location
+        .source_hint
+        .as_ref()
+        .expect("companion-source hint");
+    let code = pause.location.code.expect("qualified code coordinate");
+    assert_eq!(source_hint.path, source_path);
+    assert_eq!(pause.location.observed_pc, Some(code.pc));
+
+    let breakpoint = backend
+        .add_breakpoint(DebugBreakpointSpec::SourceLine {
+            path: source_path,
+            line: source_hint.line,
+            condition: None,
+        })
+        .expect("add neutral source breakpoint");
+    assert!(matches!(
+        breakpoint.resolution,
+        DebugBreakpointResolution::Pending { ref reason }
+            if reason.contains("unverified companion source")
+    ));
+    assert_eq!(backend.breakpoints().expect("list breakpoints").len(), 1);
+    backend
+        .set_breakpoint_enabled(&breakpoint.id, false)
+        .expect("disable breakpoint");
+    assert!(!backend.breakpoints().unwrap()[0].enabled);
+    backend
+        .remove_breakpoint(&breakpoint.id)
+        .expect("remove breakpoint");
+    assert!(backend.breakpoints().unwrap().is_empty());
+
+    let instruction_breakpoint = backend
+        .add_breakpoint(DebugBreakpointSpec::Instruction {
+            location: code,
+            condition: None,
+        })
+        .expect("add code-qualified breakpoint");
+    assert!(matches!(
+        instruction_breakpoint.resolution,
+        DebugBreakpointResolution::Resolved { .. }
+    ));
+    backend
+        .restart_target(true)
+        .expect("restart into a fresh hybrid engine");
+    let restored = backend.breakpoints().expect("breakpoints after restart");
+    assert_eq!(restored.len(), 1, "entry-code breakpoint intent survives");
+    assert!(matches!(
+        restored[0].spec,
+        DebugBreakpointSpec::Instruction { location, .. } if location.pc == code.pc
+    ));
+
+    assert_eq!(backend.state().unwrap(), DebugLifecycleState::Paused);
+    assert!(backend.sources().unwrap().is_empty());
+    assert_eq!(backend.companion_sources().unwrap().len(), 1);
+    assert_eq!(backend.disassembly().unwrap().len(), 1);
+    assert!(matches!(
+        backend
+            .capabilities()
+            .support(tcld::debug::BackendOperation::StepInto),
+        CapabilitySupport::Unsupported { reason } if reason.contains("source-command")
+    ));
+    assert!(matches!(
+        backend.step(DebugStepKind::Into),
+        Err(BackendError::Unsupported { op: "source_step", reason })
+            if reason.contains("instruction stepping")
+    ));
+}
+
+#[test]
+#[cfg(feature = "hybrid")]
+fn arbitrary_sibling_source_never_becomes_a_canonical_hybrid_location() {
+    use tcld::debug::{DebugBackend, DebugEvent, HybridInProcessBackend};
+    use tcld_vm::RuntimeMode;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bytecode = temp.path().join("stale.tbc");
+    let sibling = temp.path().join("stale.tcl");
+    std::fs::copy(fixture("proc.tbc"), &bytecode).expect("copy bytecode");
+    std::fs::write(
+        &sibling,
+        "# unrelated and stale\nproc definitely_not_the_bytecode {} { error stale }\n",
+    )
+    .expect("write arbitrary sibling");
+
+    let mut backend = HybridInProcessBackend::new(RuntimeMode::Hybrid).expect("hybrid backend");
+    backend
+        .start_target(&bytecode, true)
+        .expect("start copied bytecode");
+    let events = backend.drain_events();
+    let pause = events
+        .iter()
+        .find_map(|event| match event {
+            DebugEvent::Paused(pause) => Some(pause),
+            _ => None,
+        })
+        .expect("pause");
+    assert!(pause.location.source.is_none());
+    assert_eq!(
+        pause
+            .location
+            .source_hint
+            .as_ref()
+            .map(|hint| hint.path.as_path()),
+        Some(sibling.as_path())
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, DebugEvent::SourceRegistered(_)))
+    );
 }
 
 #[test]
@@ -113,14 +282,6 @@ fn hybrid_debug_backend_source_has_no_decompile_path() {
         !backend_src.contains("decompile_to_temp"),
         "HybridInProcessBackend module must not mention decompile_to_temp"
     );
-    let hybrid_app = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/debug/hybrid_app.rs"
-    ));
-    assert!(
-        !hybrid_app.contains("decompile_to_temp"),
-        "hybrid TUI must not mention decompile_to_temp"
-    );
     let hybrid_debug = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/debug/mod.rs"));
     // run_hybrid_debug must not call decompile_to_temp; host prepare_debug_target may.
     assert!(
@@ -128,39 +289,64 @@ fn hybrid_debug_backend_source_has_no_decompile_path() {
         "expected run_hybrid_debug entry"
     );
     assert!(
-        hybrid_debug.contains("run_hybrid_debug_tui") || hybrid_app.contains("HybridDebugApp"),
-        "expected hybrid TUI dual path"
+        hybrid_debug.contains("DebugApp::with_backend"),
+        "hybrid must enter the canonical debugger app"
     );
 }
 
 #[test]
 #[cfg(feature = "hybrid")]
 fn hybrid_disassembly_maps_pc_for_source_pane() {
-    use tcld::debug::{DebugBackend, HybridInProcessBackend};
+    use tcld::debug::{BackendError, DebugBackend, HybridInProcessBackend};
     use tcld_vm::RuntimeMode;
 
     let path = fixture("proc.tbc");
     let mut backend = HybridInProcessBackend::new(RuntimeMode::VmStrict).expect("backend");
     backend.start_target(&path, true).expect("start");
     assert!(
-        !backend.disassembly_lines().is_empty(),
+        !backend.disassembly().unwrap()[0].lines.is_empty(),
         "disassembly source pane must load"
     );
     assert!(
-        !backend.source_lines().is_empty(),
+        !backend.companion_sources().unwrap()[0].text.is_empty(),
         "sibling source pane must load when proc.tcl exists"
     );
     let caps = backend.capabilities();
-    assert!(!caps.eval_in_frame);
-    assert!(!caps.watches);
-    assert_eq!(
-        caps.dynamic_eval_reason.as_deref(),
-        Some("dynamic_eval denied by vm-strict")
-    );
-    let pauses = backend.drain_pauses();
-    let pc = pauses.first().and_then(|p| p.pc).expect("entry pc");
     assert!(
-        backend.line_for_pc(pc).is_some(),
+        !caps
+            .support(tcld::debug::BackendOperation::Evaluate)
+            .is_supported()
+    );
+    assert!(
+        !caps
+            .support(tcld::debug::BackendOperation::Watches)
+            .is_supported()
+    );
+    assert!(
+        caps.support(tcld::debug::BackendOperation::Evaluate)
+            .reason()
+            .is_some_and(|reason| reason.contains("vm-strict"))
+    );
+    assert!(matches!(
+        backend.evaluate(0, "set forbidden 1"),
+        Err(BackendError::Unsupported { op: "evaluate", reason })
+            if reason.contains("vm-strict")
+    ));
+    let events = backend.drain_events();
+    let pc = events
+        .iter()
+        .find_map(|event| match event {
+            tcld::debug::DebugEvent::Paused(pause) => {
+                pause.location.code.map(|location| location.pc)
+            }
+            _ => None,
+        })
+        .expect("entry pc");
+    assert!(
+        backend.disassembly().unwrap()[0]
+            .lines
+            .iter()
+            .any(|line| line.contains(&format!("({pc})"))),
         "pc {pc} should map to a disassembly line"
     );
 }
@@ -174,9 +360,13 @@ fn hybrid_debug_disassembly_uses_the_tcl9_opcode_assignment() {
     let path = tcl9_fixture("tc1.tbc");
     let mut backend = HybridInProcessBackend::new(RuntimeMode::VmStrict).expect("backend");
     backend.start_target(&path, true).expect("Tcl 9 target");
-    let disassembly = backend.disassembly_lines().join("\n");
+    let disassembly_snapshot = backend.disassembly().expect("disassembly").remove(0);
+    let disassembly = disassembly_snapshot.lines.join("\n");
 
-    assert_eq!(backend.instruction_set_name(), Some("tcl9.0"));
+    assert_eq!(
+        disassembly_snapshot.instruction_set.as_deref(),
+        Some("tcl9.0")
+    );
     assert!(
         disassembly.contains("(11) returnImm 0 1"),
         "Tcl 9 byte 92 must map to returnImm:\n{disassembly}"
@@ -191,13 +381,17 @@ fn hybrid_debug_disassembly_uses_the_tcl9_opcode_assignment() {
 fn host_path_still_owns_decompile_for_tbc() {
     // Host path keeps decompile_to_temp for .tbc; hybrid never uses it.
     let debug_mod = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/debug/mod.rs"));
+    let planning = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/debug/planning.rs"
+    ));
     assert!(
-        debug_mod.contains("decompile_to_temp"),
+        planning.contains("decompile_to_temp"),
         "host prepare_debug_target must retain decompile_to_temp"
     );
     assert!(
-        debug_mod.contains("force_host") || debug_mod.contains("RunBackend::Host"),
-        "debug router must allow --backend=host"
+        debug_mod.contains("plan_debug") && planning.contains("DebugBackendPolicy::Host"),
+        "central debug planner must allow --backend=host"
     );
     // Counter is public so hybrid I1 tests can observe it.
     let before = tcld::debug::DECOMPILE_TO_TEMP_CALLS.load(Ordering::SeqCst);
@@ -206,21 +400,26 @@ fn host_path_still_owns_decompile_for_tbc() {
 
 #[test]
 #[cfg(feature = "hybrid")]
-fn hybrid_debug_tui_entry_is_disassembly_primary() {
-    let hybrid_app = include_str!(concat!(
+fn hybrid_debug_uses_the_canonical_disassembly_capable_app() {
+    let app = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/debug/app.rs"));
+    let module = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/debug/mod.rs"));
+    let render = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/debug/hybrid_app.rs"
+        "/../../crates/tcld-tui/src/debug/render.rs"
     ));
     assert!(
-        hybrid_app.contains("SourceOrigin::Synthetic") || hybrid_app.contains("disassembly"),
-        "hybrid TUI must present disassembly-primary source"
+        app.contains("BackendOperation::DisassemblyAccess")
+            && app.contains("unverified companion source")
+            && render.contains("Source · companion (unverified)"),
+        "canonical app must present disassembly primary and mark companion source unverified"
     );
     assert!(
-        hybrid_app.contains("step_instruction") || hybrid_app.contains("do_step"),
-        "hybrid TUI must wire instruction step"
+        app.contains("DebugStepKind::InstructionInto")
+            && app.contains("DebugStepKind::InstructionOver"),
+        "canonical app must adapt coherent step actions to instruction stepping"
     );
     assert!(
-        hybrid_app.contains("HybridDebugApp") && hybrid_app.contains("run_hybrid_debug_tui"),
-        "hybrid TUI entry must exist"
+        module.contains("DebugApp::with_backend") && !module.contains("mod hybrid_app"),
+        "hybrid and host must share one terminal application entry"
     );
 }

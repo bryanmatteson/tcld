@@ -1,12 +1,12 @@
 [package]
-name = "tcld-debug-state"
-edition = "2024"
-version.workspace = true
-license.workspace = true
-repository.workspace = true
-authors.workspace = true
+    authors.workspace    = true
+    edition.workspace    = true
+    license.workspace    = true
+    name                 = "tcld-debug-state"
+    repository.workspace = true
+    version.workspace    = true
 
 [dependencies]
-arc-swap = "1"
-tcld-decompile = { path = "../tcld-decompile" }
-tcld-syntax = { path = "../tcld-syntax" }
+    arc-swap.workspace       = true
+    tcld-decompile.workspace = true
+    tcld-syntax.workspace    = true

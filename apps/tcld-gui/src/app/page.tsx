@@ -2681,15 +2681,22 @@ function RunConfigurationWindowApp() {
             <RunConfigurationField field="env" label="Env" value={draft.env} onChange={(value) => updateDraft("env", value)} />
             <RunConfigurationField field="cwd" label="Cwd" value={draft.cwd} onChange={(value) => updateDraft("cwd", value)} />
             <RunConfigurationField field="tclshPath" label="Tclsh Path" value={draft.tclshPath} onChange={(value) => updateDraft("tclshPath", value)} />
+            <div
+              className="rounded border border-tcld-border-dim bg-tcld-bg-1 px-3 py-2 text-tcld-fg-dim"
+              data-debug-execution-backend="host"
+            >
+              <div className="text-tcld-fg-muted">Execution backend</div>
+              <div className="mt-1">Tcl host debugger (Auto/Host for source). Hybrid and VmStrict source compilation are CLI options in a <code>tcld</code> build with the <code>hybrid</code> feature.</div>
+            </div>
             <label className="grid gap-1">
-              <span className="text-tcld-fg-muted">Debugger Backend</span>
+              <span className="text-tcld-fg-muted">Host debugger transport</span>
               <select
                 className="rounded border border-tcld-border-dim bg-tcld-bg-2 px-2 py-1 text-tcld-fg outline-none focus:border-tcld-border-focus"
                 value={draft.backend ?? "embedded"}
                 onChange={(event) => updateBackend(event.target.value)}
               >
-                <option value="embedded">Embedded (default)</option>
-                <option value="external">External tclsh (wire protocol)</option>
+                <option value="embedded">Embedded Tcl host (default)</option>
+                <option value="external">External tclsh nub (wire protocol)</option>
               </select>
             </label>
             <label className="grid gap-1">

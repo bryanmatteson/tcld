@@ -1,15 +1,15 @@
 [package]
-name = "tcld-explore"
-edition.workspace = true
-version.workspace = true
-license.workspace = true
-repository.workspace = true
-authors.workspace = true
+    authors.workspace    = true
+    edition.workspace    = true
+    license.workspace    = true
+    name                 = "tcld-explore"
+    repository.workspace = true
+    version.workspace    = true
 
 [dependencies]
-similar = "2.7"
-tcld-core = { path = "../tcld-core" }
-tcld-decompile = { path = "../tcld-decompile" }
+    similar.workspace        = true
+    tcld-core.workspace      = true
+    tcld-decompile.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+    tempfile.workspace = true

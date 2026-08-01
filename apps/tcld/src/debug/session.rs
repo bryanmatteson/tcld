@@ -30,6 +30,23 @@ pub struct Session {
     _paths: NubPaths,
 }
 
+fn validate_session_nub_abi(
+    capabilities: &[String],
+    paths: &NubPaths,
+) -> Result<NubTclAbi, String> {
+    validate_nub_tcl_abi(capabilities).map_err(|error| {
+        format!(
+            "{error}\nselected debugger nub: {}\nselected Tcl host: {} ({})\n\
+             The nub is stale or was built for an older controller contract. Reinstall with \
+             `mise run tcld:install`, or rebuild it with `cargo build -p tcld-dbg-ext` and \
+             pass the resulting library with `--dylib`.",
+            paths.dylib.display(),
+            paths.tclsh.display(),
+            paths.tcl_patchlevel,
+        )
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct ProcEntry {
     pub qname: String,
@@ -79,7 +96,7 @@ impl Session {
                     .unwrap_or_else(|| "unprobed".to_string()),
             ) + &loader
         })?;
-        let compiled_abi = validate_nub_tcl_abi(&capabilities)?;
+        let compiled_abi = validate_session_nub_abi(&capabilities, &paths)?;
         if let Some(expected) = paths.tcl_abi {
             let expected = match expected {
                 super::config::TclAbi::Tcl85 => NubTclAbi::Tcl85,
@@ -109,6 +126,18 @@ impl Session {
             path: path.to_string_lossy().into_owned(),
             stop_on_entry,
         })
+    }
+
+    /// Replace this session with a newly spawned nub and Tcl interpreter.
+    ///
+    /// A debugger restart must not re-source the target into the existing
+    /// interpreter: globals, loaded packages, namespaces, and external side
+    /// effects would survive. The replacement is connected first so a spawn
+    /// failure leaves the existing session intact; after a successful
+    /// handshake the old nub is closed.
+    pub fn reconnect(&mut self) -> Result<(), String> {
+        let paths = self._paths.clone();
+        replace_with_fresh_session(self, || Self::connect(paths), Self::close)
     }
 
     pub fn close(mut self) {
@@ -237,6 +266,12 @@ impl Session {
         })
     }
 
+    pub fn block_source(&mut self, owner_block_id: &str) -> Result<String, String> {
+        self.send(Op::BlockSource {
+            block: owner_block_id.to_owned(),
+        })
+    }
+
     pub fn proc_list(&mut self) -> Result<Vec<ProcEntry>, String> {
         let payload = self.send(Op::ProcList)?;
         Ok(parse_proc_list(&payload))
@@ -351,7 +386,7 @@ impl Session {
     ) -> Result<String, String> {
         self.send(Op::BpRemove { id: bp.id.clone() })?;
         let target = match (&bp.source_path, bp.line) {
-            (Some(path), Some(line)) if bp.pending => BreakpointTarget::FileLine {
+            (Some(path), Some(line)) => BreakpointTarget::FileLine {
                 path: path.clone(),
                 line: u64::from(line),
             },
@@ -366,10 +401,20 @@ impl Session {
                 len: bp.len,
             },
         };
-        self.send(Op::BpAdd {
+        let new_id = self.send(Op::BpAdd {
             target,
             condition: condition.map(str::to_string),
-        })
+        })?;
+        if !bp.enabled {
+            self.send(Op::BpDisable { id: new_id.clone() })?;
+        }
+        if bp.ignore_count > 0 {
+            self.send(Op::BpSetIgnore {
+                id: new_id.clone(),
+                count: bp.ignore_count,
+            })?;
+        }
+        Ok(new_id)
     }
 
     pub fn watch_add(&mut self, name: &str, expr: &str) -> Result<String, String> {
@@ -424,6 +469,17 @@ impl Session {
             serialized: serialized.to_string(),
         })
     }
+}
+
+fn replace_with_fresh_session<T, E>(
+    current: &mut T,
+    connect: impl FnOnce() -> Result<T, E>,
+    close: impl FnOnce(T),
+) -> Result<(), E> {
+    let fresh = connect()?;
+    let old = std::mem::replace(current, fresh);
+    close(old);
+    Ok(())
 }
 
 fn parse_app_state(payload: &str) -> AppState {
@@ -613,8 +669,16 @@ fn parse_bp_list(payload: &str) -> Vec<ProcBreakpoint> {
                     .get("pending")
                     .map(|s| matches!(s.as_str(), "1" | "true" | "yes" | "on"))
                     .unwrap_or(false),
+                pending_reason: dict.get("pending_reason").cloned(),
                 offset: dict.get("offset").and_then(|s| s.parse().ok()).unwrap_or(0),
                 len: dict.get("len").and_then(|s| s.parse().ok()).unwrap_or(1),
+                resolved_block: dict.get("resolved_block").cloned(),
+                resolved_line: dict.get("resolved_line").and_then(|s| s.parse().ok()),
+                resolved_offset: dict.get("resolved_offset").and_then(|s| s.parse().ok()),
+                resolved_len: dict.get("resolved_len").and_then(|s| s.parse().ok()),
+                resolution_generation: dict
+                    .get("resolution_generation")
+                    .and_then(|s| s.parse().ok()),
                 enabled: dict
                     .get("enabled")
                     .map(|s| matches!(s.as_str(), "1" | "true" | "yes" | "on"))
@@ -815,9 +879,17 @@ pub fn format_event(ev: &WireEvent) -> (EventSeverity, String) {
             EventSeverity::Warn,
             format!("condition_error bp={breakpoint} message={message}"),
         ),
-        WireEvent::BlocksRevalidated { block } => (
+        WireEvent::BlocksRevalidated {
+            block,
+            generation,
+            change,
+            ..
+        } => (
             EventSeverity::Info,
-            format!("blocks_revalidated block={block}"),
+            format!(
+                "blocks_revalidated block={block} generation={generation} change={}",
+                change.as_str()
+            ),
         ),
         WireEvent::NubStarted {
             pid,
@@ -1065,5 +1137,50 @@ mod tests {
         assert!(matches!(f.pause_kind, PauseKind::Error));
         assert_eq!(f.error_message.as_deref(), Some("divide by zero"));
         assert_eq!(f.line, 5);
+    }
+
+    #[test]
+    fn restart_replacement_installs_fresh_state_and_closes_the_old_state() {
+        let mut current = String::from("dirty interpreter");
+        let mut closed = None;
+        replace_with_fresh_session(
+            &mut current,
+            || Ok::<_, ()>(String::from("fresh interpreter")),
+            |old| closed = Some(old),
+        )
+        .unwrap();
+        assert_eq!(current, "fresh interpreter");
+        assert_eq!(closed.as_deref(), Some("dirty interpreter"));
+    }
+
+    #[test]
+    fn failed_restart_connection_preserves_the_existing_session() {
+        let mut current = String::from("still connected");
+        let mut closed = false;
+        let result = replace_with_fresh_session(
+            &mut current,
+            || Err::<String, _>("spawn failed"),
+            |_| closed = true,
+        );
+        assert_eq!(result, Err("spawn failed"));
+        assert_eq!(current, "still connected");
+        assert!(!closed);
+    }
+
+    #[test]
+    fn stale_nub_handshake_names_the_selected_artifact_and_durable_repair() {
+        let paths = NubPaths::explicit(
+            "/opt/homebrew/bin/tclsh9.0".into(),
+            "/tmp/tcld_nub_bootstrap.tcl".into(),
+            "/checkout/target/debug/libtcld_dbg.dylib".into(),
+        );
+        let error = validate_session_nub_abi(&[], &paths).unwrap_err();
+        assert!(
+            error.contains("/checkout/target/debug/libtcld_dbg.dylib"),
+            "{error}"
+        );
+        assert!(error.contains("/opt/homebrew/bin/tclsh9.0"), "{error}");
+        assert!(error.contains("mise run tcld:install"), "{error}");
+        assert!(error.contains("cargo build -p tcld-dbg-ext"), "{error}");
     }
 }

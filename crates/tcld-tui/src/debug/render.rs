@@ -276,7 +276,15 @@ fn render_code_panes(
         .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(area);
     render_source(frame, panes[0], snapshot, ui, theme);
-    let block = panel_block(" Source · original ", false, theme);
+    let title = if matches!(
+        snapshot.source_origin,
+        SourceOrigin::UserScript | SourceOrigin::CompiledSource
+    ) {
+        " Disassembly · executable "
+    } else {
+        " Source · companion (unverified) "
+    };
+    let block = panel_block(title, false, theme);
     let inner = block.inner(panes[1]);
     let highlight = snapshot
         .secondary_highlight_line
@@ -338,7 +346,10 @@ fn render_source(
     let focused = ui.focus == Pane::Source;
     let base_title = match snapshot.source_origin {
         SourceOrigin::UserScript => " Source ",
+        SourceOrigin::CompiledSource => " Source · compiled source ",
+        SourceOrigin::SourcedFile => " Source · sourced file ",
         SourceOrigin::ProcBody => " Source · proc body ",
+        SourceOrigin::Anonymous => " Source · eval (session-only) ",
         SourceOrigin::Synthetic => " Source · synthetic ",
     };
     let selected_command = snapshot
@@ -421,8 +432,11 @@ fn render_source(
         .iter()
         .filter(|bp| match snapshot.source_origin {
             SourceOrigin::ProcBody => bp.qname == active_qname,
-            SourceOrigin::UserScript => bp.qname.is_empty() && bp.source_path.is_some(),
+            SourceOrigin::UserScript | SourceOrigin::CompiledSource | SourceOrigin::SourcedFile => {
+                bp.qname.is_empty() && bp.source_path.is_some()
+            }
             SourceOrigin::Synthetic => false,
+            SourceOrigin::Anonymous => false,
         })
         .filter_map(|bp| bp.line)
         .collect();
@@ -434,8 +448,13 @@ fn render_source(
                 } else {
                     match snapshot.source_origin {
                         SourceOrigin::ProcBody => bp.qname == active_qname,
-                        SourceOrigin::UserScript => bp.qname.is_empty() && bp.source_path.is_some(),
+                        SourceOrigin::UserScript
+                        | SourceOrigin::CompiledSource
+                        | SourceOrigin::SourcedFile => {
+                            bp.qname.is_empty() && bp.source_path.is_some()
+                        }
                         SourceOrigin::Synthetic => false,
+                        SourceOrigin::Anonymous => false,
                     }
                 }
         })
@@ -1228,8 +1247,14 @@ mod tests {
             source_path: None,
             line: None,
             pending: false,
+            pending_reason: None,
             offset,
             len: 1,
+            resolved_block: Some(format!("proc:{qname}")),
+            resolved_line: None,
+            resolved_offset: Some(offset),
+            resolved_len: Some(1),
+            resolution_generation: None,
             enabled: true,
             hits: 0,
             ignore_count: 0,
@@ -1400,11 +1425,12 @@ mod tests {
         let snapshot = DebugSnapshot {
             secondary_source_lines: &original,
             secondary_highlight_line: Some(2),
+            source_origin: SourceOrigin::Synthetic,
             ..snap("hybrid", "/tmp/demo.tbc", &disassembly, &[], None, &[])
         };
         let mut ui = DebugUiState::new();
         let text = render_to_text_sized(&snapshot, &mut ui, None, &theme, 140, 32);
-        assert!(text.contains("Source · original"), "{text}");
+        assert!(text.contains("Source · companion (unverified)"), "{text}");
         assert!(text.contains("▶     2 set b 2"), "{text}");
     }
 

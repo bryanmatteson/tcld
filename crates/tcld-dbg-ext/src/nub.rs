@@ -169,44 +169,274 @@ set ::tcld::dbg::__nub__::target_state ready
 set ::tcld::dbg::__nub__::target_epoch 0
 set ::tcld::dbg::__nub__::target_request {}
 set ::tcld::dbg::__nub__::target_wakeup {}
-set ::tcld::dbg::__nub__::pending_next 0
+set ::tcld::dbg::__nub__::breakpoint_next -1
+# These are logical breakpoint records, despite the legacy array name. They
+# live for the full controller session, retain requested source identity, and
+# optionally point at a generation-specific core breakpoint via `real_id`.
 array set ::tcld::dbg::__nub__::pending_breakpoints {}
+# Controller ids assigned to core-only breakpoint kinds. This keeps the raw
+# core bpN namespace private even when its counters diverge from logical ids.
+array set ::tcld::dbg::__nub__::passthrough_breakpoints {}
 
 proc ::tcld::dbg::__nub__::send_event {kind fields} {
     ::tcld::dbg::__nub__::send_frame evt 0 [linsert $fields 0 $kind]
 }
 
+proc ::tcld::dbg::__nub__::allocate_breakpoint_id {} {
+    while 1 {
+        set id bp[incr ::tcld::dbg::__nub__::breakpoint_next]
+        if {![info exists ::tcld::dbg::__nub__::pending_breakpoints($id)] && \
+            ![info exists ::tcld::dbg::__nub__::passthrough_breakpoints($id)]} {
+            return $id
+        }
+    }
+}
+
+proc ::tcld::dbg::__nub__::external_id_for_core {real_id} {
+    set logical [::tcld::dbg::__nub__::logical_id_for_core $real_id]
+    if {$logical ne $real_id} { return $logical }
+    foreach id [array names ::tcld::dbg::__nub__::passthrough_breakpoints] {
+        if {$::tcld::dbg::__nub__::passthrough_breakpoints($id) eq $real_id} { return $id }
+    }
+    set id [::tcld::dbg::__nub__::allocate_breakpoint_id]
+    set ::tcld::dbg::__nub__::passthrough_breakpoints($id) $real_id
+    ::tcld::dbg::__bind_logical_breakpoint $id $real_id
+    return $id
+}
+
+proc ::tcld::dbg::__nub__::logical_id_for_core {real_id} {
+    foreach id [array names ::tcld::dbg::__nub__::pending_breakpoints] {
+        set record $::tcld::dbg::__nub__::pending_breakpoints($id)
+        if {[dict exists $record real_id] && [dict get $record real_id] eq $real_id} {
+            return $id
+        }
+    }
+    foreach id [array names ::tcld::dbg::__nub__::passthrough_breakpoints] {
+        if {$::tcld::dbg::__nub__::passthrough_breakpoints($id) eq $real_id} { return $id }
+    }
+    return $real_id
+}
+
+proc ::tcld::dbg::__nub__::core_breakpoint_row {real_id} {
+    foreach row [::tcld::dbg::breakpoint_list] {
+        if {[dict get $row id] eq $real_id} { return $row }
+    }
+    return {}
+}
+
+proc ::tcld::dbg::__nub__::logical_hit_count {record} {
+    set hits [dict get $record hits]
+    if {[dict exists $record real_id]} {
+        set row [::tcld::dbg::__nub__::core_breakpoint_row [dict get $record real_id]]
+        if {$row ne ""} { incr hits [dict get $row hits] }
+    }
+    return $hits
+}
+
+proc ::tcld::dbg::__nub__::detach_logical_binding {id} {
+    if {![info exists ::tcld::dbg::__nub__::pending_breakpoints($id)]} { return }
+    set record $::tcld::dbg::__nub__::pending_breakpoints($id)
+    if {[dict exists $record real_id]} {
+        set real_id [dict get $record real_id]
+        set row [::tcld::dbg::__nub__::core_breakpoint_row $real_id]
+        if {$row ne ""} { dict incr record hits [dict get $row hits] }
+        ::tcld::dbg::__unbind_logical_breakpoint $real_id
+        ::tcld::dbg::__wrap__::orig_catch {::tcld::dbg::bp_remove $real_id}
+        foreach key {real_id resolved_block resolved_offset resolved_len resolved_line \
+                     resolution_generation} {
+            if {[dict exists $record $key]} { dict unset record $key }
+        }
+    }
+    set ::tcld::dbg::__nub__::pending_breakpoints($id) $record
+}
+
+proc ::tcld::dbg::__nub__::resolve_logical_breakpoint {id generation change} {
+    if {![info exists ::tcld::dbg::__nub__::pending_breakpoints($id)]} { return 0 }
+    ::tcld::dbg::__nub__::detach_logical_binding $id
+    set record $::tcld::dbg::__nub__::pending_breakpoints($id)
+    set kind [dict get $record kind]
+    if {$kind eq "file_line"} {
+        set block "file:[dict get $record path]"
+        set line [dict get $record line]
+        if {[::tcld::dbg::__wrap__::orig_catch \
+            {::tcld::dbg::file_line_location [dict get $record path] $line} location]} {
+            dict set record pending_reason \
+                "requested line $line has no executable command in $block generation $generation after $change"
+            set ::tcld::dbg::__nub__::pending_breakpoints($id) $record
+            return 0
+        }
+        set offset [dict get $location offset]
+        set len [dict get $location len]
+        set resolved_line $line
+        set args [list file [dict get $record path] $offset $len]
+    } elseif {$kind eq "file"} {
+        set block "file:[dict get $record path]"
+        set offset [dict get $record offset]
+        set len [dict get $record len]
+        set resolved_line {}
+        set args [list file [dict get $record path] $offset $len]
+    } else {
+        set block "proc:[dict get $record qname]"
+        set offset [dict get $record offset]
+        set len [dict get $record len]
+        set resolved_line {}
+        set args [list source [dict get $record qname] $offset $len]
+    }
+    if {$kind ne "file_line"} {
+        set requested_len [dict get $record len]
+        if {[::tcld::dbg::__wrap__::orig_catch \
+            {::tcld::dbg::block_command_span $block $offset $requested_len} command]} {
+            dict set record pending_reason \
+                "requested command coordinate $offset is not executable in $block generation $generation after $change"
+            set ::tcld::dbg::__nub__::pending_breakpoints($id) $record
+            return 0
+        }
+        set command_text [dict get $command text]
+        set actual_len [dict get $command len]
+        if {[dict exists $record anchor_text] && \
+            ([dict get $record anchor_text] ne $command_text || \
+             [dict get $record anchor_len] != $actual_len)} {
+            dict set record pending_reason \
+                "requested command anchor changed in $block generation $generation after $change"
+            set ::tcld::dbg::__nub__::pending_breakpoints($id) $record
+            return 0
+        }
+        if {![dict exists $record anchor_text]} {
+            dict set record anchor_text $command_text
+            dict set record anchor_len $actual_len
+        }
+        set len $actual_len
+        if {$kind eq "file"} {
+            set args [list file [dict get $record path] $offset $len]
+        } else {
+            set args [list source [dict get $record qname] $offset $len]
+        }
+    }
+    if {[dict get $record condition] ne ""} { lappend args [dict get $record condition] }
+    if {[::tcld::dbg::__wrap__::orig_catch \
+        {::tcld::dbg::breakpoint_add {*}$args} real_id]} {
+        dict set record pending_reason \
+            "requested command span $offset+$len is not executable in $block generation $generation after $change"
+        set ::tcld::dbg::__nub__::pending_breakpoints($id) $record
+        return 0
+    }
+    if {![dict get $record enabled]} { ::tcld::dbg::bp_disable $real_id }
+    set remaining_ignore [expr {max(0, [dict get $record ignore] - [dict get $record hits])}]
+    if {$remaining_ignore > 0} { ::tcld::dbg::bp_set_ignore $real_id $remaining_ignore }
+    set core_row [::tcld::dbg::__nub__::core_breakpoint_row $real_id]
+    if {$core_row ne "" && [dict exists $core_row line]} {
+        set resolved_line [dict get $core_row line]
+    }
+    dict set record real_id $real_id
+    ::tcld::dbg::__bind_logical_breakpoint $id $real_id
+    dict set record resolved_block $block
+    dict set record resolved_offset $offset
+    dict set record resolved_len $len
+    if {$resolved_line ne ""} { dict set record resolved_line $resolved_line }
+    dict set record resolution_generation $generation
+    dict set record last_bound_generation $generation
+    if {[dict exists $record pending_reason]} { dict unset record pending_reason }
+    set ::tcld::dbg::__nub__::pending_breakpoints($id) $record
+    return 1
+}
+
 proc ::tcld::dbg::__nub__::bp_add {args_list} {
-    if {[lindex $args_list 0] ne "file_line"} {
-        return [::tcld::dbg::breakpoint_add {*}$args_list]
+    set kind [lindex $args_list 0]
+    if {$kind ni {file_line source file}} {
+        set real_id [::tcld::dbg::breakpoint_add {*}$args_list]
+        return [::tcld::dbg::__nub__::external_id_for_core $real_id]
     }
-    if {[llength $args_list] ni {3 4}} {
-        error "wrong # args: file_line path line ?condition?"
+    set condition [lindex $args_list end]
+    set id [::tcld::dbg::__nub__::allocate_breakpoint_id]
+    if {$kind eq "file_line"} {
+        if {[llength $args_list] ni {3 4}} {
+            error "wrong # args: file_line path line ?condition?"
+        }
+        set path [file normalize [lindex $args_list 1]]
+        set line [lindex $args_list 2]
+        if {![string is integer -strict $line] || $line < 1} {
+            error "file line must be a positive integer"
+        }
+        if {[llength $args_list] == 3} { set condition {} }
+        set record [dict create kind file_line path $path line $line \
+            condition $condition enabled 1 ignore 0]
+    } elseif {$kind eq "file"} {
+        if {[llength $args_list] ni {4 5}} { error "wrong # args: file path offset len ?condition?" }
+        if {[llength $args_list] == 4} { set condition {} }
+        set offset [lindex $args_list 2]
+        set len [lindex $args_list 3]
+        if {![string is integer -strict $offset] || $offset < 0 || \
+            ![string is integer -strict $len] || $len < 1} {
+            error "file command offset must be non-negative and len must be positive"
+        }
+        set record [dict create kind file path [file normalize [lindex $args_list 1]] \
+            offset $offset len $len condition $condition enabled 1 ignore 0 hits 0]
+    } else {
+        if {[llength $args_list] ni {4 5}} { error "wrong # args: source qname offset len ?condition?" }
+        if {[llength $args_list] == 4} { set condition {} }
+        set offset [lindex $args_list 2]
+        set len [lindex $args_list 3]
+        if {![string is integer -strict $offset] || $offset < 0 || \
+            ![string is integer -strict $len] || $len < 1} {
+            error "proc command offset must be non-negative and len must be positive"
+        }
+        set record [dict create kind source qname [string trimleft [lindex $args_list 1] :] \
+            offset $offset len $len condition $condition enabled 1 ignore 0 hits 0]
     }
-    set path [lindex $args_list 1]
-    set line [lindex $args_list 2]
-    if {![string is integer -strict $line] || $line < 1} {
-        error "file line must be a positive integer"
+    if {$kind eq "file_line"} { dict set record hits 0 }
+    set ::tcld::dbg::__nub__::pending_breakpoints($id) $record
+    if {$kind eq "source"} {
+        set block "proc:[dict get $record qname]"
+    } else {
+        set block "file:[dict get $record path]"
     }
-    set condition [lindex $args_list 3]
-    set id pending[incr ::tcld::dbg::__nub__::pending_next]
-    set ::tcld::dbg::__nub__::pending_breakpoints($id) [dict create \
-        path $path line $line condition $condition enabled 1 ignore 0]
-    if {[info exists ::tcld::dbg::__nub__::active_target] &&
-        $::tcld::dbg::__nub__::active_target eq $path} {
-        ::tcld::dbg::__nub__::resolve_pending_breakpoints $path
+    if {![::tcld::dbg::__wrap__::orig_catch \
+        {::tcld::dbg::block_generation $block} generation]} {
+        ::tcld::dbg::__nub__::resolve_logical_breakpoint $id $generation registration
+    } else {
+        dict set ::tcld::dbg::__nub__::pending_breakpoints($id) pending_reason \
+            "source owner $block is not registered yet"
     }
     return $id
 }
 
 proc ::tcld::dbg::__nub__::bp_list {} {
-    set rows [::tcld::dbg::breakpoint_list]
+    set internal_ids {}
+    foreach id [array names ::tcld::dbg::__nub__::pending_breakpoints] {
+        set record $::tcld::dbg::__nub__::pending_breakpoints($id)
+        if {[dict exists $record real_id]} { lappend internal_ids [dict get $record real_id] }
+    }
+    set rows {}
+    foreach row [::tcld::dbg::breakpoint_list] {
+        if {[dict get $row id] ni $internal_ids} {
+            dict set row id [::tcld::dbg::__nub__::external_id_for_core [dict get $row id]]
+            lappend rows $row
+        }
+    }
     foreach id [lsort [array names ::tcld::dbg::__nub__::pending_breakpoints]] {
         set record $::tcld::dbg::__nub__::pending_breakpoints($id)
-        set row [list id $id block "file:[dict get $record path]" \
-            offset 0 len 1 line [dict get $record line] \
-            enabled [dict get $record enabled] hits 0 \
-            ignore [dict get $record ignore] pending 1]
+        set kind [dict get $record kind]
+        if {$kind eq "source"} {
+            set block "proc:[dict get $record qname]"
+        } else {
+            set block "file:[dict get $record path]"
+        }
+        set offset [expr {$kind eq "file_line" ? 0 : [dict get $record offset]}]
+        set len [expr {$kind eq "file_line" ? 1 : [dict get $record len]}]
+        set pending [expr {![dict exists $record real_id]}]
+        set row [list id $id kind line block $block offset $offset len $len \
+            enabled [dict get $record enabled] \
+            hits [::tcld::dbg::__nub__::logical_hit_count $record] \
+            ignore [dict get $record ignore] pending $pending]
+        if {$kind eq "file_line"} { lappend row line [dict get $record line] }
+        if {[dict exists $record real_id]} {
+            foreach key {resolved_block resolved_offset resolved_len resolved_line \
+                         resolution_generation} {
+                if {[dict exists $record $key]} { lappend row $key [dict get $record $key] }
+            }
+        } elseif {[dict exists $record pending_reason]} {
+            lappend row pending_reason [dict get $record pending_reason]
+        }
         if {[dict get $record condition] ne ""} {
             lappend row condition [dict get $record condition]
         }
@@ -217,16 +447,37 @@ proc ::tcld::dbg::__nub__::bp_list {} {
 
 proc ::tcld::dbg::__nub__::bp_remove {id} {
     if {[info exists ::tcld::dbg::__nub__::pending_breakpoints($id)]} {
+        ::tcld::dbg::__nub__::detach_logical_binding $id
         unset ::tcld::dbg::__nub__::pending_breakpoints($id)
         return ok
     }
-    return [::tcld::dbg::bp_remove $id]
+    if {[info exists ::tcld::dbg::__nub__::passthrough_breakpoints($id)]} {
+        set real_id $::tcld::dbg::__nub__::passthrough_breakpoints($id)
+        set result [::tcld::dbg::bp_remove $real_id]
+        ::tcld::dbg::__unbind_logical_breakpoint $real_id
+        unset ::tcld::dbg::__nub__::passthrough_breakpoints($id)
+        return $result
+    }
+    error "breakpoint not found: $id"
 }
 
 proc ::tcld::dbg::__nub__::bp_enable {id enabled} {
     if {[info exists ::tcld::dbg::__nub__::pending_breakpoints($id)]} {
         dict set ::tcld::dbg::__nub__::pending_breakpoints($id) enabled $enabled
+        set record $::tcld::dbg::__nub__::pending_breakpoints($id)
+        if {[dict exists $record real_id]} {
+            if {$enabled} {
+                ::tcld::dbg::bp_enable [dict get $record real_id]
+            } else {
+                ::tcld::dbg::bp_disable [dict get $record real_id]
+            }
+        }
         return ok
+    }
+    if {[info exists ::tcld::dbg::__nub__::passthrough_breakpoints($id)]} {
+        set id $::tcld::dbg::__nub__::passthrough_breakpoints($id)
+    } else {
+        error "breakpoint not found: $id"
     }
     if {$enabled} {
         return [::tcld::dbg::bp_enable $id]
@@ -237,71 +488,335 @@ proc ::tcld::dbg::__nub__::bp_enable {id enabled} {
 proc ::tcld::dbg::__nub__::bp_set_ignore {id count} {
     if {[info exists ::tcld::dbg::__nub__::pending_breakpoints($id)]} {
         dict set ::tcld::dbg::__nub__::pending_breakpoints($id) ignore $count
+        set record $::tcld::dbg::__nub__::pending_breakpoints($id)
+        if {[dict exists $record real_id]} {
+            set remaining [expr {max(0, $count - [dict get $record hits])}]
+            ::tcld::dbg::bp_set_ignore [dict get $record real_id] $remaining
+        }
         return ok
+    }
+    if {[info exists ::tcld::dbg::__nub__::passthrough_breakpoints($id)]} {
+        set id $::tcld::dbg::__nub__::passthrough_breakpoints($id)
+    } else {
+        error "breakpoint not found: $id"
     }
     return [::tcld::dbg::bp_set_ignore $id $count]
 }
 
+proc ::tcld::dbg::__nub__::bp_move {args_list} {
+    set id [lindex $args_list 0]
+    set target_kind [lindex $args_list 1]
+    if {$target_kind in {source file}} {
+        if {[llength $args_list] != 5} {
+            error "wrong # args: bp_move id source|file identity offset len"
+        }
+        set identity [lindex $args_list 2]
+        set offset [lindex $args_list 3]
+        set len [lindex $args_list 4]
+        if {![string is integer -strict $offset] || $offset < 0 || \
+            ![string is integer -strict $len] || $len < 1} {
+            error "breakpoint move offset must be non-negative and len must be positive"
+        }
+    } elseif {$target_kind eq "file_line"} {
+        if {[llength $args_list] != 4} {
+            error "wrong # args: bp_move id file_line path line"
+        }
+        set identity [lindex $args_list 2]
+        set line [lindex $args_list 3]
+        if {![string is integer -strict $line] || $line < 1} {
+            error "breakpoint move line must be positive"
+        }
+    } elseif {$target_kind eq "instruction"} {
+        # The core relocate API cannot change breakpoint kind or instruction
+        # PC, so replace the core binding while retaining the external id.
+        if {[llength $args_list] != 3} {
+            error "wrong # args: bp_move id instruction pc"
+        }
+        set pc [lindex $args_list 2]
+        if {![string is integer -strict $pc] || $pc < 0} {
+            error "instruction pc must be non-negative"
+        }
+    } else {
+        error "unsupported breakpoint move target: $target_kind"
+    }
+
+    if {[info exists ::tcld::dbg::__nub__::pending_breakpoints($id)]} {
+        ::tcld::dbg::__nub__::detach_logical_binding $id
+        set record $::tcld::dbg::__nub__::pending_breakpoints($id)
+    } elseif {[info exists ::tcld::dbg::__nub__::passthrough_breakpoints($id)]} {
+        set real_id $::tcld::dbg::__nub__::passthrough_breakpoints($id)
+        set record [::tcld::dbg::__nub__::core_breakpoint_row $real_id]
+        if {$record eq ""} { error "breakpoint not found: $id" }
+        if {[dict get $record kind] in {var exception}} {
+            error "[dict get $record kind] breakpoint cannot move to $target_kind"
+        }
+        ::tcld::dbg::bp_remove $real_id
+        ::tcld::dbg::__unbind_logical_breakpoint $real_id
+        unset ::tcld::dbg::__nub__::passthrough_breakpoints($id)
+    } else {
+        error "breakpoint not found: $id"
+    }
+
+    if {![dict exists $record condition]} { dict set record condition {} }
+    if {![dict exists $record enabled]} { dict set record enabled 1 }
+    if {![dict exists $record ignore]} { dict set record ignore 0 }
+    if {![dict exists $record hits]} { dict set record hits 0 }
+
+    if {$target_kind eq "instruction"} {
+        if {[info exists ::tcld::dbg::__nub__::pending_breakpoints($id)]} {
+            unset ::tcld::dbg::__nub__::pending_breakpoints($id)
+        }
+        set add_args [list instruction $pc]
+        if {[dict get $record condition] ne ""} {
+            lappend add_args [dict get $record condition]
+        }
+        set real_id [::tcld::dbg::breakpoint_add {*}$add_args]
+        if {![dict get $record enabled]} { ::tcld::dbg::bp_disable $real_id }
+        if {[dict get $record ignore] > 0} {
+            ::tcld::dbg::bp_set_ignore $real_id [dict get $record ignore]
+        }
+        set ::tcld::dbg::__nub__::passthrough_breakpoints($id) $real_id
+        ::tcld::dbg::__bind_logical_breakpoint $id $real_id
+        return ok
+    }
+
+    foreach key {path line qname offset len anchor_text anchor_len pending_reason \
+                 last_bound_generation real_id resolved_block resolved_offset \
+                 resolved_len resolved_line resolution_generation kind} {
+        if {[dict exists $record $key]} { dict unset record $key }
+    }
+    if {$target_kind eq "source"} {
+        set identity [string trimleft $identity :]
+        dict set record kind source
+        dict set record qname $identity
+        dict set record offset $offset
+        dict set record len $len
+        set block "proc:$identity"
+    } elseif {$target_kind eq "file"} {
+        set identity [file normalize $identity]
+        dict set record kind file
+        dict set record path $identity
+        dict set record offset $offset
+        dict set record len $len
+        set block "file:$identity"
+    } else {
+        set identity [file normalize $identity]
+        dict set record kind file_line
+        dict set record path $identity
+        dict set record line $line
+        set block "file:$identity"
+    }
+    set ::tcld::dbg::__nub__::pending_breakpoints($id) $record
+    if {[::tcld::dbg::__wrap__::orig_catch \
+        {::tcld::dbg::block_generation $block} generation]} {
+        dict set ::tcld::dbg::__nub__::pending_breakpoints($id) pending_reason \
+            "source owner $block is not registered yet"
+    } else {
+        ::tcld::dbg::__nub__::resolve_logical_breakpoint $id $generation relocation
+    }
+    return ok
+}
+
+# Rewrite rows returned by core-only filtered queries while the binding map is
+# still authoritative. This is the only path that may allocate passthrough ids.
+proc ::tcld::dbg::__nub__::externalize_breakpoint_rows {rows} {
+    set external {}
+    foreach row $rows {
+        if {[dict exists $row id]} {
+            dict set row id [::tcld::dbg::__nub__::external_id_for_core [dict get $row id]]
+        }
+        lappend external $row
+    }
+    return $external
+}
+
+proc ::tcld::dbg::__nub__::bp_validate {qname} {
+    set rows [::tcld::dbg::__nub__::externalize_breakpoint_rows \
+        [::tcld::dbg::bp_validate $qname]]
+    # Core validation may relocate a generation-specific binding. Re-resolve
+    # logical intent immediately so its owner-derived anchor remains authoritative.
+    ::tcld::dbg::__nub__::resolve_pending_proc_breakpoints $qname
+    return $rows
+}
+
+proc ::tcld::dbg::__nub__::line_breakpoints {args_list} {
+    if {[llength $args_list] > 2} {
+        error "wrong # args: should be \"line_breakpoints ?qname? ?offset?\""
+    }
+    set qname_filter [expr {[llength $args_list] >= 1 \
+        ? [string trimleft [lindex $args_list 0] :] : {}}]
+    set has_offset [expr {[llength $args_list] == 2}]
+    if {$has_offset} {
+        set offset_filter [lindex $args_list 1]
+        if {![string is integer -strict $offset_filter] || $offset_filter < 0} {
+            error "offset must be non-negative integer"
+        }
+    }
+    set rows {}
+    foreach row [::tcld::dbg::__nub__::bp_list] {
+        if {![dict exists $row kind] || [dict get $row kind] ne "line" || \
+            ![dict exists $row block] || ![dict exists $row offset]} continue
+        set block [dict get $row block]
+        if {$qname_filter ne ""} {
+            if {[string match {proc:*} $block]} {
+                set owner [string range $block 5 end]
+            } elseif {[string match {file:*} $block]} {
+                set owner [string range $block 5 end]
+            } else {
+                continue
+            }
+            if {$owner ne $qname_filter} continue
+        }
+        set current_offset [expr {[dict exists $row resolved_offset] \
+            ? [dict get $row resolved_offset] : [dict get $row offset]}]
+        if {$has_offset && $current_offset != $offset_filter} continue
+        lappend rows $row
+    }
+    return $rows
+}
+
 proc ::tcld::dbg::__nub__::bp_export {} {
-    set rows [::tcld::dbg::bp_export]
+    set rows {}
+    foreach row [::tcld::dbg::bp_export] {
+        # Source line rows backing logical intent are reconstructed below.
+        # Non-source kinds retain the core persistence contract.
+        if {[dict get $row kind] ne "line"} { lappend rows $row }
+    }
     foreach id [lsort [array names ::tcld::dbg::__nub__::pending_breakpoints]] {
         set record $::tcld::dbg::__nub__::pending_breakpoints($id)
-        lappend rows [list kind file_line \
-            path [dict get $record path] line [dict get $record line] \
-            enabled [dict get $record enabled] ignore [dict get $record ignore] \
-            condition [dict get $record condition]]
+        set kind [dict get $record kind]
+        if {$kind eq "file_line"} {
+            lappend rows [list kind file_line path [dict get $record path] \
+                line [dict get $record line] enabled [dict get $record enabled] \
+                ignore [dict get $record ignore] condition [dict get $record condition]]
+        } elseif {$kind eq "source"} {
+            set row [list kind proc_command qname [dict get $record qname] \
+                offset [dict get $record offset] len [dict get $record len] \
+                enabled [dict get $record enabled] ignore [dict get $record ignore] \
+                condition [dict get $record condition]]
+            if {[dict exists $record anchor_text]} {
+                lappend row anchor_text [dict get $record anchor_text] \
+                    anchor_len [dict get $record anchor_len]
+            }
+            lappend rows $row
+        } else {
+            set row [list kind file_command path [dict get $record path] \
+                offset [dict get $record offset] len [dict get $record len] \
+                enabled [dict get $record enabled] ignore [dict get $record ignore] \
+                condition [dict get $record condition]]
+            if {[dict exists $record anchor_text]} {
+                lappend row anchor_text [dict get $record anchor_text] \
+                    anchor_len [dict get $record anchor_len]
+            }
+            lappend rows $row
+        }
     }
     return $rows
 }
 
 proc ::tcld::dbg::__nub__::bp_import {serialized} {
+    foreach id [array names ::tcld::dbg::__nub__::pending_breakpoints] {
+        ::tcld::dbg::__nub__::detach_logical_binding $id
+    }
+    foreach id [array names ::tcld::dbg::__nub__::passthrough_breakpoints] {
+        ::tcld::dbg::__unbind_logical_breakpoint \
+            $::tcld::dbg::__nub__::passthrough_breakpoints($id)
+    }
     array unset ::tcld::dbg::__nub__::pending_breakpoints
     array set ::tcld::dbg::__nub__::pending_breakpoints {}
+    array unset ::tcld::dbg::__nub__::passthrough_breakpoints
+    array set ::tcld::dbg::__nub__::passthrough_breakpoints {}
     set core_rows {}
     set imported {}
     foreach row $serialized {
-        if {[dict get $row kind] ne "file_line"} {
+        set kind [dict get $row kind]
+        if {$kind ni {file_line file_command proc_command line}} {
             lappend core_rows $row
             continue
         }
-        set id pending[incr ::tcld::dbg::__nub__::pending_next]
-        set ::tcld::dbg::__nub__::pending_breakpoints($id) [dict create \
-            path [dict get $row path] line [dict get $row line] \
-            condition [dict get $row condition] enabled [dict get $row enabled] \
-            ignore [dict get $row ignore]]
+        set id [::tcld::dbg::__nub__::allocate_breakpoint_id]
+        if {$kind eq "file_line"} {
+            set record [dict create kind file_line path [file normalize [dict get $row path]] \
+                line [dict get $row line] condition [dict get $row condition] \
+                enabled [dict get $row enabled] ignore [dict get $row ignore] hits 0 \
+                pending_reason "source owner is not registered in this interpreter yet"]
+        } elseif {$kind eq "file_command"} {
+            set record [dict create kind file path [file normalize [dict get $row path]] \
+                offset [dict get $row offset] len [dict get $row len] \
+                condition [dict get $row condition] enabled [dict get $row enabled] \
+                ignore [dict get $row ignore] hits 0 \
+                pending_reason "source owner is not registered in this interpreter yet"]
+        } elseif {$kind eq "proc_command"} {
+            set record [dict create kind source qname [string trimleft [dict get $row qname] :] \
+                offset [dict get $row offset] len [dict get $row len] \
+                condition [dict get $row condition] enabled [dict get $row enabled] \
+                ignore [dict get $row ignore] hits 0 \
+                pending_reason "procedure owner is not registered in this interpreter yet"]
+        } else {
+            set block [dict get $row block]
+            if {[string match {proc:*} $block]} {
+                set record [dict create kind source qname [string range $block 5 end] \
+                    offset [dict get $row offset] len [dict get $row len] \
+                    condition [dict get $row condition] enabled [dict get $row enabled] \
+                    ignore [dict get $row ignore] hits 0 \
+                    pending_reason "procedure owner is not registered in this interpreter yet"]
+            } elseif {[string match {file:*} $block]} {
+                set record [dict create kind file path [file normalize [string range $block 5 end]] \
+                    offset [dict get $row offset] len [dict get $row len] \
+                    condition [dict get $row condition] enabled [dict get $row enabled] \
+                    ignore [dict get $row ignore] hits 0 \
+                    pending_reason "source owner is not registered in this interpreter yet"]
+            } else {
+                # Anonymous identities are deliberately not restart-durable.
+                continue
+            }
+        }
+        if {[dict exists $row anchor_text]} {
+            dict set record anchor_text [dict get $row anchor_text]
+            dict set record anchor_len [dict get $row anchor_len]
+        }
+        set ::tcld::dbg::__nub__::pending_breakpoints($id) $record
         lappend imported $id
     }
     set core_ids [::tcld::dbg::bp_import $core_rows]
-    return [concat $core_ids $imported]
+    set external_core_ids {}
+    foreach real_id $core_ids {
+        lappend external_core_ids [::tcld::dbg::__nub__::external_id_for_core $real_id]
+    }
+    return [concat $external_core_ids $imported]
 }
 
 proc ::tcld::dbg::__nub__::resolve_pending_breakpoints {path} {
+    set path [file normalize $path]
+    if {[::tcld::dbg::__wrap__::orig_catch \
+        {::tcld::dbg::block_generation "file:$path"} generation]} { return {} }
     set resolved {}
     foreach id [array names ::tcld::dbg::__nub__::pending_breakpoints] {
         set record $::tcld::dbg::__nub__::pending_breakpoints($id)
+        set kind [dict get $record kind]
+        if {$kind eq "source"} continue
         if {[dict get $record path] ne $path} continue
-        set line [dict get $record line]
-        if {[::tcld::dbg::__wrap__::orig_catch \
-            {::tcld::dbg::file_line_location $path $line} location]} {
-            continue
-        }
-        set offset [dict get $location offset]
-        set len [dict get $location len]
-        set args [list file $path $offset $len]
-        if {[dict get $record condition] ne ""} {
-            lappend args [dict get $record condition]
-        }
-        set real_id [::tcld::dbg::breakpoint_add {*}$args]
-        if {![dict get $record enabled]} {
-            ::tcld::dbg::bp_disable $real_id
-        }
-        if {[dict get $record ignore] > 0} {
-            ::tcld::dbg::bp_set_ignore $real_id [dict get $record ignore]
-        }
-        unset ::tcld::dbg::__nub__::pending_breakpoints($id)
-        lappend resolved [list pending $id resolved $real_id line $line offset $offset]
+        set transition [expr {[dict exists $record real_id] || \
+            [dict exists $record last_bound_generation] ? "revalidation" : "registration"}]
+        if {[::tcld::dbg::__nub__::resolve_logical_breakpoint \
+            $id $generation $transition]} { lappend resolved $id }
     }
-    ::tcld::dbg::__nub__::send_event blocks_revalidated [list block "file:$path"]
+    return $resolved
+}
+
+proc ::tcld::dbg::__nub__::resolve_pending_proc_breakpoints {qname} {
+    set qname [string trimleft $qname :]
+    if {[::tcld::dbg::__wrap__::orig_catch \
+        {::tcld::dbg::block_generation "proc:$qname"} generation]} { return {} }
+    set resolved {}
+    foreach id [array names ::tcld::dbg::__nub__::pending_breakpoints] {
+        set record $::tcld::dbg::__nub__::pending_breakpoints($id)
+        if {[dict get $record kind] ne "source" || [dict get $record qname] ne $qname} continue
+        set transition [expr {[dict exists $record real_id] || \
+            [dict exists $record last_bound_generation] ? "revalidation" : "registration"}]
+        if {[::tcld::dbg::__nub__::resolve_logical_breakpoint \
+            $id $generation $transition]} { lappend resolved $id }
+    }
     return $resolved
 }
 
@@ -325,6 +840,7 @@ proc ::tcld::dbg::__nub__::start_target {path stop_on_entry} {
 }
 
 proc ::tcld::dbg::__nub__::run_target {path stop_on_entry} {
+    set path [file normalize $path]
     set ::tcld::dbg::__nub__::active_target $path
     if {![file readable $path]} {
         set ::tcld::dbg::__nub__::target_state load_failed
@@ -401,17 +917,27 @@ proc ::tcld::dbg::__nub__::call_op {op args_list} {
         bp_list          { return [::tcld::dbg::__nub__::bp_list] }
         bp_disable       { return [::tcld::dbg::__nub__::bp_enable [lindex $args_list 0] 0] }
         bp_enable        { return [::tcld::dbg::__nub__::bp_enable [lindex $args_list 0] 1] }
-        bp_move          { return [::tcld::dbg::bp_move {*}$args_list] }
-        bp_validate      { return [::tcld::dbg::bp_validate {*}$args_list] }
+        bp_move          { return [::tcld::dbg::__nub__::bp_move $args_list] }
+        bp_validate      { return [::tcld::dbg::__nub__::bp_validate {*}$args_list] }
         bp_set_ignore    { return [::tcld::dbg::__nub__::bp_set_ignore {*}$args_list] }
         bp_export        { return [::tcld::dbg::__nub__::bp_export] }
         bp_import        { return [::tcld::dbg::__nub__::bp_import {*}$args_list] }
-        wp_add           { return [::tcld::dbg::watchpoint_add {*}$args_list] }
-        var_breakpoints  { return [::tcld::dbg::var_breakpoints {*}$args_list] }
-        line_breakpoints { return [::tcld::dbg::line_breakpoints {*}$args_list] }
-        instruction_breakpoints { return [::tcld::dbg::instruction_breakpoints {*}$args_list] }
+        wp_add           {
+            set real_id [::tcld::dbg::watchpoint_add {*}$args_list]
+            return [::tcld::dbg::__nub__::external_id_for_core $real_id]
+        }
+        var_breakpoints  {
+            return [::tcld::dbg::__nub__::externalize_breakpoint_rows \
+                [::tcld::dbg::var_breakpoints {*}$args_list]]
+        }
+        line_breakpoints { return [::tcld::dbg::__nub__::line_breakpoints $args_list] }
+        instruction_breakpoints {
+            return [::tcld::dbg::__nub__::externalize_breakpoint_rows \
+                [::tcld::dbg::instruction_breakpoints {*}$args_list]]
+        }
         proc_list        { return [::tcld::dbg::list_procs] }
         proc_body        { return [::tcld::dbg::proc_body {*}$args_list] }
+        block_source     { return [::tcld::dbg::block_source {*}$args_list] }
         proc_location    { return [::tcld::dbg::proc_location {*}$args_list] }
         block_disable    { return [::tcld::dbg::block_disable {*}$args_list] }
         block_enable     { return [::tcld::dbg::block_enable {*}$args_list] }
@@ -550,8 +1076,23 @@ fn debug_event_to_wire(event: &DebugEvent, active_target_path: Option<&str>) -> 
             breakpoint: format!("bp{}", breakpoint.0),
             message: error.message.clone(),
         }),
-        DebugEvent::BlocksRevalidated { block } => Some(W::BlocksRevalidated {
+        DebugEvent::BlocksRevalidated {
+            block,
+            generation,
+            source_path,
+            change,
+        } => Some(W::BlocksRevalidated {
             block: block.as_string(),
+            generation: *generation,
+            source_path: source_path.as_ref().map(ToString::to_string),
+            change: match change {
+                tcld_debug_state::BlockChange::Registered => {
+                    tcld_debug_wire::SourceUnitChange::Registered
+                }
+                tcld_debug_state::BlockChange::Revalidated => {
+                    tcld_debug_wire::SourceUnitChange::Revalidated
+                }
+            },
         }),
     }
 }
@@ -574,18 +1115,17 @@ fn format_pause_reason(reason: tcld_debug_state::PauseReason) -> tcld_debug_wire
 
 fn source_location(
     loc: &tcld_debug_state::Location,
-    active_target_path: Option<&str>,
+    _active_target_path: Option<&str>,
 ) -> tcld_debug_wire::SourceLocation {
     use tcld_debug_state::BlockId;
     use tcld_debug_wire::SourceBlockKind;
 
     let (block_kind, source_path, qualified_proc) = match loc.block() {
         BlockId::File(path) => (SourceBlockKind::File, Some(path.to_string()), None),
-        BlockId::ProcBody(qname) => (
-            SourceBlockKind::Proc,
-            active_target_path.map(str::to_string),
-            Some(qname.to_string()),
-        ),
+        // A proc's defining file is not necessarily the active entry target.
+        // Registration events carry owner-derived definition provenance; do
+        // not invent an entry-file association here.
+        BlockId::ProcBody(qname) => (SourceBlockKind::Proc, None, Some(qname.to_string())),
         BlockId::Anonymous { .. } => (SourceBlockKind::Anonymous, None, None),
     };
     tcld_debug_wire::SourceLocation {
@@ -597,6 +1137,26 @@ fn source_location(
         offset_start: u64::try_from(loc.byte_offset()).unwrap_or(u64::MAX),
         offset_end: u64::try_from(loc.byte_offset().saturating_add(loc.byte_len()))
             .unwrap_or(u64::MAX),
+    }
+}
+
+fn logical_breakpoint_id(interp: *mut Tcl_Interp, core_id: &str) -> String {
+    step_engine::logical_breakpoint_id(interp, core_id).unwrap_or_else(|| core_id.to_owned())
+}
+
+fn rewrite_wire_breakpoint_id(interp: *mut Tcl_Interp, event: &mut WireEvent) {
+    let breakpoint = match event {
+        WireEvent::Paused { breakpoint, .. } | WireEvent::ErrorPaused { breakpoint, .. } => {
+            breakpoint
+        }
+        WireEvent::ConditionError { breakpoint, .. } => {
+            *breakpoint = logical_breakpoint_id(interp, breakpoint);
+            return;
+        }
+        _ => return,
+    };
+    if let Some(core_id) = breakpoint.as_mut() {
+        *core_id = logical_breakpoint_id(interp, core_id);
     }
 }
 
@@ -612,9 +1172,11 @@ fn subscribe_event_forwarder(
     let cb: tcld_debug_state::EventCallback = Arc::new(move |event| {
         let interp = interp_addr as *mut Tcl_Interp;
         let active_target_path = step_engine::active_target_path(interp);
-        let Some(wire_event) = debug_event_to_wire(&event, active_target_path.as_deref()) else {
+        let Some(mut wire_event) = debug_event_to_wire(&event, active_target_path.as_deref())
+        else {
             return;
         };
+        rewrite_wire_breakpoint_id(interp, &mut wire_event);
         let payload = wire_event.to_payload();
         // Compose the Tcl invocation. Brace-quote payload so embedded
         // whitespace doesn't confuse the parser.

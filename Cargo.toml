@@ -4,11 +4,58 @@
     resolver = "2"
 
 [workspace.package]
-    version = "0.3.1"
+    version = "0.3.2"
     edition = "2024"
     license = "Apache-2.0"
     repository = "https://github.com/bryanmatteson/tcld"
     authors = [ "Bryan <bryan@matteson.dev>" ]
+
+[workspace.dependencies]
+    # Internal crates. Paths are relative to the workspace root.
+    tcl-sys          = { path = "crates/tcl-sys", default-features = false }
+    tcld-compile     = { path = "crates/tcld-compile" }
+    tcld-core        = { path = "crates/tcld-core" }
+    tcld-debug-state = { path = "crates/tcld-debug-state" }
+    tcld-debug-wire  = { path = "crates/tcld-debug-wire" }
+    tcld-decompile   = { path = "crates/tcld-decompile" }
+    tcld-explore     = { path = "crates/tcld-explore" }
+    tcld-interp      = { path = "crates/tcld-interp", default-features = false }
+    tcld-ir          = { path = "crates/tcld-ir" }
+    tcld-syntax      = { path = "crates/tcld-syntax" }
+    tcld-tui         = { path = "crates/tcld-tui" }
+    tcld-vm          = { path = "crates/tcld-vm", default-features = false }
+
+    # Third-party.
+    arc-swap            = "1"
+    cc                  = "1"
+    clap                = { version = "4", features = [ "derive", "env" ] }
+    crossterm           = "0.29"
+    num-bigint          = "0.4"
+    num-traits          = "0.2"
+    portable-pty        = "0.9"
+    pretty              = "0.12"
+    ratatui             = { version = "0.30.2", default-features = false, features = [ "crossterm_0_29" ] }
+    serde               = { version = "1", features = [ "derive" ] }
+    serde_json          = "1"
+    sha2                = "0.10"
+    similar             = "2.7"
+    static_assertions   = "1"
+    streaming-iterator  = "0.1"
+    tauri               = { version = "2", features = [] }
+    tauri-build         = { version = "2", features = [] }
+    tauri-plugin-dialog = "2"
+    tauri-plugin-log    = "2"
+    tempfile            = "3"
+    termosaic           = { version = "0.3.0", default-features = false }
+    termosaic-ratatui   = "0.2.0"
+    thiserror           = "1"
+    tokio               = { version = "1", features = [ "sync", "net", "io-util", "process", "time", "macros", "rt" ] }
+    toml                = "0.8"
+    tree-sitter         = "0.25"
+    tree-sitter-tcl     = { git = "https://github.com/tree-sitter-grammars/tree-sitter-tcl.git", rev = "8f11ac7206a54ed11210491cee1e0657e2962c47" }
+    turtletap           = "0.3.0"
+    unicode-width       = "0.2.2"
+    vt100               = "=0.15.2"
 
 [profile.dev]
     incremental = false

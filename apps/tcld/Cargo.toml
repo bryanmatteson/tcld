@@ -1,40 +1,41 @@
 [package]
-name = "tcld"
-edition = "2024"
-version.workspace = true
-license.workspace = true
-repository.workspace = true
-authors.workspace = true
-default-run = "tcld"
+    authors.workspace    = true
+    default-run          = "tcld"
+    edition.workspace    = true
+    license.workspace    = true
+    name                 = "tcld"
+    repository.workspace = true
+    version.workspace    = true
 
 [features]
-# The default CLI does not link an embedded Tcl runtime. Batch commands,
-# explore, and host debugging work without hybrid. Enable the TEBC VM with:
-#   cargo build -p tcld --features hybrid
-#   scripts/verify-hybrid-gates.sh
-default = []
-integration_tclsh = []
-# In-process TEBC VM + embedded Tcl 9 WorldHost (requires Tcl 9 headers/libs).
-# Enables `tcld run` hybrid path and hybrid `tcld debug` for `.tbc`.
-hybrid = ["dep:tcld-vm", "tcld-vm/host", "tcld-vm/debug"]
+    # The default CLI does not link an embedded Tcl runtime. Batch commands,
+    # explore, and host debugging work without hybrid. Enable the TEBC VM with:
+    #   cargo build -p tcld --features hybrid
+    #   scripts/verify-hybrid-gates.sh
+    default           = []
+    integration_tclsh = []
+    # In-process TEBC VM + embedded Tcl 9 WorldHost (requires Tcl 9 headers/libs).
+    # Enables `tcld run` plus hybrid `tcld debug` for raw `.tbc` and admitted Tcl source.
+    hybrid = ["dep:tcld-vm", "tcld-vm/host", "tcld-vm/debug"]
 
 [dependencies]
-tcld-core = { path = "../../crates/tcld-core" }
-tcld-debug-wire = { path = "../../crates/tcld-debug-wire" }
-tcld-decompile = { path = "../../crates/tcld-decompile" }
-tcld-explore = { path = "../../crates/tcld-explore" }
-tcld-syntax = { path = "../../crates/tcld-syntax" }
-termosaic = { version = "0.3", path = "../../../termosaic/crates/termosaic", default-features = false }
-tcld-tui = { path = "../../crates/tcld-tui" }
-tcld-vm = { path = "../../crates/tcld-vm", optional = true, default-features = false }
-crossterm = "0.29"
-ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
-clap = { version = "4", features = ["derive", "env"] }
-tempfile = "3"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
+    clap.workspace            = true
+    crossterm.workspace       = true
+    ratatui.workspace         = true
+    serde.workspace           = true
+    serde_json.workspace      = true
+    sha2.workspace            = true
+    tcld-compile.workspace    = true
+    tcld-core.workspace       = true
+    tcld-debug-wire.workspace = true
+    tcld-decompile.workspace  = true
+    tcld-explore.workspace    = true
+    tcld-syntax.workspace     = true
+    tcld-tui.workspace        = true
+    tcld-vm                   = { workspace = true, optional = true }
+    tempfile.workspace        = true
+    termosaic.workspace       = true
 
 [dev-dependencies]
-portable-pty = "0.9"
-vt100 = "=0.15.2"
+    portable-pty.workspace = true
+    vt100.workspace        = true

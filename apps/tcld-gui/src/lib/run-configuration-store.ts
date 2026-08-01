@@ -4,7 +4,7 @@ import type { DebugLaunchRequest, LaunchChannelRouting, LaunchChannelRoute, Laun
 import { buildDebugLaunchRequest } from "@/lib/gui-workflows";
 import type { RecentFile } from "@/lib/recent-files";
 
-/** Debugger backend for a launch: `embedded` (default, in-process) or
+/** Host-debugger transport for a desktop launch: `embedded` (default) or
  * `external` (tclsh nub over the wire protocol). Optional on stored
  * shapes because pre-existing persisted profiles omit it; normalization
  * always fills `embedded`. */

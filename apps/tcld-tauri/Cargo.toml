@@ -1,34 +1,39 @@
 [package]
-    name              = "tcld-tauri"
-    edition           = "2024"
-    version.workspace = true
-    license.workspace = true
+    authors.workspace    = true
+    edition.workspace    = true
+    license.workspace    = true
+    name                 = "tcld-tauri"
     repository.workspace = true
-    authors.workspace = true
+    version.workspace    = true
 
 [features]
-    default  = ["debugger", "tcl9"]
     debugger = ["dep:tcld-interp", "dep:tcl-sys", "dep:tcld-debug-wire"]
-    tcl8_6   = ["tcld-interp?/tcl8_6", "tcl-sys?/tcl8_6"]
-    tcl9     = ["tcld-interp?/tcl9", "tcl-sys?/tcl9"]
+    default  = ["debugger", "tcl9"]
+    # Links the in-process TEBC VM. Mirrors `tcld`'s feature of the same name
+    # and, like it, requires Tcl 9 headers/libs — `tcld-vm/host` pins tcl-sys
+    # to the tcl9 ABI, so this is incompatible with `tcl8_6`.
+    hybrid = ["dep:tcld-vm", "tcld-vm/host", "tcld-vm/debug"]
+    tcl8_6 = ["tcld-interp?/tcl8_6", "tcl-sys?/tcl8_6"]
+    tcl9   = ["tcld-interp?/tcl9", "tcl-sys?/tcl9"]
     # Enables the wire-backend integration tests that drive a real tclsh
     # nub subprocess (TCLD_TCLSH + a built libtcld_dbg dylib) — same
     # gating pattern as crates/tcld-dbg-ext's `integration_tclsh`.
     integration_tclsh = []
 
 [dependencies]
-    serde               = { version = "1", features = ["derive"] }
-    serde_json          = "1"
-    tauri               = { version = "2", features = [] }
-    tauri-plugin-dialog = "2"
-    tcld-core           = { path = "../../crates/tcld-core" }
-    tcld-debug-wire     = { path = "../../crates/tcld-debug-wire", optional = true }
-    tcld-decompile      = { path = "../../crates/tcld-decompile" }
-    tcld-interp         = { path = "../../crates/tcld-interp", optional = true, default-features = false }
-    tcld-syntax         = { path = "../../crates/tcld-syntax" }
-    tcl-sys             = { path = "../../crates/tcl-sys", optional = true, default-features = false }
-    tauri-plugin-log    = "2"
-    tokio               = { version = "1", features = ["sync", "net", "io-util", "process", "time", "macros", "rt"] }
+    serde.workspace               = true
+    serde_json.workspace          = true
+    tauri.workspace               = true
+    tauri-plugin-dialog.workspace = true
+    tauri-plugin-log.workspace    = true
+    tcl-sys                       = { workspace = true, optional = true }
+    tcld-core.workspace           = true
+    tcld-debug-wire               = { workspace = true, optional = true }
+    tcld-decompile.workspace      = true
+    tcld-interp                   = { workspace = true, optional = true }
+    tcld-syntax.workspace         = true
+    tcld-vm                       = { workspace = true, optional = true }
+    tokio.workspace               = true
 
 [build-dependencies]
-    tauri-build = { version = "2", features = [] }
+    tauri-build.workspace = true

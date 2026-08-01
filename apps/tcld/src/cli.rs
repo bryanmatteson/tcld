@@ -8,8 +8,9 @@ use std::ffi::OsString;
     version,
     about = "Tcl bytecode decompiler, explorer, and debugger",
     long_about = "Tcl bytecode decompiler, explorer, and debugger.\n\n\
-Build with `--features hybrid` to run or debug bytecode in process. \
-Host debugging of Tcl source does not require the hybrid feature."
+Build with `--features hybrid` to run bytecode or compile admitted Tcl source \
+into the in-process debugger. Host debugging of Tcl source does not require \
+the hybrid feature."
 )]
 pub struct Cli {
     /// Disable color
@@ -47,8 +48,10 @@ pub enum TcldCommand {
     Explore(ExploreArgs),
     /// Debug Tcl source or bytecode
     ///
-    /// Tcl source runs in a host interpreter with the loadable debugger nub
-    /// over the wire protocol.
+    /// Tcl source defaults to a host interpreter with the loadable debugger
+    /// nub over the wire protocol. Explicit `--backend=hybrid` or
+    /// `--backend=vm-strict` compiles admitted source into a deterministic
+    /// in-process debug image.
     ///
     /// Bytecode uses the in-process TEBC VM when the binary includes the
     /// `hybrid` feature. The VM preserves bytecode program counters and supports
@@ -66,7 +69,9 @@ pub enum TcldCommand {
     ///
     /// `--backend=vm-strict` and `--sandbox` deny WorldHost calls. A binary
     /// without hybrid support returns `hybrid_unavailable` with exit code 3
-    /// when a VM backend is requested.
+    /// when a VM backend is requested. Hybrid execution fails closed with an
+    /// `UnimplementedOpcode` trap when an instruction is outside the VM's
+    /// supported pass scope.
     Run(RunArgs),
 }
 
@@ -179,6 +184,9 @@ pub struct ExploreArgs {
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
+#[command(
+    after_help = "Backend selection:\n  auto       Tcl source uses the host debugger; bytecode uses hybrid when linked\n  host       Debug source directly in tclsh; bytecode requires exact reconstruction\n  hybrid     Compile admitted Tcl source or load bytecode into the in-process VM\n  vm-strict  Like hybrid, with WorldHost calls denied\n\nSource compilation is admitted by the verified V1 compiler before terminal entry. A rejected source reports source_compile_failed and suggests --backend=host; it is never silently weakened. See https://github.com/bryanmatteson/tcld/blob/main/DEBUGGING.md"
+)]
 pub struct DebugArgs {
     /// Tcl source or bytecode path
     pub input_path: String,
@@ -203,8 +211,8 @@ pub struct DebugArgs {
     #[arg(long)]
     pub no_colors: bool,
 
-    /// Bytecode debugger backend
-    #[arg(long, value_enum)]
+    /// Debugger backend. Hybrid/vm-strict source compilation requires a hybrid build
+    #[arg(long, value_enum, default_value = "auto")]
     pub backend: Option<RunBackend>,
 }
 
@@ -660,6 +668,10 @@ mod tests {
         assert!(topic.contains("--tclsh"));
         assert!(topic.contains("--dylib"));
         assert!(topic.contains("wire protocol"));
+        assert!(topic.contains("source_compile_failed"));
+        assert!(topic.contains("--backend=host"));
+        assert!(topic.contains("[default: auto]"));
+        assert!(topic.contains("DEBUGGING.md"));
 
         let unified = help_text("tcld", None);
         assert!(unified.contains("debug"));

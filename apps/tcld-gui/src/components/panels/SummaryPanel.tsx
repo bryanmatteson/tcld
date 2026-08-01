@@ -23,7 +23,7 @@ export function SummaryPanel({ id, focused, onClose, onFocus }: SummaryPanelProp
           {text}
         </div>
       ) : (
-        <EmptyState size="panel" title="No file loaded" message="Press ⌘O to open a .tbc file." />
+        <EmptyState size="panel" title="No file loaded" message="Press ⌘O to open Tcl bytecode or source." />
       )}
     </Panel>
   );
