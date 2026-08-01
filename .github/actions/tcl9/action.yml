@@ -4,6 +4,12 @@ description: >
   Homebrew on macOS; builds from source (cached) on Linux, where distros
   still ship 8.6.
 
+inputs:
+  tcl-core-tag:
+    description: Exact tcltk/tcl release tag to build on Linux
+    required: false
+    default: core-9-0-2
+
 runs:
   using: composite
   steps:
@@ -20,12 +26,18 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/tcl9
-        key: tcl9-${{ runner.os }}-${{ env.TCL_CORE_TAG }}
+        key: tcl9-${{ runner.os }}-${{ inputs.tcl-core-tag }}
 
     - name: Build Tcl 9 from source (Linux)
       if: runner.os == 'Linux' && steps.tcl9-cache.outputs.cache-hit != 'true'
       shell: bash
+      env:
+        TCL_CORE_TAG: ${{ inputs.tcl-core-tag }}
       run: |
+        if [[ ! "$TCL_CORE_TAG" =~ ^core-[0-9]+-[0-9]+-[0-9]+$ ]]; then
+          echo "invalid Tcl core release tag: $TCL_CORE_TAG" >&2
+          exit 1
+        fi
         curl -sSfL -o /tmp/tcl.tar.gz \
           "https://github.com/tcltk/tcl/archive/refs/tags/${TCL_CORE_TAG}.tar.gz"
         tar -xzf /tmp/tcl.tar.gz -C /tmp
