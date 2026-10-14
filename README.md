@@ -1,6 +1,6 @@
-# tcld
-
-**Turn 25-year-old Tcl bytecode back into source — then step through it in a debugger.**
+<p align="center"><img src="docs/assets/icon.svg" width="112" alt="Tcld icon"></p>
+<h1 align="center">Tcld</h1>
+<p align="center"><strong>Recover the source. Follow the bytecode. Understand the program.</strong></p>
 
 [![CI](https://github.com/bryanmatteson/tcld/actions/workflows/ci.yml/badge.svg)](https://github.com/bryanmatteson/tcld/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -11,21 +11,44 @@ ship them without source. A quarter century later, those `.tbc` files are still
 running inside EDA tools, network gear, test harnesses, and lab equipment — and
 for many of them, the original source is long gone.
 
-`tcld` reads that bytecode and gives you your program back:
+Tcld brings that software into a complete analysis workspace. Recover readable
+Tcl, move between instructions and source, inspect symbols and control flow,
+and follow execution with a debugger. The native desktop app, terminal
+explorer, and CLI share the same analysis of your program.
 
-- **Decompile** `.tbc` files into readable Tcl through a multi-pass
-  control-flow reconstruction pipeline
-- **Disassemble** instructions with resolved operands and literals
-- **Explore** bytecode, literals, exception ranges, and reconstructed source in
-  a synchronized terminal UI (plus a Tauri desktop app)
-- **Debug** with breakpoints, stepping, stack frames, variables, and watches —
-  against a host `tclsh`, or directly on bytecode
-- **Run** `.tbc` files in an in-process TEBC virtual machine, no source
-  reconstruction required
+<p align="center"><img src="docs/assets/workbench.gif" width="1100" alt="The real Tcld desktop workbench: disassembly, linked source navigation, symbols, and source comparison"></p>
 
-Written in Rust. Handles bytecode from Tcl 8.0 through 9.0.
+A real native session with the bundled public TclPro fixture. Selecting an
+instruction follows its reconstructed source and updates the inspector; symbol
+navigation and comparison keep the same bytecode context. [Capture recipe and
+scripts](docs/assets/README.md).
 
-![tcld explore: navigating instructions, decompiled source, and literals with a synchronized inspector](docs/demo.gif)
+## A workbench for Tcl software
+
+- 🔎 **Recover and inspect.** Parse Tcl 8.0–9.0 bytecode, resolve operands and
+  literals, reconstruct procedures and structured control flow, and keep
+  recovery diagnostics attached to the operations they describe.
+- 🧭 **Navigate one program through many views.** Raw and grouped disassembly,
+  reconstructed source, original source mappings, symbols, literals,
+  exceptions, graphs, and an inspector stay linked as you investigate. Filter
+  listings, fold command groups, follow jump targets, keep bookmarks, and
+  move backward and forward through navigation history.
+- 🪟 **Shape your workspace.** Open several files, arrange resizable panels
+  and tab stacks, switch between analysis, flow, symbols, trace, console, and
+  debug layouts, and save layouts for later sessions. Menus, shortcuts, and a
+  command palette bring the same actions to hand.
+- 🧩 **Understand reconstruction.** Compare available original source with
+  recovered commands and their instruction spans. Inspect basic blocks,
+  edges, loops, stack effects, exception ranges, and pipeline traces when you
+  need to see how the result was produced.
+- 🐞 **Follow a running program.** Breakpoints, step into/over/out, stack
+  frames, variables, expressions, watches, and a console work with named run
+  configurations. Debug source through a host Tcl interpreter or bytecode
+  through the hybrid VM.
+- ⚡ **Use the surface that fits.** Analyze interactively in the desktop or
+  terminal, or export decompilation, disassembly, dumps, source maps, and
+  compatibility reports from scripts. Run bytecode directly with the
+  in-process TEBC interpreter.
 
 ## From bytecode to source
 
@@ -70,16 +93,53 @@ When an exact reconstruction isn't possible, `tcld` says so: diagnostics
 identify each approximated operation, its bytecode range when known, and the
 reason — no silent guesses.
 
-## The explorer
+## The desktop workbench
 
-`tcld explore` opens a terminal workspace where instructions, literals,
-exception ranges, decompiled source, and source maps are different views of the
-same artifact — cursor position stays synchronized as you move between them.
-The demo above is a real session (recorded with [vhs](https://github.com/charmbracelet/vhs)
-from [docs/demo.tape](docs/demo.tape)).
+Disassembly, Source View, and Inspector form the core investigation loop.
+Grouped instruction rails connect recovered Tcl commands to their real PCs;
+selecting a symbol or instruction brings the matching source and metadata
+into view. Jump arrows and control-flow graphs expose relationships that are
+hard to see in a linear listing.
 
-The same domain snapshot powers the desktop app (`apps/tcld-gui`, Tauri), with
-synchronized analysis views and run configurations.
+![Tcld native workbench with linked source, disassembly, and instruction details](docs/assets/workbench.jpg)
+
+Switch to Symbols for procedures, namespaces, and variables, or use Compare to
+inspect source-to-bytecode mappings. Specialized layouts bring graphs,
+exceptions, diagnostics, traces, or debugger controls forward. Panel tabs,
+folding, filters, column controls, and linked-navigation toggles let you tune
+how much context stays visible.
+
+The app loads `.tbc` artifacts and Tcl sources or wrappers. Run configurations
+keep the interpreter/backend, arguments, working directory, environment, and
+debug options with the launch you use. Debug layouts bring the source,
+variables, stack, breakpoints, and console together.
+
+To build the embedded desktop app from source, install the frontend dependencies
+and provide the [Tcl development libraries](third_party/tcl/README.md), then:
+
+```bash
+npm ci --prefix apps/tcld-gui
+npm run build --prefix apps/tcld-gui
+cargo build --release -p tcld-tauri --features tauri/custom-protocol
+./target/release/tcld-tauri
+```
+
+For platform bundles, use the Tauri CLI from `apps/tcld-tauri` (`cargo tauri
+build`). The `hybrid` feature additionally enables direct bytecode execution
+and debugging in the desktop host.
+
+<details>
+<summary>The terminal explorer</summary>
+
+`tcld explore` opens instructions, literals, exceptions, reconstructed source,
+and source maps as synchronized views in your terminal. The inspector follows
+the cursor as you move among them.
+
+![Tcld terminal explorer](docs/demo.gif)
+
+This is an actual session recorded with VHS from [docs/demo.tape](docs/demo.tape).
+
+</details>
 
 ## Quick start
 
@@ -216,10 +276,6 @@ scripts/verify-hybrid-corpus.sh
 # Desktop frontend
 cd apps/tcld-gui && npm ci && npm test && npm run build
 ```
-
-This public branch is a curated reconstruction of private development history.
-Author dates retain source provenance; committer dates record the
-reconstruction.
 
 ## License
 
