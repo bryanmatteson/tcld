@@ -1,4 +1,4 @@
-import type { DebugStoppedEvent, DiagnosticsReport, LiteralEntry, SourceCommandAnchor, SourceMapEntry, SymbolEntry, SymbolKind, TcldData } from "@/types";
+import type { DebugStoppedEvent, DiagnosticsReport, SourceCommandAnchor, SourceMapEntry, SymbolEntry, SymbolKind, TcldData } from "@/types";
 import type { Location } from "@/lib/location-resolve";
 import { buildComparisonModel, buildProvenanceRows, type ComparisonModel, type ProvenanceRow } from "@/lib/workflow-contracts";
 
@@ -68,19 +68,6 @@ export interface DiagnosticsIssueCounts {
   info: number;
 }
 
-export interface InspectorLiteralPreviewRow {
-  index: number;
-  kind: string;
-  value: string;
-}
-
-export interface InspectorLiteralSummaryModel {
-  count: number;
-  previewRows: InspectorLiteralPreviewRow[];
-  hiddenCount: number;
-  statusText: string;
-}
-
 export interface SymbolRow {
   id: string;
   kind: SymbolKind;
@@ -107,19 +94,19 @@ export interface SymbolsPanelModel {
   noMatchText: string | null;
 }
 
-export interface InspectorDiagnosticsSummaryRow {
+export interface DiagnosticsSummaryRow {
   kind: "approximation" | "unsupported" | "unreduced" | "suppressed" | "pass";
   label: string;
   count: number;
   status: string;
 }
 
-export interface InspectorDiagnosticsSummaryModel {
+export interface DiagnosticsSummaryModel {
   available: boolean;
   status: "unavailable" | "ok" | "issues";
   badge: string;
   message: string;
-  rows: InspectorDiagnosticsSummaryRow[];
+  rows: DiagnosticsSummaryRow[];
 }
 
 export interface ProvenancePanelModel {
@@ -832,33 +819,7 @@ export function buildDiagnosticsPanelModel(data: TcldData | null, cursor: Locati
   };
 }
 
-function literalIndex(literal: LiteralEntry, fallback: number): number {
-  const candidate = literal.idx ?? (literal as LiteralEntry & { index?: number }).index;
-  return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : fallback;
-}
-
-export function buildInspectorLiteralSummaryModel(
-  data: TcldData | null,
-  limit = 7,
-): InspectorLiteralSummaryModel {
-  const literals = data?.literals ?? [];
-  const previewRows = literals.slice(0, limit).map((literal, fallback) => ({
-    index: literalIndex(literal, fallback),
-    kind: literal.kind ?? "literal",
-    value: String(literal.value ?? ""),
-  }));
-  const hiddenCount = Math.max(0, literals.length - previewRows.length);
-  return {
-    count: literals.length,
-    previewRows,
-    hiddenCount,
-    statusText: literals.length === 0
-      ? (data ? "no literals in loaded bytecode" : "no literals loaded")
-      : `${literals.length} literal${literals.length === 1 ? "" : "s"} loaded`,
-  };
-}
-
-export function buildInspectorDiagnosticsSummaryModel(data: TcldData | null): InspectorDiagnosticsSummaryModel {
+export function buildDiagnosticsSummaryModel(data: TcldData | null): DiagnosticsSummaryModel {
   const diagnostics = data?.diagnostics ?? null;
   if (!diagnostics) {
     return {
@@ -879,7 +840,7 @@ export function buildInspectorDiagnosticsSummaryModel(data: TcldData | null): In
   const disabledPassCount = diagnostics.passDecisions.filter((decision) => !decision.enabled).length;
   const issueCount = approximationCount + unsupportedCount + unreducedCount + suppressedCount + disabledPassCount;
 
-  const rows: InspectorDiagnosticsSummaryRow[] = [
+  const rows: DiagnosticsSummaryRow[] = [
     {
       kind: "approximation",
       label: "Approximations",

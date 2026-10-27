@@ -58,13 +58,17 @@ export async function query<T>(
   const running = inflight.get(k) as Promise<T> | undefined;
   if (running) return running;
 
-  const p = fn()
+  const p = Promise.resolve().then(fn)
     .then((data) => {
-      cache.set(k, { data, ts: Date.now(), ttlMs });
+      // An invalidated request may still finish after its replacement. It
+      // must neither repopulate the cache nor remove the newer request.
+      if (inflight.get(k) === p && ttlMs > 0) {
+        cache.set(k, { data, ts: Date.now(), ttlMs });
+      }
       return data;
     })
     .finally(() => {
-      inflight.delete(k);
+      if (inflight.get(k) === p) inflight.delete(k);
     });
   inflight.set(k, p);
   return p;
@@ -94,7 +98,9 @@ export function invalidate(prefix: string): void {
  * cache consistent with what the panel would have fetched.
  */
 export function setCache<T>(key: QueryKey, data: T, ttlMs: number = DEFAULT_TTL): void {
-  cache.set(keyToString(key), { data, ts: Date.now(), ttlMs });
+  const k = keyToString(key);
+  inflight.delete(k);
+  cache.set(k, { data, ts: Date.now(), ttlMs });
 }
 
 /** Clears the entire cache. Used on app reset / settings change / theme switch tests. */

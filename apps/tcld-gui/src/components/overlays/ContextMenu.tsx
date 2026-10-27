@@ -129,7 +129,7 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
         visibility: adjustedPosition.ready ? "visible" : "hidden",
         maxHeight: adjustedPosition.maxHeight || undefined,
       }}
-      className="tcld-popover-surface min-w-[180px] overflow-y-auto py-1 font-mono text-meta"
+      className="tcld-popover-surface min-w-[180px] overflow-y-auto py-1 font-ui text-control"
     >
       {items.map((item, i) => {
         if (item.separator) {

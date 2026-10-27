@@ -2,7 +2,7 @@
 
 import clsx from "clsx";
 import { Bookmark, Circle, Hash, MessageSquare, Search } from "lucide-react";
-import { useState } from "react";
+import { useState, memo } from "react";
 
 interface CommandLineResult {
   id: string;
@@ -33,7 +33,7 @@ function ResultIcon({ result }: { result: CommandLineResult }) {
   return <Circle size={7} fill="currentColor" aria-hidden />;
 }
 
-export function CommandLine({
+export const CommandLine = memo(function CommandLine({
   visible,
   value,
   results,
@@ -148,4 +148,4 @@ export function CommandLine({
       </div>
     </div>
   );
-}
+});

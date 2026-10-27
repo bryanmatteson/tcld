@@ -3,8 +3,9 @@
 import React from "react";
 import { Check, Search, X } from "lucide-react";
 import { Panel } from "./Panel";
-import { useTcldStore } from "@/lib/store";
+import { useTcldData } from "@/lib/store";
 import { useLocationStore } from "@/lib/location-store";
+import { useShallow } from "zustand/react/shallow";
 import {
   buildTracePanelModel,
   sourceMapSelectionTarget,
@@ -33,8 +34,8 @@ const PASS_STATUS_LABEL: Record<TracePassStatus, string> = {
 };
 
 export const ProvenancePanel = React.memo(function ProvenancePanel({ focused, id, onClose, onFocus }: ProvenancePanelProps) {
-  const data = useTcldStore().data;
-  const { cursor, setCursor } = useLocationStore();
+  const data = useTcldData().data;
+  const { cursor, setCursor } = useLocationStore(useShallow((s) => ({ cursor: s.cursor, setCursor: s.setCursor })));
   const [filter, setFilter] = React.useState("");
 
   const model = React.useMemo(() => buildTracePanelModel(data, cursor, filter), [data, cursor, filter]);

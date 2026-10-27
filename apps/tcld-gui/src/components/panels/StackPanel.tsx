@@ -7,6 +7,7 @@ import { EmptyState, PanelEmpty } from "@/components/EmptyState";
 import { useDebugStore } from "@/lib/debug-store";
 import { DEBUGGER_UNAVAILABLE_MESSAGE } from "@/lib/capabilities";
 import { useLocationStore } from "@/lib/location-store";
+import { useShallow } from "zustand/react/shallow";
 import { ViewIcon } from "@/components/ViewIcon";
 
 interface StackPanelProps {
@@ -23,7 +24,7 @@ export const StackPanel = React.memo(function StackPanel({
   onFocus,
 }: StackPanelProps) {
   const debug = useDebugStore();
-  const { index, setCursor } = useLocationStore();
+  const { index, setCursor } = useLocationStore(useShallow((s) => ({ index: s.index, setCursor: s.setCursor })));
   const { stack, sessionState, stoppedAt, fetchVariables, debuggerAvailable } = debug;
   const isActive = sessionState === "paused" || sessionState === "running" || sessionState === "pausing" || sessionState === "stopping";
 

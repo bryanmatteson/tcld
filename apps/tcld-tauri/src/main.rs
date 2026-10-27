@@ -154,12 +154,25 @@ async fn load_text(
     let source_clone = source.clone();
     let label_clone = label.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        tcld_tauri::do_load_from_payload(&source_clone, &label_clone)
+        tcld_tauri::do_load_source(&source_clone, &label_clone)
     })
     .await
     .map_err(|e| e.to_string())??;
     let mut app = state.write().await;
     app.loaded = Some(result.clone());
+    Ok(result)
+}
+
+#[tauri::command]
+async fn load_example(
+    id: String,
+    state: State<'_, RwLock<AppState>>,
+) -> Result<tcld_tauri::LoadResult, String> {
+    let result =
+        tauri::async_runtime::spawn_blocking(move || tcld_tauri::load_bundled_example(&id))
+            .await
+            .map_err(|error| error.to_string())??;
+    state.write().await.loaded = Some(result.clone());
     Ok(result)
 }
 
@@ -727,6 +740,7 @@ fn main() {
         get_app_capabilities,
         load_file,
         load_text,
+        load_example,
         get_instruction_detail,
         get_decompile_full,
         disassemble_file,
@@ -777,6 +791,7 @@ fn main() {
         get_app_capabilities,
         load_file,
         load_text,
+        load_example,
         get_instruction_detail,
         get_decompile_full,
         disassemble_file,

@@ -4,8 +4,9 @@ import { useMemo, useState } from "react";
 import clsx from "clsx";
 import { Search } from "lucide-react";
 import { buildSymbolsPanelModel, type SymbolRow } from "@/lib/panel-models";
-import { useTcldStore } from "@/lib/store";
+import { useTcldData } from "@/lib/store";
 import { useLocationStore } from "@/lib/location-store";
+import { useShallow } from "zustand/react/shallow";
 import { Panel } from "./Panel";
 import { EmptyState } from "@/components/EmptyState";
 
@@ -17,8 +18,8 @@ interface LiteralsPanelProps {
 }
 
 export function LiteralsPanel({ id, focused, onClose, onFocus }: LiteralsPanelProps) {
-  const { data } = useTcldStore();
-  const { cursor, setCursor } = useLocationStore();
+  const { data } = useTcldData();
+  const { cursor, setCursor } = useLocationStore(useShallow((s) => ({ cursor: s.cursor, setCursor: s.setCursor })));
   const [filter, setFilter] = useState("");
   const literals = data?.literals ?? [];
   const model = useMemo(() => buildSymbolsPanelModel(data, filter), [data, filter]);

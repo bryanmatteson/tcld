@@ -2,8 +2,9 @@
 
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Panel } from "./Panel";
-import { useTcldStore } from "@/lib/store";
+import { useTcldData } from "@/lib/store";
 import { useLocationStore } from "@/lib/location-store";
+import { useShallow } from "zustand/react/shallow";
 import { buildSourcePanelModel, sourceMapSelectionTarget } from "@/lib/panel-models";
 import { buildSourceFoldModel } from "@/lib/folding-model";
 import { tokenizeSourceLine } from "@/lib/syntax-rendering";
@@ -21,8 +22,8 @@ interface SourcePanelProps {
 }
 
 export const SourcePanel = React.memo(function SourcePanel({ focused, id, onClose, onFocus }: SourcePanelProps) {
-  const { data } = useTcldStore();
-  const { cursor, setCursor } = useLocationStore();
+  const { data } = useTcldData();
+  const { cursor, setCursor } = useLocationStore(useShallow((s) => ({ cursor: s.cursor, setCursor: s.setCursor })));
   const model = buildSourcePanelModel(data, cursor);
   const [foldedIds, setFoldedIds] = useState<Set<string>>(new Set());
   const foldModel = useMemo(

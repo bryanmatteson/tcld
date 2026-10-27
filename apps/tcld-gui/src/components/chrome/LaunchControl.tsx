@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, memo } from "react";
 import clsx from "clsx";
 import { ChevronDown, Play, Settings } from "lucide-react";
 import { DEBUGGER_UNAVAILABLE_MESSAGE } from "@/lib/capabilities";
@@ -27,7 +27,7 @@ interface LaunchControlProps {
   onOpenConfigure: () => void;
 }
 
-export function LaunchControl({
+export const LaunchControl = memo(function LaunchControl({
   profiles,
   selectedProfileId,
   hookStatus,
@@ -158,4 +158,4 @@ export function LaunchControl({
       )}
     </div>
   );
-}
+});

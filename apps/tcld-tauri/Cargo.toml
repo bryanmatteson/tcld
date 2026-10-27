@@ -27,6 +27,7 @@
     tauri-plugin-dialog.workspace = true
     tauri-plugin-log.workspace    = true
     tcl-sys                       = { workspace = true, optional = true }
+    tcld-compile.workspace         = true
     tcld-core.workspace           = true
     tcld-debug-wire               = { workspace = true, optional = true }
     tcld-decompile.workspace      = true

@@ -48,7 +48,7 @@ export function SectionEyebrow({
       className={clsx(
         "flex items-center gap-2",
         "font-mono font-bold tracking-[0.08em] uppercase",
-        "text-[var(--text-tag)] leading-tight",
+        "text-tag leading-tight",
         "text-tcld-fg-muted",
         !inline && "mb-1.5",
         className,

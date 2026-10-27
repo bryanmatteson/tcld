@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import clsx from "clsx";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import { useAnchoredFloatingPosition } from "@/lib/floating-position";
 
 interface HistoryItem {
@@ -21,20 +21,7 @@ interface NavHistoryControlsProps {
   onGoBackTo: (offset: number) => void;
 }
 
-/**
- * Compact history navigation control: back arrow (with click-to-open history
- * popover, double-click for one-step back) and forward arrow. Lives in the
- * file-header titlebar trail, alongside the command palette and panel picker.
- *
- * Replaces the previous NavBreadcrumbs row, which spent its width re-rendering
- * cursor scope (`c001 → i142 → 142/8421`) that's already shown in panel
- * badges and the StatusBar position counter — that duplication was flagged
- * in the UI review and the row paid its cost in vertical real estate.
- *
- * What we kept: the actual nav affordance + the history popover, both still
- * useful and not surfaced anywhere else.
- * What we dropped: the breadcrumb crumbs themselves (group/inst/position).
- */
+/** Familiar back/forward navigation with a separate history picker. */
 export function NavHistoryControls({
   canGoBack,
   canGoForward,
@@ -56,14 +43,31 @@ export function NavHistoryControls({
   );
 
   useEffect(() => {
+    if (showHistoryMenu && historyPosition.ready) {
+      historyDropdownRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+    }
+  }, [showHistoryMenu, historyPosition.ready]);
+
+  useEffect(() => {
     if (!showHistoryMenu) return;
     const onDocMouseDown = (event: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+      if (!containerRef.current?.contains(event.target as Node) && !historyDropdownRef.current?.contains(event.target as Node)) {
         setShowHistoryMenu(false);
       }
     };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setShowHistoryMenu(false);
+      historyButtonRef.current?.focus();
+    };
     document.addEventListener("mousedown", onDocMouseDown);
-    return () => document.removeEventListener("mousedown", onDocMouseDown);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDown);
+      document.removeEventListener("keydown", onKey, true);
+    };
   }, [showHistoryMenu]);
 
   return (
@@ -73,21 +77,14 @@ export function NavHistoryControls({
       data-design-surface="nav-history-controls"
     >
       <button
-        ref={historyButtonRef}
-        onClick={() => {
-          if (!canGoBack) return;
-          setShowHistoryMenu((prev) => !prev);
-        }}
-        onDoubleClick={onGoBack}
+        type="button"
+        onClick={onGoBack}
         disabled={!canGoBack}
-        className={clsx(
-          "tcld-nav-icon",
-          !canGoBack && "is-disabled",
-        )}
-        title="History (click) · Back one step (double-click)"
-        aria-label="History"
+        className={clsx("tcld-nav-icon", !canGoBack && "is-disabled")}
+        title="Back (Alt+Left)"
+        aria-label="Back"
       >
-        <ChevronLeft size={12} aria-hidden />
+        <ChevronLeft size={15} aria-hidden />
       </button>
       <button
         onClick={onGoForward}
@@ -99,12 +96,38 @@ export function NavHistoryControls({
         title="Forward (⌥→)"
         aria-label="Forward"
       >
-        <ChevronRight size={12} aria-hidden />
+        <ChevronRight size={15} aria-hidden />
+      </button>
+
+      <button
+        ref={historyButtonRef}
+        type="button"
+        onClick={() => setShowHistoryMenu((prev) => !prev)}
+        disabled={historyItems.length === 0}
+        className={clsx("tcld-nav-icon", historyItems.length === 0 && "is-disabled")}
+        title="Navigation history"
+        aria-label="History"
+        aria-expanded={showHistoryMenu}
+        aria-haspopup="menu"
+      >
+        <ChevronDown size={13} aria-hidden />
       </button>
 
       {showHistoryMenu && historyItems.length > 0 && typeof document !== "undefined" && createPortal(
         <div
           ref={historyDropdownRef}
+          role="menu"
+          onKeyDown={(event) => {
+            event.stopPropagation();
+            const items = Array.from(historyDropdownRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
+            const index = items.indexOf(document.activeElement as HTMLButtonElement);
+            const next = event.key === "ArrowDown" ? (index + 1) % items.length
+              : event.key === "ArrowUp" ? (index - 1 + items.length) % items.length
+              : event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : null;
+            if (next !== null) { event.preventDefault(); event.stopPropagation(); items[next]?.focus(); }
+            if (event.key === "Tab") setShowHistoryMenu(false);
+          }}
+          aria-label="Navigation history"
           className="fixed z-[var(--z-context-menu)] min-w-64 max-w-96 overflow-auto bg-tcld-bg-1 border border-tcld-border rounded shadow-[var(--shadow-popover)]"
           style={{
             left: historyPosition.left,
@@ -113,13 +136,16 @@ export function NavHistoryControls({
             visibility: historyPosition.ready ? "visible" : "hidden",
           }}
         >
+          <div className="tcld-layout-menu-heading">Recent locations</div>
           {historyItems.map((item) => (
             <button
               key={`${item.offset}:${item.label}`}
+              role="menuitem"
               type="button"
               onClick={() => {
                 onGoBackTo(item.offset);
                 setShowHistoryMenu(false);
+                historyButtonRef.current?.focus();
               }}
               className="w-full text-left px-2 py-1.5 hover:bg-tcld-bg-highlight border-b border-tcld-border-dim last:border-b-0"
             >

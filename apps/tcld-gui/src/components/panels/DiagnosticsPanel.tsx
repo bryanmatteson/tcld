@@ -2,8 +2,9 @@
 
 import React from "react";
 import { Panel } from "./Panel";
-import { useTcldStore } from "@/lib/store";
+import { useTcldData } from "@/lib/store";
 import { useLocationStore } from "@/lib/location-store";
+import { useShallow } from "zustand/react/shallow";
 import { buildDiagnosticsPanelModel, sourceMapSelectionTarget } from "@/lib/panel-models";
 import { ViewIcon } from "@/components/ViewIcon";
 import { EmptyState } from "@/components/EmptyState";
@@ -17,8 +18,8 @@ interface DiagnosticsPanelProps {
 }
 
 export const DiagnosticsPanel = React.memo(function DiagnosticsPanel({ focused, id, onClose, onFocus }: DiagnosticsPanelProps) {
-  const data = useTcldStore().data;
-  const { cursor, setCursor } = useLocationStore();
+  const data = useTcldData().data;
+  const { cursor, setCursor } = useLocationStore(useShallow((s) => ({ cursor: s.cursor, setCursor: s.setCursor })));
   const model = buildDiagnosticsPanelModel(data, cursor);
   const diagnostics = model.diagnostics;
   const counts = model.issueCounts;

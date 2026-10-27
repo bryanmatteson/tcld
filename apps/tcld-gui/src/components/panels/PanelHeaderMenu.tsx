@@ -32,7 +32,7 @@ const SUBMENU_HOVER_CLOSE_DELAY = 140;
  * a standard menu-bar submenu. The flyout follows the hovered row as the
  * user moves the cursor through the parent menu.
  */
-export function PanelHeaderMenu({ items, panelId, legacyActions }: PanelHeaderMenuProps) {
+export const PanelHeaderMenu = React.memo(function PanelHeaderMenu({ items, panelId, legacyActions }: PanelHeaderMenuProps) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -245,7 +245,7 @@ export function PanelHeaderMenu({ items, panelId, legacyActions }: PanelHeaderMe
           }}
           className={clsx(
             "flex w-full items-center gap-2 px-3 h-8 text-left",
-            "font-mono text-xs",
+            "font-ui text-xs",
             isSubmenuOpen && "bg-tcld-bg-highlight text-tcld-fg",
             item.disabled
               ? "text-tcld-text-inactive opacity-50 cursor-not-allowed"
@@ -360,7 +360,7 @@ export function PanelHeaderMenu({ items, panelId, legacyActions }: PanelHeaderMe
         )}
     </div>
   );
-}
+});
 
 // ─── Submenu flyout (separate portal anchored to the hovered row) ───────
 
@@ -453,7 +453,7 @@ function SubmenuFlyout({
       }}
     >
       {items.length === 0 ? (
-        <div className="px-3 py-2 font-mono text-meta text-tcld-text-inactive">
+        <div className="px-3 py-2 font-ui text-meta text-tcld-text-inactive">
           {parent.submenuEmptyLabel ?? "No options available"}
         </div>
       ) : (
@@ -473,7 +473,7 @@ function SubmenuFlyout({
             }}
             className={clsx(
               "flex w-full items-center gap-2 px-3 h-8 text-left",
-              "font-mono text-xs",
+              "font-ui text-xs",
               item.disabled
                 ? "text-tcld-text-inactive opacity-50 cursor-not-allowed"
                 : item.danger

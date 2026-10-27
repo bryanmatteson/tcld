@@ -1,10 +1,11 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
 import { createPortal } from "react-dom";
 import clsx from "clsx";
 import { ChevronDown, LayoutDashboard } from "lucide-react";
-import { getOpenViews, LAYOUT_PRESETS } from "@/lib/default-layouts";
+import { getOpenViews, LAYOUT_PRESETS, workspaceFromViewTree } from "@/lib/default-layouts";
+import { VIEW_TITLES } from "@/lib/view-registry";
 import { loadNamedLayouts, type NamedWorkspaceLayout } from "@/lib/layout-storage";
 import { useAnchoredFloatingPosition } from "@/lib/floating-position";
 import type { LayoutPreset, WorkspaceLayoutSnapshot } from "@/types";
@@ -27,7 +28,7 @@ interface MainToolbarProps {
 
 const CUSTOM_LAYOUT_LABEL = "Custom";
 
-export function MainToolbar({
+export const MainToolbar = memo(function MainToolbar({
   onLoadPreset,
   onSaveLayout,
   layoutDirty = false,
@@ -189,7 +190,7 @@ export function MainToolbar({
               <div
                 ref={menuRef}
                 data-testid="layout-preset-menu"
-                className="tcld-layout-menu fixed z-[var(--z-context-menu)] w-[280px] overflow-hidden rounded border border-tcld-border bg-tcld-bg-1 py-1 shadow-[var(--shadow-popover)]"
+                className="tcld-layout-menu fixed z-[var(--z-context-menu)] w-[340px] max-w-[calc(100vw-24px)] overflow-hidden rounded border border-tcld-border bg-tcld-bg-1 py-1 shadow-[var(--shadow-popover)]"
                 role="menu"
                 onKeyDown={handleMenuKeyDown}
                 style={{
@@ -261,8 +262,8 @@ export function MainToolbar({
                   <span className="tcld-layout-menu-active-dot" data-active={layoutDirty ? "true" : "false"} aria-hidden />
                   <span className="min-w-0">
                     <span className="block truncate">Save layout</span>
-                    <span className="block truncate text-label text-tcld-text-inactive">
-                      {layoutDirty ? "Persist the current workspace" : "No unsaved layout changes"}
+                    <span className="block whitespace-normal text-label text-tcld-text-inactive leading-relaxed mt-0.5">
+                      {layoutDirty ? "Save this arrangement for next time" : "No unsaved layout changes"}
                     </span>
                   </span>
                 </button>
@@ -281,7 +282,7 @@ export function MainToolbar({
       </div>
     </div>
   );
-}
+});
 
 interface LayoutMenuItemProps {
   id: string;
@@ -312,7 +313,7 @@ function LayoutMenuItem({ id, kind, active, label, detail, onClick }: LayoutMenu
       <span className="tcld-layout-menu-active-dot" data-active={active ? "true" : "false"} aria-hidden />
       <span className="min-w-0">
         <span className="block truncate">{label}</span>
-        <span className="block truncate text-label text-tcld-text-inactive">{detail}</span>
+        <span className="block whitespace-normal text-label text-tcld-text-inactive leading-relaxed mt-0.5">{detail}</span>
       </span>
     </button>
   );
@@ -322,16 +323,28 @@ function shortLayoutName(label: string): string {
   return label.split(" — ")[0]?.split(" - ")[0]?.trim() || label;
 }
 
+const PRESET_PURPOSES: Record<string, string> = {
+  default: "Read source alongside bytecode and instruction details",
+  flow: "Follow branches and loops through the control-flow graph",
+  trace: "Follow execution with source and console output",
+  console: "Keep source and runtime output side by side",
+  symbols: "Explore literals, variables, and their references",
+  cockpit: "Compare source, bytecode, and control flow at once",
+  runbook: "Step through code with runtime state and output",
+  analysis: "Investigate instructions, flow, and symbols together",
+  wide: "Give long instructions room across the window",
+  decompile: "Focus on reconstructed source and its details",
+  debug: "Debug with source, variables, call stack, and console",
+  overview: "Survey code, symbols, exceptions, and file statistics",
+};
+
 function describePreset(preset: LayoutPreset): string {
-  const workspace = preset.workspace;
-  if (workspace) {
-    return describeWorkspace(workspace);
-  }
-  return "Production workspace preset";
+  return PRESET_PURPOSES[preset.name]
+    ?? describeWorkspace(preset.workspace ?? workspaceFromViewTree(preset.tree));
 }
 
 function describeWorkspace(workspace: WorkspaceLayoutSnapshot): string {
   const panelIds = getOpenViews(workspace.tree, workspace.stacks);
   const panelLabel = panelIds.length === 1 ? "panel" : "panels";
-  return `${panelIds.length} ${panelLabel} · ${panelIds.join(", ")}`;
+  return `${panelIds.length} ${panelLabel} · ${panelIds.map((id) => VIEW_TITLES[id]).join(", ")}`;
 }

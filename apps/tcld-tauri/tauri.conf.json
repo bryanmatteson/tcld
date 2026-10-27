@@ -28,6 +28,9 @@
   "bundle": {
     "active": true,
     "icon": ["icons/icon.icns"],
+    "resources": {
+      "../tcld/tests/fixtures/license.terms": "licenses/TclPro-license.terms"
+    },
     "macOS": {
       "bundleName": "TCLD",
       "minimumSystemVersion": "10.13"

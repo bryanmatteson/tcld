@@ -4,9 +4,9 @@ import React, { useRef, useEffect, useState, useCallback, useMemo } from "react"
 import clsx from "clsx";
 import { Panel } from "./Panel";
 import { useDebugStore, type OutputLine } from "@/lib/debug-store";
-import { useTcldStore } from "@/lib/store";
+import { useTcldData } from "@/lib/store";
 import { T } from "@/lib/theme";
-import { ArrowDown, CornerDownLeft, Search } from "lucide-react";
+import { ArrowDown, ClipboardCopy, Copy, CornerDownLeft, Eraser, ListFilter, Search } from "lucide-react";
 import { createOutputSearchState, formatOutputForCopy, searchOutput } from "@/lib/output-search";
 import { ViewIcon } from "@/components/ViewIcon";
 
@@ -88,7 +88,7 @@ export const ConsolePanel = React.memo(function ConsolePanel({
   onFocus,
 }: ConsolePanelProps) {
   const debug = useDebugStore();
-  const data = useTcldStore().data;
+  const data = useTcldData().data;
   const { output, evalHistory, sessionState, evalScript, clearOutput } = debug;
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -236,38 +236,52 @@ export const ConsolePanel = React.memo(function ConsolePanel({
           })}
 
           <div className="tcld-console-filter">
-            <Search size={10} aria-hidden />
+            <Search size={12} aria-hidden />
             <input
               value={searchQuery}
-              placeholder="Filter..."
+              placeholder="Filter output…"
+              aria-label="Filter output"
               onChange={(e) => setSearchQuery(e.target.value)}
             />
             {searchQuery && <span>{outputSearch.matches.length} matches</span>}
           </div>
           <span className="tcld-console-toolbar-spacer" />
           <button
-            className={filterMatches ? "tcld-console-action tcld-console-action-active" : "tcld-console-action"}
+            type="button"
+            className={clsx("tcld-toolbar-icon", filterMatches && "is-active")}
             onClick={() => setFilterMatches((value) => !value)}
+            title={filterMatches ? "Showing only matching lines" : "Show only lines that match the filter"}
+            aria-label="Only matching lines"
+            aria-pressed={filterMatches}
           >
-            matches
+            <ListFilter size={14} aria-hidden />
           </button>
           <button
-            className="tcld-console-action"
+            type="button"
+            className="tcld-toolbar-icon"
             onClick={() => void navigator.clipboard.writeText(window.getSelection()?.toString() || "")}
+            title="Copy selected text"
+            aria-label="Copy selected text"
           >
-            copy selected
+            <Copy size={14} aria-hidden />
           </button>
           <button
-            className="tcld-console-action"
+            type="button"
+            className="tcld-toolbar-icon"
             onClick={() => void navigator.clipboard.writeText(formatOutputForCopy(filteredOutput))}
+            title="Copy visible output"
+            aria-label="Copy visible output"
           >
-            copy visible
+            <ClipboardCopy size={14} aria-hidden />
           </button>
           <button
-            className="tcld-console-action"
+            type="button"
+            className="tcld-toolbar-icon"
             onClick={clearOutput}
+            title="Clear output"
+            aria-label="Clear output"
           >
-            clear
+            <Eraser size={14} aria-hidden />
           </button>
         </div>
 

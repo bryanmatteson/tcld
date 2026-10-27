@@ -262,10 +262,14 @@ export async function loadFile(path: string): Promise<LoadResult> {
 
 /**
  * Load a Tcl source snippet directly from text (no path required).
- * Used by the Browse-examples flow on the welcome screen.
+ * Uses the source compiler admission rules without executing the script.
  */
 export async function loadText(source: string, label: string): Promise<LoadResult> {
   return consumeLoadResult(await invoke<LoadResultRaw>("load_text", { source, label }));
+}
+
+export async function loadExample(id: string): Promise<LoadResult> {
+  return consumeLoadResult(await invoke<LoadResultRaw>("load_example", { id }));
 }
 
 export async function getInstructionDetail(index: number): Promise<InstructionDetail> {

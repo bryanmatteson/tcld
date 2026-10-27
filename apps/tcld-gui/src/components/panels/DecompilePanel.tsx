@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState, useRef, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { useTcldStore } from "@/lib/store";
+import { useTcldData } from "@/lib/store";
 import { useDebugStore } from "@/lib/debug-store";
 import { DEBUGGER_UNAVAILABLE_MESSAGE } from "@/lib/capabilities";
 import { tokenizeTclLine, type TclToken } from "@/lib/tcl-tokenizer";
@@ -10,13 +10,15 @@ import type { SyntaxToken, DecompileLine, DebugBreakpoint } from "@/types";
 import { Panel } from "./Panel";
 import { clsx } from "clsx";
 import { ArrowRight, ChevronDown, ChevronRight, Circle, Columns2, Copy, FileCode2, Link2, Palette, Play, Unlink2 } from "lucide-react";
+import { EmptyState } from "@/components/EmptyState";
 import { T } from "@/lib/theme";
 import { useContextMenu } from "@/hooks/use-context-menu";
 import { ContextMenu, type ContextMenuItem } from "@/components/overlays/ContextMenu";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCommands } from "@/hooks/use-commands";
-import { getRowMetrics } from "@/lib/row-metrics";
+import { getRowMetrics, revealRow, sameRowMetrics } from "@/lib/row-metrics";
 import { useLocationStore } from "@/lib/location-store";
+import { useShallow } from "zustand/react/shallow";
 import { hoverBus } from "@/lib/hover-bus";
 import { useHoverHighlight } from "@/hooks/use-hover-highlight";
 import { getPanelColumns, savePanelColumns } from "@/lib/settings";
@@ -301,10 +303,51 @@ interface InteractiveTclLineProps {
   lineGroup: number | null;
   activePcSegment: EditorCommandSegment | null;
   executionStyled: boolean;
-  foldDisclosure?: React.ReactNode;
+  /** Fold state for the inline disclosure; null when the line can't fold. */
+  foldState: "expanded" | "collapsed" | null;
+  onToggleFold: (lineIdx: number) => void;
 }
 
 const TEXT_ENCODER = new TextEncoder();
+
+/** Inline fold chevron for a source line. A component (not an element built
+ *  per render) so InteractiveTclLine keeps memo equality across cursor moves. */
+const SourceFoldDisclosure = React.memo(function SourceFoldDisclosure({
+  lineIdx,
+  folded,
+  onToggle,
+}: {
+  lineIdx: number;
+  folded: boolean;
+  onToggle: (lineIdx: number) => void;
+}) {
+  return (
+    <span className="relative inline-block h-[var(--code-row-height)] w-0 overflow-visible align-middle">
+      <button
+        type="button"
+        data-source-fold-disclosure="command"
+        data-fold-state={folded ? "collapsed" : "expanded"}
+        className={clsx(
+          "absolute right-[2px] top-1/2 inline-flex h-[14px] w-[14px] -translate-y-1/2 items-center justify-center",
+          "rounded border-0 bg-transparent p-0",
+          "text-tcld-text-inactive hover:text-tcld-accent",
+          "transition-opacity",
+          folded
+            ? "opacity-100"
+            : "opacity-0 group-hover/row:opacity-80 focus:opacity-100",
+        )}
+        aria-label={`${folded ? "Unfold" : "Fold"} source block`}
+        title={`${folded ? "Unfold" : "Fold"} source block`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggle(lineIdx);
+        }}
+      >
+        {folded ? <ChevronRight size={12} aria-hidden /> : <ChevronDown size={12} aria-hidden />}
+      </button>
+    </span>
+  );
+});
 
 const InteractiveTclLine = React.memo(function InteractiveTclLine({
   text,
@@ -316,8 +359,12 @@ const InteractiveTclLine = React.memo(function InteractiveTclLine({
   lineGroup,
   activePcSegment,
   executionStyled,
-  foldDisclosure,
+  foldState,
+  onToggleFold,
 }: InteractiveTclLineProps) {
+  const foldDisclosure = foldState
+    ? <SourceFoldDisclosure lineIdx={row} folded={foldState === "collapsed"} onToggle={onToggleFold} />
+    : null;
   const tokens = tokenizeTclLine(row, text, allTokens, lineStartByte);
 
   // Build a capture lookup for each token position
@@ -485,8 +532,8 @@ export function DecompilePanel({
   onRemoveBreakpoint,
   onRunToCursor,
 }: DecompilePanelProps) {
-  const { cursor, execution, jumpToGroup, setCursor, index, pinA, pinB } = useLocationStore();
-  const { data } = useTcldStore();
+  const { cursor, execution, jumpToGroup, setCursor, index, pinA, pinB } = useLocationStore(useShallow((s) => ({ cursor: s.cursor, execution: s.execution, jumpToGroup: s.jumpToGroup, setCursor: s.setCursor, index: s.index, pinA: s.pinA, pinB: s.pinB })));
+  const { data } = useTcldData();
   const debug = useDebugStore();
   const lines = useMemo(() => data?.decompileLines ?? [], [data?.decompileLines]);
   const tokens = useMemo(() => data?.decompileTokens ?? [], [data?.decompileTokens]);
@@ -603,7 +650,7 @@ export function DecompilePanel({
   }, [showColumnMenu]);
 
   useEffect(() => {
-    const refresh = () => setRowMetrics(getRowMetrics());
+    const refresh = () => setRowMetrics((prev) => sameRowMetrics(prev, getRowMetrics()));
     refresh();
     window.addEventListener("resize", refresh);
     const observer = new MutationObserver(refresh);
@@ -739,15 +786,27 @@ export function DecompilePanel({
   const lineToVisibleIndexRef = useRef(lineToVisibleIndex);
   useEffect(() => { lineToVisibleIndexRef.current = lineToVisibleIndex; }, [lineToVisibleIndex]);
 
+  const firstLineByGroup = useMemo(() => {
+    const map = new Map<number, number>();
+    lines.forEach((line, idx) => {
+      if (line.group != null && !map.has(line.group)) map.set(line.group, idx);
+    });
+    return map;
+  }, [lines]);
+  const cursorLineIdx = focusedGroup != null ? (firstLineByGroup.get(focusedGroup) ?? -1) : -1;
+
   useEffect(() => {
     if (!sourceLinked || focusedGroup === null) return;
-    const firstLineIdx = lines.findIndex((l) => l.group === focusedGroup);
+    const firstLineIdx = firstLineByGroup.get(focusedGroup) ?? -1;
     if (firstLineIdx < 0) return;
     const visibleIndex = lineToVisibleIndexRef.current.get(firstLineIdx);
-    if (visibleIndex != null) {
-      virtualizer.scrollToIndex(visibleIndex, { align: "center" });
+    const el = containerRef.current;
+    // Center only when the command is off screen or crowding an edge, so
+    // stepping within the visible region doesn't keep re-centering the view.
+    if (visibleIndex != null && el) {
+      revealRow(el, visibleIndex, rowMetrics.rowHeight, { center: true });
     }
-  }, [focusedGroup, lines, sourceLinked, virtualizer]);
+  }, [firstLineByGroup, focusedGroup, sourceLinked, rowMetrics.rowHeight]);
 
   // Auto-scroll to execution line when debugger stops
   useEffect(() => {
@@ -828,12 +887,12 @@ export function DecompilePanel({
     if (!next) return;
 
     setSelectedLine(next.idx);
-    virtualizer.scrollToIndex(nextVisible, { align: "auto" });
+    if (containerRef.current) revealRow(containerRef.current, nextVisible, rowMetrics.rowHeight);
 
     if (next.line.group != null) {
       handleLineClick(next.line.group, next.idx);
     }
-  }, [handleLineClick, lineToVisibleIndex, selectedLine, visibleLines, virtualizer]);
+  }, [handleLineClick, lineToVisibleIndex, rowMetrics.rowHeight, selectedLine, visibleLines]);
 
   const commands = useMemo(() => ([
     {
@@ -904,9 +963,19 @@ export function DecompilePanel({
     }
     return (
       <Panel title="Source View" badge="—" focused={focused} accent id={id} designSurface="view-source" onClose={onClose} onFocus={onFocus}>
-        <div className="px-6 py-6 font-mono text-xs text-center text-tcld-fg-dim">
-          {debugActive ? "waiting for bytecode chunks..." : "no decompilation available"}
-        </div>
+        {debugActive ? (
+          <EmptyState
+            icon={<FileCode2 aria-hidden />}
+            title="Waiting for bytecode…"
+            message="Step or continue to stream the next chunk from the debugger."
+          />
+        ) : (
+          <EmptyState
+            icon={<FileCode2 aria-hidden />}
+            title="No reconstructed source"
+            message="Open Tcl bytecode or source to read it here."
+          />
+        )}
       </Panel>
     );
   }
@@ -915,8 +984,8 @@ export function DecompilePanel({
     <Panel title="Source View" badge={String(lines.length)} focused={focused} accent id={id} designSurface="view-source" onClose={onClose} onFocus={onFocus}>
       <div className="decompile-editor-shell flex min-h-0 flex-1 flex-col">
         <div className="decompile-editor-toolbar flex items-center gap-2 px-2 py-1 min-w-0 flex-nowrap">
-          <FileCode2 size={12} className="shrink-0 text-tcld-accent" aria-hidden />
-          <span className="shrink min-w-0 truncate font-mono text-meta text-tcld-fg" title={data?.metadata.filename ?? "source.tcl"}>
+          <FileCode2 size={13} className="shrink-0 text-tcld-fg-muted" aria-hidden />
+          <span className="shrink min-w-0 truncate text-control font-medium text-tcld-fg" title={data?.metadata.filename ?? "source.tcl"}>
             {data?.metadata.filename ?? "source.tcl"}
           </span>
           {/*
@@ -945,12 +1014,12 @@ export function DecompilePanel({
               return instIdx >= 0 ? data.instructions[instIdx].pc : null;
             })();
             return (
-              <span className="hidden md:inline-flex shrink-0 items-center gap-1 font-mono text-label text-tcld-text-inactive">
-                <ChevronRight size={9} aria-hidden />
+              <span className="hidden md:inline-flex shrink-0 items-center gap-1 font-mono text-meta text-tcld-fg-muted">
+                <ChevronRight size={11} className="text-tcld-text-comment" aria-hidden />
                 <span data-source-crumb="group">
                   {groupCandidate != null ? `c${String(groupCandidate).padStart(3, "0")}` : "c —"}
                 </span>
-                <ChevronRight size={9} aria-hidden />
+                <ChevronRight size={11} className="text-tcld-text-comment" aria-hidden />
                 <span data-source-crumb="pc">
                   {pcCandidate != null ? `pc 0x${pcCandidate.toString(16).padStart(4, "0")}` : "pc —"}
                 </span>
@@ -972,16 +1041,12 @@ export function DecompilePanel({
             data-source-toolbar-action="command-coloring"
             data-source-command-coloring={commandColoringEnabled ? "true" : "false"}
             onClick={() => setCommandColoringEnabled((prev) => !prev)}
-            className={clsx(
-              "rounded p-1 transition-colors shrink-0",
-              commandColoringEnabled ? "text-tcld-accent bg-tcld-accent/10" : "text-tcld-text-inactive",
-              "hover:bg-tcld-bg-highlight/70 hover:text-tcld-fg",
-            )}
+            className={clsx("tcld-toolbar-icon", commandColoringEnabled && "is-active")}
             title={commandColoringEnabled ? "Disable per-command coloring" : "Color each command differently"}
             aria-label="Toggle per-command coloring"
             aria-pressed={commandColoringEnabled}
           >
-            <Palette size={12} aria-hidden />
+            <Palette size={14} aria-hidden />
           </button>
 
           {foldableGroupStarts.size > 0 && foldedFoldableLineCount >= foldableGroupStarts.size ? (
@@ -990,12 +1055,12 @@ export function DecompilePanel({
               data-source-toolbar-action="unfold-all"
               data-fold-state="all-folded"
               onClick={() => commandRegistry.execute("source:unfold-all")}
-              className="decompile-editor-toolbar-action shrink-0 is-active"
+              className="tcld-toolbar-icon shrink-0 is-active"
               title="Unfold all source command groups"
               aria-label="unfold all source command groups"
               aria-pressed="true"
             >
-              <ChevronDown size={12} aria-hidden />
+              <ChevronDown size={14} aria-hidden />
               <span className="sr-only">unfold all</span>
             </button>
           ) : (
@@ -1005,14 +1070,14 @@ export function DecompilePanel({
               data-fold-state={foldedFoldableLineCount > 0 ? "partial" : "all-unfolded"}
               onClick={() => commandRegistry.execute("source:fold-all")}
               className={clsx(
-                "decompile-editor-toolbar-action shrink-0",
+                "tcld-toolbar-icon shrink-0",
                 foldedFoldableLineCount > 0 && "is-active",
               )}
               title="Fold all source command groups"
               aria-label="fold all source command groups"
               aria-pressed={false}
             >
-              <ChevronRight size={12} aria-hidden />
+              <ChevronRight size={14} aria-hidden />
               <span className="sr-only">fold all</span>
             </button>
           )}
@@ -1028,24 +1093,24 @@ export function DecompilePanel({
             data-source-toolbar-action="linked"
             data-source-linked={sourceLinked ? "true" : "false"}
             onClick={toggleSourceLinked}
-            className={clsx(
-              "rounded p-1 transition-colors",
-              sourceLinked ? "text-tcld-accent" : "text-tcld-fg-dim",
-              "hover:bg-tcld-bg-highlight/70"
-            )}
-            title={sourceLinked ? "Linked navigation active (click to freeze)" : "Linked navigation frozen (click to resume)"}
+            className={clsx("tcld-toolbar-icon", sourceLinked && "is-active")}
+            title={sourceLinked ? "Following the shared selection — click to stop" : "Not following the shared selection — click to resume"}
+            aria-label="Follow shared selection"
+            aria-pressed={sourceLinked}
           >
-            {sourceLinked ? <Link2 size={12} /> : <Unlink2 size={12} />}
+            {sourceLinked ? <Link2 size={14} aria-hidden /> : <Unlink2 size={14} aria-hidden />}
           </button>
 
           <div className="relative" ref={columnMenuRef}>
             <button
               ref={columnButtonRef}
               onClick={() => setShowColumnMenu((prev) => !prev)}
-              className="rounded p-1 text-tcld-fg-dim transition-colors hover:bg-tcld-bg-highlight/70 hover:text-tcld-fg"
+              className="tcld-toolbar-icon"
               title="Toggle visible columns"
+              aria-label="Toggle columns"
+              aria-expanded={showColumnMenu}
             >
-              <Columns2 size={12} />
+              <Columns2 size={14} aria-hidden />
             </button>
             {showColumnMenu && typeof document !== "undefined" && createPortal(
               <div
@@ -1136,32 +1201,10 @@ export function DecompilePanel({
                     : (lineSegments[0] ?? null)
                 )
                 : null;
-              const foldDisclosure = columns.foldMarkers && isFoldable ? (
-                <span className="relative inline-block h-[var(--code-row-height)] w-0 overflow-visible align-middle">
-                  <button
-                    type="button"
-                    data-source-fold-disclosure="command"
-                    data-fold-state={isFoldedState ? "collapsed" : "expanded"}
-                    className={clsx(
-                      "absolute right-[2px] top-1/2 inline-flex h-[14px] w-[14px] -translate-y-1/2 items-center justify-center",
-                      "rounded border-0 bg-transparent p-0",
-                      "text-tcld-text-inactive hover:text-tcld-accent",
-                      "transition-opacity",
-                      isFoldedState
-                        ? "opacity-100"
-                        : "opacity-0 group-hover/row:opacity-80 focus:opacity-100",
-                    )}
-                    aria-label={`${isFoldedState ? "Unfold" : "Fold"} source block`}
-                    title={`${isFoldedState ? "Unfold" : "Fold"} source block`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleFold(idx);
-                    }}
-                  >
-                    {isFoldedState ? <ChevronRight size={12} aria-hidden /> : <ChevronDown size={12} aria-hidden />}
-                  </button>
-                </span>
-              ) : null;
+              const foldState = columns.foldMarkers && isFoldable ? (isFoldedState ? "collapsed" : "expanded") : null;
+              const foldDisclosure = foldState
+                ? <SourceFoldDisclosure lineIdx={idx} folded={foldState === "collapsed"} onToggle={toggleFold} />
+                : null;
 
               return (
                 <div
@@ -1184,6 +1227,7 @@ export function DecompilePanel({
                     data-source-group={isGroupHeader && line.group != null ? line.group : undefined}
                     data-fold-state={isGroupHeader && isFoldable ? (isFoldedState ? "collapsed" : "expanded") : undefined}
                     data-selected={isSelected ? "true" : undefined}
+                    data-cursor-group={isFocused && !isSelected ? "true" : undefined}
                     data-execution={isExecution ? "true" : undefined}
                     data-execution-group={isExecutionGroup ? "true" : undefined}
                     data-command-tinted={commandColoringEnabled && line.group != null ? "true" : undefined}
@@ -1278,10 +1322,7 @@ export function DecompilePanel({
                     }}
                   >
                     <div
-                      className={clsx(
-                        "decompile-editor-gutter flex h-[var(--code-row-height)] flex-shrink-0 items-center",
-                        isFocused && "decompile-editor-gutter-focus"
-                      )}
+                      className="decompile-editor-gutter flex h-[var(--code-row-height)] flex-shrink-0 items-center"
                     >
                       {/* VS Code-style breakpoint area (leftmost) */}
                       {columns.breakpointGutter && (
@@ -1376,7 +1417,8 @@ export function DecompilePanel({
                           lineGroup={line.group}
                           activePcSegment={activePcSegment}
                           executionStyled={isExecution}
-                          foldDisclosure={foldDisclosure}
+                          foldState={foldState}
+                          onToggleFold={toggleFold}
                         />
                       )}
                     </div>
@@ -1394,11 +1436,15 @@ export function DecompilePanel({
         </div>
 
         <div className="decompile-editor-status flex items-center gap-3 px-2.5">
-          <span className="font-mono text-meta">
-            Ln {executionLineIdx >= 0 ? executionLineIdx + 1 : "—"}, Col 1
+          {/* While paused this names the execution point; otherwise the
+              cursor, so the status always says what the highlight marks. */}
+          <span className="font-mono text-meta" data-source-status-line>
+            Ln {executionLineIdx >= 0 ? executionLineIdx + 1 : (cursorLineIdx >= 0 ? cursorLineIdx + 1 : "—")}
           </span>
           <span className="font-mono text-meta">
-            {executionInstIdx != null ? `i${executionInstIdx}` : "i—"}
+            {executionInstIdx != null
+              ? `i${String(executionInstIdx).padStart(3, "0")}`
+              : (cursor.instIdx != null ? `i${String(cursor.instIdx).padStart(3, "0")}` : "i—")}
           </span>
           <div className="flex-1" />
           <span className="font-mono text-meta">

@@ -3,26 +3,28 @@
 import React, { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { T } from "@/lib/theme";
-import { useTcldStore } from "@/lib/store";
+import { useTcldData } from "@/lib/store";
 import { useDebugStore } from "@/lib/debug-store";
 import { Panel } from "./Panel";
 import { clsx } from "clsx";
-import { ArrowRight, Bookmark, ChevronDown, ChevronLeft, ChevronRight, Circle, Columns, Copy, Filter, GitBranch, Link2, MessageSquare, Play, Unlink2 } from "lucide-react";
-import type { Instruction, SourceMapEntry } from "@/types";
+import { ArrowRight, Binary, Bookmark, ChevronDown, ChevronRight, Circle, Columns, Copy, CornerDownRight, Filter, GitBranch, Link2, MessageSquare, Play, RotateCcw, Unlink2 } from "lucide-react";
+import { EmptyState } from "@/components/EmptyState";
+import type { Instruction, LiteralEntry, SourceMapEntry } from "@/types";
 import type { Annotations } from "@/lib/annotations";
 
 import { getOpcodeCategory, opcodeCategoryColor } from "@/lib/opcode-categories";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useContextMenu } from "@/hooks/use-context-menu";
 import { ContextMenu, type ContextMenuItem } from "@/components/overlays/ContextMenu";
-import { getDisassemblyRowMetrics } from "@/lib/row-metrics";
+import { getDisassemblyRowMetrics, revealRow, sameRowMetrics } from "@/lib/row-metrics";
 import { useCommands } from "@/hooks/use-commands";
 import { commandRegistry } from "@/lib/command-registry";
 import { useLocationStore } from "@/lib/location-store";
+import { useShallow } from "zustand/react/shallow";
 import { hoverBus } from "@/lib/hover-bus";
 import { useHoverHighlight } from "@/hooks/use-hover-highlight";
 import { getPanelColumns, loadSettings, savePanelColumns, withDisassemblyParityColumns } from "@/lib/settings";
-import { tokenizeInstructionRow } from "@/lib/syntax-rendering";
+import { formatAddress, indexLiterals, operandCoversComment, presentOperand } from "@/lib/operand-presentation";
 import { buildInstructionFoldModel, buildInstructionPanelRows } from "@/lib/folding-model";
 import { subscribePanelAction } from "@/lib/panel-action-bus";
 import { useAnchoredFloatingPosition } from "@/lib/floating-position";
@@ -65,6 +67,8 @@ const DEFAULT_INSTRUCTION_COLUMNS: Record<InstructionColumnId, boolean> = {
 const GROUP_COLORS = ["var(--accent)", "var(--info)", "var(--violet)", "var(--pink)", "var(--warn)"] as const;
 
 interface CommandGroupMeta {
+  /** Index of the command's first instruction (its header row). */
+  startIdx: number;
   label: string;
   detail: string;
   count: number;
@@ -172,6 +176,13 @@ function commandGroupLabel(group: number | null): string {
   return group != null ? `c${String(group).padStart(3, "0")}` : "c---";
 }
 
+function describeIncomingJumps(sources: readonly Instruction[], loopHead: boolean): string {
+  const shown = sources.slice(0, 4).map((source) => `${source.op} at ${formatAddress(source.pc)}`);
+  const more = sources.length > shown.length ? `, and ${sources.length - shown.length} more` : "";
+  const action = sources.length === 1 ? "Click to go to it." : "Click to visit each in turn.";
+  return `${loopHead ? "Loop head" : "Jump target"} — reached from ${shown.join(", ")}${more}. ${action}`;
+}
+
 function groupColor(group: number | null): string {
   if (group == null) return "var(--fg-4)";
   return GROUP_COLORS[Math.abs(group) % GROUP_COLORS.length];
@@ -209,11 +220,8 @@ function JumpGutterSVG({
       style={{ zIndex: 10, overflow: "visible" }}
     >
       <defs>
-        <marker id="arrow-green" markerWidth="6" markerHeight="4" refX="5" refY="2" orient="auto">
-          <path d="M0,0 L6,2 L0,4" fill={T.success} />
-        </marker>
-        <marker id="arrow-red" markerWidth="6" markerHeight="4" refX="5" refY="2" orient="auto">
-          <path d="M0,0 L6,2 L0,4" fill={T.error} />
+        <marker id="arrow-flow" markerWidth="6" markerHeight="4" refX="5" refY="2" orient="auto">
+          <path d="M0,0 L6,2 L0,4" fill={T.warning} />
         </marker>
       </defs>
       <g transform={`translate(0, ${-scrollTop})`}>
@@ -226,20 +234,19 @@ function JumpGutterSVG({
           if (maxY < visibleMin || minY > visibleMax) return null;
 
           const x = gutterWidth - 3 - arrow.lane * 6;
-          const color = arrow.forward ? T.success : T.error;
-          const markerId = arrow.forward ? "arrow-green" : "arrow-red";
           const d = `M ${gutterWidth - 2} ${fromY} H ${x} V ${toY} H ${gutterWidth - 2}`;
 
+          // Control flow shares one color; loops (backward edges) draw heavier.
           return (
             <path
               key={i}
               d={d}
               fill="none"
-              stroke={color}
-              strokeWidth={1.5}
+              stroke={T.warning}
+              strokeWidth={arrow.forward ? 1.25 : 1.75}
               strokeDasharray={arrow.conditional ? "4 2" : undefined}
-              markerEnd={`url(#${markerId})`}
-              opacity={0.8}
+              markerEnd="url(#arrow-flow)"
+              opacity={arrow.forward ? 0.7 : 0.9}
             />
           );
         })}
@@ -301,23 +308,34 @@ interface InstructionRowProps {
   hiddenInstructionCount: number;
   groupMeta: CommandGroupMeta | null;
   selectedGroup: boolean;
-  onToggleFold: () => void;
+  /** Fold region this row heads; passed to `onToggleFold` so the callback stays stable. */
+  foldRegionId: string | undefined;
+  onToggleFold: (foldRegionId: string) => void;
   userComment: string | undefined;
   isEditing: boolean;
   onJumpClick: (targetPc: number) => void;
-  onStartEdit: () => void;
+  onStartEdit: (idx: number) => void;
   onSaveComment: (text: string) => void;
   onCancelEdit: () => void;
-  flashIdx: number | null;
+  isFlashing: boolean;
   gutterPadding: number;
   columns: Record<InstructionColumnId, boolean>;
   /**
-   * PC → instruction-index lookup, used to render jump-target labels as
-   * `→ i145` instead of raw `→ 0xADDR`. Stable across renders (memoized in
-   * the parent) so InstructionRow's React.memo equality holds; only changes
-   * when the instruction set itself changes.
+   * PC → instruction-index lookup, used to name a jump's target instruction
+   * (i145) in its tooltip. Stable across renders (memoized in the parent) so
+   * InstructionRow's React.memo equality holds; only changes when the
+   * instruction set itself changes.
    */
   pcToInstIdx?: ReadonlyMap<number, number>;
+  /** Literal table by index, for showing the value a push operand stands for. */
+  literals: ReadonlyMap<number, LiteralEntry>;
+  /** Jumps that land on this instruction; undefined when none do. */
+  incomingJumps?: readonly Instruction[];
+  onJumpSourceClick: (targetPc: number) => void;
+  /** Hex digits in the address column, so every row spells addresses alike. */
+  addressDigits: number;
+  /** Opcode column minimum width in ch; a rarer, longer opcode widens its own row. */
+  opcodeWidthCh: number;
   /**
    * Command-group nesting depth (0 = root, +1 per level). Used to render
    * a left indent of `depth * 12px` in addition to the jump-arrow gutter,
@@ -342,6 +360,7 @@ const InstructionRow = React.memo(function InstructionRow({
   hiddenInstructionCount,
   groupMeta,
   selectedGroup,
+  foldRegionId,
   onToggleFold,
   userComment,
   isEditing,
@@ -349,25 +368,28 @@ const InstructionRow = React.memo(function InstructionRow({
   onStartEdit,
   onSaveComment,
   onCancelEdit,
-  flashIdx,
+  isFlashing,
   gutterPadding,
   columns,
   pcToInstIdx,
+  literals,
+  incomingJumps,
+  onJumpSourceClick,
+  addressDigits,
+  opcodeWidthCh,
   depth = 0,
 }: InstructionRowProps) {
-  const isEven = inst.idx % 2 === 0;
   const opcodeColor = opcodeCategoryColor(getOpcodeCategory(inst.op));
   const pcHex = pcLabel(inst.pc);
-  const isFlashing = flashIdx === inst.idx;
   const pinColor = isPinA ? T.warning : (isPinB ? T.number : null);
   const isGroupHeader = inst.groupStart && groupMeta != null;
   const rowGroupColor = groupMeta?.color ?? groupColor(inst.group);
-  const selectedVisual = selected || (isGroupHeader && selectedGroup);
-  const tokenRoles = tokenizeInstructionRow(inst, {
-    groupLabel: inst.group != null ? `c${String(inst.group).padStart(3, "0")}` : null,
-    comment: inst.comment,
-    execution: isExecutionPointer || isExecutionGroup,
-  });
+  // Only the cursor row reads as selected; its command's header gets the
+  // quieter data-selected-group wash so the two cues don't compete.
+  const selectedVisual = selected;
+  const operand = presentOperand(inst, literals);
+  const showPayloadComment = !operandCoversComment(inst, operand);
+  const isLoopHead = incomingJumps?.some((source) => source.pc >= inst.pc) ?? false;
 
   const handleCopyPc = () => {
     navigator.clipboard.writeText(pcHex);
@@ -384,6 +406,7 @@ const InstructionRow = React.memo(function InstructionRow({
       data-fold-state={foldable ? (folded ? "collapsed" : "expanded") : undefined}
       data-group-count={groupMeta?.count}
       data-group-range={groupMeta ? `${pcLabel(groupMeta.pcStart)}-${pcLabel(groupMeta.pcEnd)}` : undefined}
+      data-jump-target={incomingJumps ? (isLoopHead ? "loop" : "true") : undefined}
       className={clsx(
         "instruction-row",
         "flex items-center py-0 h-[var(--disassembly-row-height)] cursor-pointer transition-colors duration-75 font-mono text-xs leading-[var(--disassembly-row-height)]",
@@ -398,11 +421,7 @@ const InstructionRow = React.memo(function InstructionRow({
               ? "border-l-[3px] border-tcld-success/40"
             : pinColor
               ? "border-l-[3px] border-dashed"
-            : clsx(
-                "border-l-[3px] border-transparent",
-                isEven ? "bg-tcld-bg-2/40" : "bg-transparent",
-                "hover:bg-tcld-bg-highlight/50"
-              )
+            : "border-l-[3px] border-transparent hover:bg-tcld-bg-highlight/50"
       )}
       data-nesting-depth={depth || undefined}
       style={{
@@ -412,7 +431,7 @@ const InstructionRow = React.memo(function InstructionRow({
           : isExecutionGroup
             ? { background: `color-mix(in srgb, ${T.success} 5%, transparent)` }
             : selectedVisual
-              ? { borderLeftColor: rowGroupColor }
+              ? { borderLeftColor: T.accent }
             : pinColor
               ? {
                   background: `color-mix(in srgb, ${pinColor} 4%, transparent)`,
@@ -421,7 +440,7 @@ const InstructionRow = React.memo(function InstructionRow({
                 }
             : {}),
       }}
-      title={`${inst.op} ${inst.args} | size:${inst.size} | group:${inst.group !== null ? inst.group : "none"}`}
+      title={`${inst.op}${inst.args ? ` ${inst.args}` : ""} · ${inst.size} ${inst.size === 1 ? "byte" : "bytes"}${inst.group != null ? ` · ${commandGroupLabel(inst.group)}` : ""}`}
     >
       <span
         className="tcld-disasm-group-rail"
@@ -440,7 +459,7 @@ const InstructionRow = React.memo(function InstructionRow({
               className="tcld-disasm-fold-control h-4 w-3 rounded text-label leading-4 text-tcld-fg-dim hover:bg-tcld-bg-highlight hover:text-tcld-accent"
               onClick={(event) => {
                 event.stopPropagation();
-                onToggleFold();
+                if (foldRegionId) onToggleFold(foldRegionId);
               }}
               aria-label={`${folded ? "Unfold" : "Fold"} command${hiddenInstructionCount > 1 ? ` (${hiddenInstructionCount} instructions)` : ""}`}
               title={`${folded ? "Unfold" : "Fold"} command${hiddenInstructionCount > 1 ? ` (${hiddenInstructionCount} instructions)` : ""}`}
@@ -456,9 +475,9 @@ const InstructionRow = React.memo(function InstructionRow({
         </span>
       )}
 
-      {/* Execution pointer / Bookmark marker */}
+      {/* Execution pointer / bookmark / pin / jump-target marker */}
       {columns.marker && (
-        <span className="w-3 flex-shrink-0 text-center">
+        <span className="flex w-4 flex-shrink-0 items-center justify-center">
           {isExecutionPointer ? (
             <Play size={10} fill="currentColor" strokeWidth={0} style={{ color: T.success }} aria-hidden />
           ) : isBookmarked ? (
@@ -467,6 +486,20 @@ const InstructionRow = React.memo(function InstructionRow({
             <span style={{ color: T.warning, fontSize: 9, fontWeight: 700 }}>A</span>
           ) : isPinB ? (
             <span style={{ color: T.number, fontSize: 9, fontWeight: 700 }}>B</span>
+          ) : incomingJumps ? (
+            <button
+              type="button"
+              className="tcld-disasm-target"
+              data-jump-target-marker={isLoopHead ? "loop" : "target"}
+              aria-label={`${isLoopHead ? "Loop head" : "Jump target"}: go to the ${incomingJumps.length === 1 ? "jump" : "jumps"} that land here`}
+              title={describeIncomingJumps(incomingJumps, isLoopHead)}
+              onClick={(event) => {
+                event.stopPropagation();
+                onJumpSourceClick(inst.pc);
+              }}
+            >
+              {isLoopHead ? <RotateCcw size={11} aria-hidden /> : <CornerDownRight size={11} aria-hidden />}
+            </button>
           ) : null}
         </span>
       )}
@@ -475,7 +508,7 @@ const InstructionRow = React.memo(function InstructionRow({
       {columns.group && (
         <span
           className={clsx(
-            "tcld-disasm-source-group-column w-[104px] text-xs flex-shrink-0 tabular-nums",
+            "tcld-disasm-source-group-column w-[7ch] text-xs flex-shrink-0 tabular-nums",
             inst.groupStart ? "font-semibold" : "text-tcld-fg-dim font-normal",
             inst.group !== null ? "opacity-100" : "opacity-30"
           )}
@@ -483,13 +516,14 @@ const InstructionRow = React.memo(function InstructionRow({
           data-disasm-column="source-group"
         >
           {isGroupHeader && groupMeta ? (
-            <span className="tcld-disasm-group-summary">
+            <span className="tcld-disasm-group-summary" title={`Command ${groupMeta.label} · source ${groupMeta.sourceLabel}`}>
               <span className="tcld-disasm-group-dot" style={{ background: rowGroupColor }} aria-hidden />
               <span className="tcld-disasm-group-label">{groupMeta.label}</span>
-              <span className="tcld-disasm-group-source">{groupMeta.sourceLabel}</span>
             </span>
           ) : (
-            inst.group !== null ? commandGroupLabel(inst.group) : "·"
+            // The group rail already ties continuation rows to their command;
+            // repeating the label on every row only adds noise.
+            <span className="sr-only">{inst.group !== null ? commandGroupLabel(inst.group) : "no command"}</span>
           )}
         </span>
       )}
@@ -497,23 +531,24 @@ const InstructionRow = React.memo(function InstructionRow({
       {/* Address gutter */}
       {columns.address && (
         <span
-          className="w-[72px] text-xs text-tcld-fg-dim text-right pr-2 flex-shrink-0 tabular-nums cursor-copy hover:text-tcld-accent"
+          className="text-xs text-tcld-fg-dim pr-3 flex-shrink-0 tabular-nums cursor-copy hover:text-tcld-accent"
+          style={{ width: `calc(${addressDigits}ch + 12px)` }}
           data-token-role="address"
           data-disasm-column="address"
           onClick={handleCopyPc}
           title={`Click to copy ${pcHex}`}
         >
-          {pcHex}
+          {formatAddress(inst.pc, addressDigits)}
         </span>
       )}
 
       {/* Opcode */}
       {columns.opcode && (
         <span
-          className="w-30 flex-shrink-0 font-semibold"
+          className="flex-shrink-0 whitespace-nowrap pr-[1ch] font-medium"
           data-token-role="opcode"
           data-disasm-column="opcode"
-          style={{ color: opcodeColor }}
+          style={{ color: opcodeColor, minWidth: `${opcodeWidthCh}ch` }}
         >
           {inst.op}
         </span>
@@ -521,8 +556,48 @@ const InstructionRow = React.memo(function InstructionRow({
 
       {/* Operands */}
       {columns.args && (
-        <span className="w-[52px] flex-shrink-0 tabular-nums text-right pr-2" style={{ color: T.number }} data-token-role="operand" data-disasm-column="operand">
-          {tokenRoles.find((token) => token.role === "operand")?.text ?? inst.args}
+        <span
+          className="tcld-operand"
+          data-token-role="operand"
+          data-disasm-column="operand"
+          data-operand-kind={operand.kind}
+        >
+          {operand.kind === "literal" && (
+            <>
+              <span
+                className="tcld-operand-value"
+                data-literal-kind={operand.quoted ? "string" : "number"}
+                title={operand.value}
+              >
+                {operand.quoted ? JSON.stringify(operand.value) : operand.value}
+              </span>
+              <span className="tcld-operand-index" title={`Literal #${operand.index}`}>#{operand.index}</span>
+            </>
+          )}
+          {operand.kind === "jump" && (
+            <button
+              type="button"
+              className="tcld-operand-jump"
+              data-token-role="jump-target"
+              data-jump-direction={operand.backward ? "backward" : "forward"}
+              onClick={(event) => {
+                event.stopPropagation();
+                onJumpClick(operand.target);
+              }}
+              title={`${operand.backward ? "Jumps back" : "Jumps ahead"} to ${formatAddress(operand.target, addressDigits)}${(() => {
+                const targetIdx = pcToInstIdx?.get(operand.target);
+                return targetIdx != null ? ` (i${targetIdx})` : "";
+              })()} — click to go there`}
+            >
+              {operand.backward ? "↑" : "↓"} {formatAddress(operand.target, addressDigits)}
+            </button>
+          )}
+          {operand.kind === "words" && (
+            <span className="tcld-operand-words">
+              {operand.count} {operand.count === 1 ? "word" : "words"}
+            </span>
+          )}
+          {operand.kind === "raw" && <span className="tcld-operand-raw" title={operand.text}>{operand.text}</span>}
         </span>
       )}
 
@@ -540,57 +615,28 @@ const InstructionRow = React.memo(function InstructionRow({
               {groupMeta.detail}
             </span>
           )}
-          {isGroupHeader && groupMeta && (
-            <span className="tcld-disasm-group-range">
-              {groupMeta.count} inst · {pcLabel(groupMeta.pcStart)}-{pcLabel(groupMeta.pcEnd)}
-            </span>
-          )}
           {folded && (
             <span className="tcld-disasm-folded-count" data-folded-hidden-count={hiddenInstructionCount}>
               {hiddenInstructionCount} hidden
             </span>
           )}
-          {inst.isJump && inst.jumpTarget !== null && (
+          {showPayloadComment && (
             <span
-              className="cursor-pointer hover:underline flex-shrink-0"
-              data-token-role="jump-target"
-              style={{ color: inst.op.includes("True") || inst.op.includes("False") ? T.warning : T.error }}
-              onClick={(e) => {
-                e.stopPropagation();
-                onJumpClick(inst.jumpTarget!);
-              }}
-              title={`Jump target: 0x${inst.jumpTarget.toString(16).padStart(4, "0")}`}
+              className="overflow-hidden text-ellipsis"
+              data-token-role="comment"
+              style={{ color: T.comment }}
+              title={inst.comment}
             >
-              {/* Address-relative jumps render as i{idx} when we can resolve
-               * the target through the location index — easier to scan than
-               * raw PC addresses, and matches the iN vocabulary used by the
-               * cursor / breadcrumbs / panel badges. The hex PC is preserved
-               * in the title attribute as a fallback for users who navigate
-               * by address. Falls back to 0x{hex} if the index isn't ready
-               * (cold load, missing source map). */}
-              {(() => {
-                const idx = pcToInstIdx?.get(inst.jumpTarget!);
-                return idx != null
-                  ? `→ i${idx}`
-                  : `→ 0x${inst.jumpTarget!.toString(16).padStart(4, "0")}`;
-              })()}
+              ; {inst.comment}
             </span>
           )}
-          <span
-            className="overflow-hidden text-ellipsis"
-            data-token-role="comment"
-            style={{ color: T.comment }}
-            title={inst.comment || undefined}
-          >
-            {inst.comment && `; ${inst.comment}`}
-          </span>
           {userComment && !isEditing && (
             <span
               className="flex-shrink-0 cursor-pointer hover:underline"
               style={{ color: T.warning }}
               onClick={(e) => {
                 e.stopPropagation();
-                onStartEdit();
+                onStartEdit(inst.idx);
               }}
               title="Click to edit comment"
             >
@@ -609,12 +655,6 @@ const InstructionRow = React.memo(function InstructionRow({
         <span className="flex-1" />
       )}
 
-      {/* Selection indicator */}
-      {selected && (
-        <span className="text-tcld-accent text-xs flex-shrink-0 ml-1">
-          <ChevronLeft size={12} aria-hidden />
-        </span>
-      )}
     </div>
   );
 });
@@ -634,14 +674,10 @@ const FlatInstructionRow = React.memo(function FlatInstructionRow({
   isBookmarked,
   userComment,
 }: FlatInstructionRowProps) {
-  const opcodeColor = inst.op.startsWith("invoke")
-    ? "var(--info)"
-    : opcodeCategoryColor(getOpcodeCategory(inst.op));
-  const hint = userComment || inst.comment || (inst.isJump && inst.jumpTarget !== null
-    ? `jump ${pcLabel(inst.jumpTarget)}`
-    : inst.group != null
-      ? commandGroupLabel(inst.group)
-      : "");
+  const opcodeColor = opcodeCategoryColor(getOpcodeCategory(inst.op));
+  const hint = userComment
+    || (inst.isJump && inst.jumpTarget !== null ? `→ ${formatAddress(inst.jumpTarget)}` : inst.comment)
+    || (inst.group != null ? commandGroupLabel(inst.group) : "");
 
   return (
     <div
@@ -655,14 +691,14 @@ const FlatInstructionRow = React.memo(function FlatInstructionRow({
         selected ? "instruction-row-selected border-l-[3px] border-tcld-accent bg-tcld-bg-highlight/60" : "border-l-[3px] border-transparent",
         isExecutionPointer && "border-l-[3px] border-tcld-success",
       )}
-      style={{ gridTemplateColumns: "40px 70px 92px 80px minmax(0, 1fr)" }}
+      style={{ gridTemplateColumns: "40px 48px 128px 56px minmax(0, 1fr)" }}
       title={`${inst.op} ${inst.args}`.trim()}
     >
       <span className="tabular-nums text-label text-tcld-fg-dim" data-instructions-column="index">
         {inst.idx}
       </span>
       <span className="tabular-nums text-tcld-fg-dim" data-token-role="address" data-instructions-column="address">
-        {pcLabel(inst.pc)}
+        {formatAddress(inst.pc)}
       </span>
       <span className="truncate font-semibold" style={{ color: opcodeColor }} data-token-role="opcode" data-instructions-column="opcode">
         {inst.op}
@@ -920,6 +956,12 @@ function SourceModeBody({
 
 // ─── Main Component ─────────────────────────────────────────────
 
+const DISASSEMBLY_MODE_LABELS = {
+  instructions: "Flat",
+  ir: "Grouped",
+  source: "By source",
+} as const;
+
 export function InstructionPanel({
   id,
   presentationMode = "ir",
@@ -938,8 +980,8 @@ export function InstructionPanel({
   onToggleBreakpointAtGroup,
   onRunToCursorAtGroup,
 }: InstructionPanelProps) {
-  const { data } = useTcldStore();
-  const { cursor, execution, index, pinA, pinB } = useLocationStore();
+  const { data } = useTcldData();
+  const { cursor, execution, index, pinA, pinB } = useLocationStore(useShallow((s) => ({ cursor: s.cursor, execution: s.execution, index: s.index, pinA: s.pinA, pinB: s.pinB })));
   const debug = useDebugStore();
   const instructions = useMemo(() => data?.instructions ?? [], [data?.instructions]);
   const selectedIdx = cursor.instIdx ?? 0;
@@ -1008,7 +1050,7 @@ export function InstructionPanel({
   }, [showColumnMenu]);
 
   useEffect(() => {
-    const refreshMetrics = () => setRowMetrics(getDisassemblyRowMetrics());
+    const refreshMetrics = () => setRowMetrics((prev) => sameRowMetrics(prev, getDisassemblyRowMetrics()));
     refreshMetrics();
     window.addEventListener("resize", refreshMetrics);
     const observer = new MutationObserver(refreshMetrics);
@@ -1028,6 +1070,9 @@ export function InstructionPanel({
     return () => window.clearTimeout(timer);
   }, [showFilterBar]);
 
+  // Only the neighborhood filter follows the cursor; keeping the anchor null
+  // otherwise lets the list (and the row maps built from it) survive moves.
+  const neighborhoodAnchor = filterMode === "neighborhood" ? (executionIndex ?? selectedIdx) : null;
   const filteredInstructionIndices = useMemo(() => {
     if (filterMode === "all") {
       return instructions.map((inst) => inst.idx);
@@ -1052,7 +1097,7 @@ export function InstructionPanel({
     }
     if (filterMode === "neighborhood") {
       const radius = Math.max(1, Number.parseInt(filterValue.trim(), 10) || 20);
-      const anchor = executionIndex ?? selectedIdx;
+      const anchor = neighborhoodAnchor ?? 0;
       return instructions
         .filter((inst) => Math.abs(inst.idx - anchor) <= radius)
         .map((inst) => inst.idx);
@@ -1060,20 +1105,21 @@ export function InstructionPanel({
     return instructions.map((inst) => inst.idx);
   }, [
     annotations.bookmarks,
-    executionIndex,
     filterMode,
     filterValue,
     instructions,
-    selectedIdx,
+    neighborhoodAnchor,
   ]);
 
   const filterActive = filterMode !== "all";
 
+  // The panel never reads the model's selected row, so the model is built
+  // without the cursor and survives cursor moves (rows keep memo equality).
   const foldModel = useMemo(
     () => data
-      ? buildInstructionFoldModel(data, { foldedIds, selectedInstIdx: selectedIdx, filter: filterMode })
+      ? buildInstructionFoldModel(data, { foldedIds, selectedInstIdx: null, filter: filterMode })
       : { foldRegions: [], visibleRows: [], selectedVisibleRowId: null },
-    [data, foldedIds, filterMode, selectedIdx],
+    [data, foldedIds, filterMode],
   );
 
   const panelRows = useMemo(
@@ -1104,6 +1150,7 @@ export function InstructionPanel({
           ? `L${sourceStart + 1}-${sourceEnd}`
           : `L${sourceStart + 1}`;
       map.set(group, {
+        startIdx: region.start,
         label: region.label,
         detail: compactSourceText(region.snippet),
         count: region.count ?? Math.max(1, region.end - region.start),
@@ -1125,6 +1172,9 @@ export function InstructionPanel({
     getScrollElement: () => scrollRef.current,
     estimateSize: () => rowMetrics.rowHeight,
     overscan: rowMetrics.overscan,
+    // Grouped mode pins the current command over the top row; keep scrolled-to
+    // rows clear of it.
+    scrollPaddingStart: irMode ? rowMetrics.rowHeight : 0,
   });
 
   const hoverInstIdx = useCallback((location: { instIdx?: number | null; scopeId?: string | null }) => {
@@ -1156,10 +1206,11 @@ export function InstructionPanel({
     if (freezeAutoScroll) return;
     if (executionIndex != null) return;
     const visibleIdx = visibleIndexByInstIdx.get(selectedIdx);
-    if (visibleIdx != null) {
-      virtualizer.scrollToIndex(visibleIdx, { align: "auto" });
+    const el = scrollRef.current;
+    if (visibleIdx != null && el) {
+      revealRow(el, visibleIdx, rowMetrics.rowHeight, { paddingStart: irMode ? rowMetrics.rowHeight : 0 });
     }
-  }, [selectedIdx, virtualizer, executionIndex, freezeAutoScroll, visibleIndexByInstIdx]);
+  }, [selectedIdx, executionIndex, freezeAutoScroll, visibleIndexByInstIdx, irMode, rowMetrics.rowHeight]);
 
   // Auto-scroll to execution pointer when debugger stops (takes priority over selection)
   useEffect(() => {
@@ -1207,6 +1258,33 @@ export function InstructionPanel({
     return map;
   }, [instructions]);
 
+  const literalsByIndex = useMemo(() => indexLiterals(data?.literals ?? []), [data?.literals]);
+
+  // Jumps grouped by the pc they land on, for the jump-target markers.
+  const incomingJumpsByPc = useMemo(() => {
+    const map = new Map<number, Instruction[]>();
+    for (const inst of instructions) {
+      if (!inst.isJump || inst.jumpTarget == null) continue;
+      const sources = map.get(inst.jumpTarget);
+      if (sources) sources.push(inst);
+      else map.set(inst.jumpTarget, [inst]);
+    }
+    return map;
+  }, [instructions]);
+
+  // Column widths follow the file: its widest address, and an opcode column
+  // that fits nine in ten opcodes so one rare long name doesn't squeeze every
+  // operand.
+  const addressDigits = useMemo(
+    () => instructions.reduce((digits, inst) => Math.max(digits, inst.pc.toString(16).length), 4),
+    [instructions],
+  );
+  const opcodeWidthCh = useMemo(() => {
+    if (instructions.length === 0) return 8;
+    const lengths = instructions.map((inst) => inst.op.length).sort((a, b) => a - b);
+    return Math.min(15, Math.max(6, lengths[Math.floor((lengths.length - 1) * 0.9)]));
+  }, [instructions]);
+
   // Command-group nesting depth, derived from sourceMap entries' commandPath.
   // Root commands have commandPath.length === 1 → depth 0; each nested level
   // adds 1. Used by IR rows for visual indent and by Source-mode rows for the
@@ -1235,6 +1313,17 @@ export function InstructionPanel({
     .filter((arrow): arrow is JumpArrow => arrow !== null), [jumpArrows, visibleIndexByInstIdx]);
   const maxLane = jumpArrows.reduce((m, a) => Math.max(m, a.lane), 0);
   const gutterPadding = showJumpArrows && !filterActive && irMode ? Math.max(24, (maxLane + 1) * 8 + 8) : 0;
+
+  // Pinned command header: when the top row sits inside a command whose
+  // header row has scrolled away, name that command above the list.
+  const stickyCommand = useMemo(() => {
+    if (!irMode || renderedRowCount === 0) return null;
+    const topRow = panelRows.rows[Math.min(renderedRowCount - 1, Math.floor(scrollTop / rowMetrics.rowHeight))];
+    const top = topRow ? instructions[topRow.instIdx] : undefined;
+    if (!top || top.group == null || top.groupStart) return null;
+    const meta = groupMetaByGroup.get(top.group);
+    return meta ? { group: top.group, meta } : null;
+  }, [groupMetaByGroup, instructions, irMode, panelRows.rows, renderedRowCount, rowMetrics.rowHeight, scrollTop]);
 
   const foldAllInstructions = useCallback(() => {
     setFoldedIds(new Set(foldModel.foldRegions.map((region) => region.id)));
@@ -1282,6 +1371,21 @@ export function InstructionPanel({
       }
     },
     [instructions, onSelect],
+  );
+
+  // A jump-target marker visits each jump that lands on it, in turn.
+  const jumpSourceCursor = useRef(new Map<number, number>());
+  const handleJumpSourceClick = useCallback(
+    (targetPc: number) => {
+      const sources = incomingJumpsByPc.get(targetPc);
+      if (!sources?.length) return;
+      const turn = jumpSourceCursor.current.get(targetPc) ?? 0;
+      jumpSourceCursor.current.set(targetPc, turn + 1);
+      const source = sources[turn % sources.length];
+      onSelect(source.idx);
+      setFlashIdx(source.idx);
+    },
+    [incomingJumpsByPc, onSelect],
   );
 
   // Inline comment editing
@@ -1490,11 +1594,13 @@ export function InstructionPanel({
             {liveDisassembly}
           </pre>
         ) : (
-          <div className="px-6 py-6 font-mono text-xs text-center text-tcld-fg-dim">
-            {debugActive
-              ? "no structured instructions yet (continue/step to stream chunks)"
-              : "no instructions loaded"}
-          </div>
+          <EmptyState
+            icon={<Binary aria-hidden />}
+            title={debugActive ? "No instructions yet" : "No instructions loaded"}
+            message={debugActive
+              ? "Step or continue to stream bytecode chunks from the debugger."
+              : "Open Tcl bytecode or source to disassemble it here."}
+          />
         )}
       </Panel>
     );
@@ -1513,7 +1619,7 @@ export function InstructionPanel({
     >
       {/* Toolbar */}
       <div
-        className="tcld-disasm-toolbar flex h-6 min-w-0 flex-nowrap items-center gap-1 overflow-x-auto px-2 py-0 border-b border-tcld-border-dim/60 bg-tcld-bg-1/35 flex-shrink-0"
+        className="tcld-disasm-toolbar flex h-8 min-w-0 flex-nowrap items-center gap-1.5 overflow-x-auto px-2 py-0 border-b border-tcld-border-dim/60 bg-tcld-bg-1/35 flex-shrink-0"
         data-instruction-presentation={panelMode}
       >
         {/* Three-mode segment — instructions / ir / source. Active pill carries
@@ -1546,7 +1652,7 @@ export function InstructionPanel({
                     : "Source-mapped view (decompile / original spans)"
               }
             >
-              {mode}
+              {DISASSEMBLY_MODE_LABELS[mode]}
             </button>
           ))}
         </div>
@@ -1566,7 +1672,7 @@ export function InstructionPanel({
               className="tcld-toolbar-pill is-disabled"
               title="Byte view requires backend raw byte ranges and bytes for each loaded instruction."
             >
-              byte view
+              Byte view
             </button>
           </>
         )}
@@ -1594,10 +1700,11 @@ export function InstructionPanel({
                   "tcld-toolbar-icon",
                   !freezeAutoScroll && "is-active",
                 )}
-                title={freezeAutoScroll ? "Auto-scroll frozen (click to unfreeze)" : "Auto-scroll active (click to freeze)"}
+                title={freezeAutoScroll ? "Follow selection is off — click to keep the selected instruction in view" : "Following the selection — click to stop scrolling with it"}
+                aria-label="Follow selection"
                 aria-pressed={!freezeAutoScroll}
               >
-                {freezeAutoScroll ? <Unlink2 size={12} /> : <Link2 size={12} />}
+                {freezeAutoScroll ? <Unlink2 size={14} aria-hidden /> : <Link2 size={14} aria-hidden />}
               </button>
               <button
                 onClick={onToggleJumpArrows}
@@ -1606,9 +1713,10 @@ export function InstructionPanel({
                   showJumpArrows && "is-active",
                 )}
                 title={showJumpArrows ? "Hide jump arrows (a)" : "Show jump arrows (a)"}
+                aria-label="Jump arrows"
                 aria-pressed={showJumpArrows}
               >
-                <GitBranch size={12} />
+                <GitBranch size={14} aria-hidden />
               </button>
               <div className="relative">
                 <button
@@ -1618,10 +1726,11 @@ export function InstructionPanel({
                     "tcld-toolbar-icon",
                     bookmarkCount > 0 && "is-active",
                   )}
-                  title={`Bookmarks (${bookmarkCount})`}
-                  aria-pressed={bookmarkCount > 0}
+                  title={bookmarkCount > 0 ? `Bookmarks (${bookmarkCount})` : "Bookmarks — none yet"}
+                  aria-label="Bookmarks"
+                  aria-expanded={showBookmarks}
                 >
-                  <Bookmark size={12} fill={bookmarkCount > 0 ? "currentColor" : "none"} strokeWidth={1.5} aria-hidden />
+                  <Bookmark size={14} fill={bookmarkCount > 0 ? "currentColor" : "none"} strokeWidth={1.5} aria-hidden />
                   {bookmarkCount > 0 && (
                     <span className="tcld-toolbar-icon-badge">{bookmarkCount}</span>
                   )}
@@ -1650,7 +1759,7 @@ export function InstructionPanel({
                   title="Toggle visible columns"
                   aria-label="Toggle columns"
                 >
-                  <Columns size={11} aria-hidden />
+                  <Columns size={14} aria-hidden />
                 </button>
                 {showColumnMenu && typeof document !== "undefined" && createPortal(
                   <div
@@ -1718,7 +1827,7 @@ export function InstructionPanel({
                 aria-label="Filter instructions"
                 aria-pressed={showFilterBar || filterActive}
               >
-                <Filter size={11} aria-hidden />
+                <Filter size={14} aria-hidden />
               </button>
             </div>
 
@@ -1736,7 +1845,7 @@ export function InstructionPanel({
                   aria-label="unfold all commands"
                   aria-pressed="true"
                 >
-                  <ChevronDown size={11} aria-hidden />
+                  <ChevronDown size={14} aria-hidden />
                   <span className="sr-only">unfold all</span>
                 </button>
               ) : (
@@ -1749,7 +1858,7 @@ export function InstructionPanel({
                   aria-label="fold all commands"
                   aria-pressed={false}
                 >
-                  <ChevronRight size={11} aria-hidden />
+                  <ChevronRight size={14} aria-hidden />
                   <span className="sr-only">fold all</span>
                 </button>
               )}
@@ -1766,13 +1875,13 @@ export function InstructionPanel({
 
             {filterActive && (
               <span className="tcld-toolbar-meta">
-                {filteredInstructionIndices.length}/{instructions.length} filt
+                {filteredInstructionIndices.length} of {instructions.length} shown
               </span>
             )}
 
             {!filterActive && jumpArrows.length > 0 && (
-              <span className="tcld-toolbar-meta hidden md:inline">
-                {jumpArrows.length} jmp
+              <span className="tcld-toolbar-meta" data-toolbar-optional>
+                {jumpArrows.length} {jumpArrows.length === 1 ? "jump" : "jumps"}
               </span>
             )}
           </>
@@ -1808,7 +1917,7 @@ export function InstructionPanel({
                 filterMode === "group"
                   ? "group #"
                   : filterMode === "opcode-category"
-                    ? "jump/load/store…"
+                    ? "flow, load, invoke…"
                     : "radius"
               }
               className="min-w-28 bg-tcld-bg-2 border border-tcld-border-dim rounded px-2 py-0.5 font-mono text-xs text-tcld-fg placeholder-tcld-fg-dim/60 outline-none"
@@ -1830,7 +1939,7 @@ export function InstructionPanel({
       {flatMode && (
         <div
           className="grid flex-shrink-0 gap-1 border-b border-tcld-border-dim px-3 py-1 font-mono text-label uppercase text-tcld-fg-dim"
-          style={{ gridTemplateColumns: "40px 70px 92px 80px minmax(0, 1fr)" }}
+          style={{ gridTemplateColumns: "40px 48px 128px 56px minmax(0, 1fr)" }}
           data-instructions-flat-header
         >
           <span data-instructions-column-header="index">#</span>
@@ -1856,6 +1965,21 @@ export function InstructionPanel({
 
       {/* Instruction list with jump arrow overlay (instructions / ir modes) */}
       {!sourceMode && (
+      <div className="relative flex min-h-0 flex-1 flex-col">
+      {stickyCommand && (
+        <button
+          type="button"
+          className="tcld-disasm-sticky"
+          data-disasm-sticky-group={stickyCommand.group}
+          title={`${stickyCommand.meta.detail}\nGo to the start of command ${stickyCommand.meta.label}`}
+          onClick={() => onSelect(stickyCommand.meta.startIdx)}
+        >
+          <span className="tcld-disasm-group-dot" style={{ background: stickyCommand.meta.color }} aria-hidden />
+          <span className="tcld-disasm-sticky-label">{stickyCommand.meta.label}</span>
+          <span className="tcld-disasm-sticky-source">{stickyCommand.meta.detail}</span>
+          <span className="tcld-disasm-sticky-lines">{stickyCommand.meta.sourceLabel}</span>
+        </button>
+      )}
       <div
         ref={scrollRef}
         className="relative flex-1 overflow-y-auto overflow-x-hidden min-h-0"
@@ -1876,7 +2000,7 @@ export function InstructionPanel({
           {/* Virtualized instruction rows */}
           {renderedRowCount === 0 && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <span className="font-mono text-xs text-tcld-fg-dim">no instructions match current filter</span>
+              <span className="font-ui text-control text-tcld-text-comment">No instructions match the current filter</span>
             </div>
           )}
           {virtualizer.getVirtualItems().map((virtualRow) => {
@@ -1940,19 +2064,23 @@ export function InstructionPanel({
                   hiddenInstructionCount={folded ? row.hiddenInstructionCount : Math.max(0, (foldRegion?.end ?? inst.idx + 1) - inst.idx)}
                   groupMeta={rowGroupMeta}
                   selectedGroup={selectedGroup != null && inst.group === selectedGroup}
-                  onToggleFold={() => {
-                    if (foldRegion) toggleInstructionFold(foldRegion.id);
-                  }}
+                  foldRegionId={foldRegion?.id}
+                  onToggleFold={toggleInstructionFold}
                   userComment={annotations.comments.get(inst.idx)}
                   isEditing={editingIdx === inst.idx}
                   onJumpClick={handleJumpClick}
-                  onStartEdit={() => handleStartEdit(inst.idx)}
+                  onStartEdit={handleStartEdit}
                   onSaveComment={handleSaveComment}
                   onCancelEdit={handleCancelEdit}
-                  flashIdx={flashIdx}
+                  isFlashing={flashIdx === inst.idx}
                   gutterPadding={gutterPadding}
                   columns={columns}
                   pcToInstIdx={pcToInstIdx}
+                  literals={literalsByIndex}
+                  incomingJumps={incomingJumpsByPc.get(inst.pc)}
+                  onJumpSourceClick={handleJumpSourceClick}
+                  addressDigits={addressDigits}
+                  opcodeWidthCh={opcodeWidthCh}
                   depth={inst.group != null ? (groupDepthByGroup.get(inst.group) ?? 0) : 0}
                 />
               </div>
@@ -1969,6 +2097,7 @@ export function InstructionPanel({
             />
           )}
         </div>
+      </div>
       </div>
       )}
 

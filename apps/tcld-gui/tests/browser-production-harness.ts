@@ -314,6 +314,11 @@ async function installBrowserTauriHarness(page: Page, options: BrowserFixtureOpt
           const loadPath = String(args?.path ?? fixtureOptions.loadPath ?? "/tmp/demo.tbc");
           return (testWindow.__TCLD_TEST_CREATE_LOAD_RESULT__ as (pathname: string) => unknown)(loadPath);
         }
+        if (cmd === "load_example") {
+          const id = String(args?.id);
+          const label = id === "for-break" ? "break.tcl" : `${id}.tcl`;
+          return (testWindow.__TCLD_TEST_CREATE_LOAD_RESULT__ as (pathname: string) => unknown)(label);
+        }
         if (cmd === "load_text") {
           // Browse-examples path: production sends inline Tcl source plus a
           // display label; the fixture answers with the same load-result shape

@@ -3,7 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import clsx from "clsx";
-import { useTcldStore } from "@/lib/store";
+import { AlertTriangle, CheckCircle2 } from "lucide-react";
+import { useTcldData } from "@/lib/store";
+import { commandRegistry, formatShortcutLabel } from "@/lib/command-registry";
+import { buildDiagnosticsSummaryModel } from "@/lib/panel-models";
 import { useAnchoredFloatingPosition } from "@/lib/floating-position";
 import type { ChordHint } from "@/lib/command-registry";
 
@@ -62,11 +65,11 @@ const CHIP_TONE_CLASSES: Record<ChipTone, string> = {
   chord:    "border-tcld-accent/50 bg-tcld-accent/12 text-tcld-accent",
   err:      "border-tcld-error/40 bg-tcld-error/10 text-tcld-error",
   warn:     "border-tcld-warning/40 bg-tcld-warning/10 text-tcld-warning",
-  info:     "border-tcld-border-dim bg-tcld-bg-2 text-tcld-text-inactive",
+  info:     "border-transparent bg-transparent text-tcld-text-inactive",
   "pin-a":  "border-tcld-warning/30 bg-tcld-warning/10 text-tcld-warning",
   "pin-b":  "border-tcld-number/30 bg-tcld-number/10 text-tcld-number",
   mark:     "border-tcld-border-dim bg-tcld-bg-2 text-tcld-text-inactive",
-  neutral:  "border-tcld-border-dim bg-tcld-bg-2 text-tcld-text-inactive",
+  neutral:  "border-transparent bg-transparent text-tcld-text-inactive",
 };
 
 export function StatusBar({
@@ -83,9 +86,18 @@ export function StatusBar({
   onJumpPinB,
   onJumpMark,
 }: StatusBarProps) {
-  const { data } = useTcldStore();
+  const { data } = useTcldData();
   const instructions = data?.instructions ?? [];
   const totalInstructions = instructions.length;
+  const diagnosticsSummary = buildDiagnosticsSummaryModel(data);
+  const reconstruction = data?.diagnostics?.reconstruction;
+  const healthLabel = diagnosticsSummary.status === "issues"
+    ? `${diagnosticsSummary.badge} diagnostic ${diagnosticsSummary.badge === "1" ? "signal" : "signals"}`
+    : reconstruction === "Approximation"
+      ? "Approximate reconstruction"
+      : reconstruction === "Failed"
+        ? "Reconstruction failed"
+        : "Strict reconstruction";
 
   // Build the chip set, then sort by precedence and clamp to MAX_VISIBLE_CHIPS.
   const chips: StatusChip[] = [];
@@ -94,7 +106,7 @@ export function StatusBar({
       id: "chord",
       tone: "chord",
       rank: 0,
-      label: `${chordHint.prefix} · ${chordHint.options.map((opt) => `${opt.key} ${opt.title}`).join("  ")}`,
+      label: `${formatShortcutLabel(chordHint.prefix)} · ${chordHint.options.map((opt) => `${formatShortcutLabel(opt.key)} ${opt.title}`).join("  ")}`,
     });
   }
   if (executionScopeMismatch) {
@@ -159,13 +171,29 @@ export function StatusBar({
           data-status-selected-instruction={String(selected)}
           data-status-instruction-count={String(totalInstructions)}
         >
-          {selected + 1}/{totalInstructions || 0}
+          {totalInstructions > 0 ? Math.min(Math.max(selected + 1, 1), totalInstructions) : 0}/{totalInstructions}
         </span>
+
+        {/* Left: analysis health for the open document — opens Issues. */}
+        {diagnosticsSummary.available && (
+          <button
+            type="button"
+            className="tcld-status-health"
+            data-status={diagnosticsSummary.status}
+            onClick={() => commandRegistry.execute("panel:diagnostics")}
+            title={`${diagnosticsSummary.message} — show Issues`}
+          >
+            {diagnosticsSummary.status === "issues"
+              ? <AlertTriangle size={13} aria-hidden />
+              : <CheckCircle2 size={13} aria-hidden />}
+            <span>{healthLabel}</span>
+          </button>
+        )}
 
         <div className="flex-1 min-w-0" />
 
         {/* Right: ranked chips, with overflow */}
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center justify-end gap-2 min-w-0 max-w-full">
           {markItems.length > 0 && (
             <MarksChip markItems={markItems} onJumpMark={onJumpMark} />
           )}
@@ -195,7 +223,7 @@ export function StatusBar({
 
 function StatusBarChip({ chip }: { chip: StatusChip }) {
   const className = clsx(
-    "inline-flex items-center px-2 h-6 rounded border font-mono text-meta leading-none whitespace-nowrap max-w-[40%] truncate transition-colors",
+    "inline-flex items-center px-2 h-6 rounded border font-ui text-caption leading-none whitespace-nowrap min-w-0 max-w-[min(36rem,60vw)] truncate transition-colors",
     CHIP_TONE_CLASSES[chip.tone],
     chip.onClick && "hover:brightness-125 cursor-pointer",
   );
@@ -229,10 +257,21 @@ function OverflowChip({ overflow }: { overflow: StatusChip[] }) {
   useEffect(() => {
     if (!open) return;
     const onDoc = (event: MouseEvent) => {
-      if (!wrapRef.current?.contains(event.target as Node)) setOpen(false);
+      if (!wrapRef.current?.contains(event.target as Node) && !popRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      triggerRef.current?.focus();
     };
     document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey, true);
+    };
   }, [open]);
 
   return (
@@ -241,7 +280,7 @@ function OverflowChip({ overflow }: { overflow: StatusChip[] }) {
         ref={triggerRef}
         type="button"
         onClick={() => setOpen((prev) => !prev)}
-        className="inline-flex items-center px-2 h-6 rounded border border-tcld-border-dim bg-tcld-bg-2 text-tcld-text-inactive font-mono text-meta leading-none hover:text-tcld-fg hover:border-tcld-border"
+        className="inline-flex items-center px-2 h-6 rounded border border-tcld-border-dim bg-tcld-bg-2 text-tcld-text-inactive font-ui text-caption leading-none hover:text-tcld-fg hover:border-tcld-border"
         title={`+${overflow.length} more status item${overflow.length === 1 ? "" : "s"}`}
         aria-label={`Show ${overflow.length} more status items`}
         aria-expanded={open}
@@ -270,9 +309,9 @@ function OverflowChip({ overflow }: { overflow: StatusChip[] }) {
               }}
               className="w-full text-left px-2 py-1.5 hover:bg-tcld-bg-highlight border-b border-tcld-border-dim last:border-b-0"
             >
-              <div className="font-mono text-xs text-tcld-fg">{chip.label}</div>
+              <div className="font-ui text-xs text-tcld-fg">{chip.label}</div>
               {chip.detail && chip.detail !== chip.label && (
-                <div className="font-mono text-label text-tcld-text-inactive mt-0.5">{chip.detail}</div>
+                <div className="font-ui text-label text-tcld-text-inactive mt-0.5">{chip.detail}</div>
               )}
             </button>
           ))}
@@ -293,10 +332,21 @@ function MarksChip({ markItems, onJumpMark }: { markItems: MarkItem[]; onJumpMar
   useEffect(() => {
     if (!open) return;
     const onDoc = (event: MouseEvent) => {
-      if (!wrapRef.current?.contains(event.target as Node)) setOpen(false);
+      if (!wrapRef.current?.contains(event.target as Node) && !popRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      triggerRef.current?.focus();
     };
     document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey, true);
+    };
   }, [open]);
 
   return (
@@ -305,16 +355,18 @@ function MarksChip({ markItems, onJumpMark }: { markItems: MarkItem[]; onJumpMar
         ref={triggerRef}
         type="button"
         onClick={() => setOpen((prev) => !prev)}
-        className="inline-flex items-center px-2 h-6 rounded border border-tcld-border-dim bg-tcld-bg-2 text-tcld-text-inactive font-mono text-meta leading-none hover:text-tcld-fg hover:border-tcld-border"
+        className="inline-flex items-center px-2 h-6 rounded border border-tcld-border-dim bg-tcld-bg-2 text-tcld-text-inactive font-ui text-caption leading-none hover:text-tcld-fg hover:border-tcld-border"
         title={`${markItems.length} saved mark${markItems.length === 1 ? "" : "s"}`}
         aria-label={`${markItems.length} saved marks`}
         aria-expanded={open}
       >
-        {markItems.length}m
+        {markItems.length} {markItems.length === 1 ? "mark" : "marks"}
       </button>
       {open && typeof document !== "undefined" && createPortal(
         <div
           ref={popRef}
+          role="menu"
+          aria-label="Saved marks"
           className="fixed z-[var(--z-context-menu)] min-w-64 max-w-96 overflow-auto bg-tcld-bg-1 border border-tcld-border rounded shadow-[var(--shadow-popover)]"
           style={{
             left: pos.left,
@@ -326,6 +378,7 @@ function MarksChip({ markItems, onJumpMark }: { markItems: MarkItem[]; onJumpMar
           {markItems.map((item) => (
             <button
               key={item.name}
+              role="menuitem"
               type="button"
               onClick={() => {
                 onJumpMark(item.name);

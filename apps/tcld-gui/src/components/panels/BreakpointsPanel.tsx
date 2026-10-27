@@ -5,6 +5,10 @@ import clsx from "clsx";
 import { Panel } from "./Panel";
 import { EmptyState, PanelEmpty } from "@/components/EmptyState";
 import { useDebugStore } from "@/lib/debug-store";
+import { useTcldData } from "@/lib/store";
+import { useLocationStore } from "@/lib/location-store";
+import { useShallow } from "zustand/react/shallow";
+import { resolveBreakpointTarget } from "@/lib/workflow-contracts";
 import { DEBUGGER_UNAVAILABLE_MESSAGE } from "@/lib/capabilities";
 import { Plus, X } from "lucide-react";
 import { ViewIcon } from "@/components/ViewIcon";
@@ -46,6 +50,16 @@ export const BreakpointsPanel = React.memo(function BreakpointsPanel({
   // useEffect was a redundant round-trip that lost a race with the event
   // stream.
   const { breakpoints, clearBreakpoint, clearAllBreakpoints, toggleBreakpoint, setBreakpoint, debuggerAvailable } = debug;
+  const { data } = useTcldData();
+  const { cursor } = useLocationStore(useShallow((s) => ({ cursor: s.cursor })));
+  // Same target the toolbar's toggle uses: the selected instruction's source
+  // line, else where execution stopped.
+  const addTarget = resolveBreakpointTarget({
+    data,
+    selectedInstructionIndex: cursor.instIdx,
+    stoppedAt: debug.stoppedAt,
+    scriptPath: debug.scriptPath,
+  });
 
   const [editingBp, setEditingBp] = useState<{
     file: string;
@@ -139,26 +153,32 @@ export const BreakpointsPanel = React.memo(function BreakpointsPanel({
            * (tcld-toolbar-pill / tcld-toolbar-meta) shared with the other
            * workbench surfaces.
            */}
-          <div className="flex h-6 min-w-0 items-center gap-2 border-b border-tcld-border-dim/60 bg-tcld-bg-1/35 px-2">
+          <div className="flex h-8 min-w-0 items-center gap-2 border-b border-tcld-border-dim/60 bg-tcld-bg-1/35 px-2">
             <span className="tcld-toolbar-meta">
               {activeCount} active · {breakpoints.length} total
             </span>
             <div className="flex-1" />
             <button
               type="button"
-              className="tcld-toolbar-pill"
-              onClick={() => undefined}
-              title="Add breakpoint from current cursor"
+              className={clsx("tcld-toolbar-pill gap-1", !addTarget && "is-disabled")}
+              disabled={!addTarget}
+              onClick={() => {
+                if (addTarget) void setBreakpoint(addTarget.file, addTarget.line);
+              }}
+              title={addTarget
+                ? `Add a breakpoint at ${addTarget.file.split("/").pop()}:${addTarget.line}`
+                : "Select an instruction with a source line to add a breakpoint"}
             >
-              <Plus size={10} aria-hidden /> add
+              <Plus size={12} aria-hidden /> Add
             </button>
             <button
               type="button"
-              className="tcld-toolbar-pill"
+              className={clsx("tcld-toolbar-pill", breakpoints.length === 0 && "is-disabled")}
+              disabled={breakpoints.length === 0}
               onClick={clearAllBreakpoints}
               title="Clear all breakpoints"
             >
-              clear all
+              Clear all
             </button>
           </div>
 

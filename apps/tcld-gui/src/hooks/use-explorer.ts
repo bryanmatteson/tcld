@@ -31,9 +31,16 @@ import { addRecentFile } from "@/lib/recent-files";
 import type { Annotations } from "@/lib/annotations";
 import { loadAnnotations, saveAnnotations, toggleBookmark, setComment, EMPTY_ANNOTATIONS } from "@/lib/annotations";
 import { useLocationStore } from "@/lib/location-store";
+import { useShallow } from "zustand/react/shallow";
 import { buildLocationIndex, computeScopeId } from "@/lib/location-index";
 import { parseOmniboxQuery, type OmniboxResult } from "@/lib/omnibox";
-import { isViewId } from "@/lib/view-registry";
+import { isViewId, VIEW_TITLES } from "@/lib/view-registry";
+
+/** Panel name as the user sees it in tabs and menus. */
+function viewTitle(id: string | null | undefined): string {
+  if (!id) return "panel";
+  return isViewId(id) ? VIEW_TITLES[id] : id;
+}
 
 // ─── State ───────────────────────────────────────────────────────
 
@@ -160,7 +167,14 @@ export function useExplorer() {
     cursor,
     goBack: goBackLocation,
     goForward: goForwardLocation,
-  } = useLocationStore();
+  } = useLocationStore(useShallow((s) => ({
+    setIndex: s.setIndex,
+    index: s.index,
+    jumpToInstruction: s.jumpToInstruction,
+    cursor: s.cursor,
+    goBack: s.goBack,
+    goForward: s.goForward,
+  })));
 
   const [state, setState] = useState<ExplorerState>(INITIAL_STATE);
 
@@ -393,7 +407,7 @@ export function useExplorer() {
           focusedViewId: type,
           expandedViewId: null,
           savedWorkspaceBeforeExpand: null,
-          statusMessage: `focused ${type}`,
+          statusMessage: `Showing ${viewTitle(type)}`,
           layoutDirty: s.layoutDirty,
         };
       }
@@ -413,7 +427,7 @@ export function useExplorer() {
             flyoutOpen: true,
             flyoutDismissed: false,
             focusedViewId: type,
-            statusMessage: `focused ${type} (flyout)`,
+            statusMessage: `Showing ${viewTitle(type)} in a flyout`,
           };
         }
       }
@@ -437,7 +451,7 @@ export function useExplorer() {
         focusedViewId: type,
         expandedViewId: null,
         savedWorkspaceBeforeExpand: null,
-        statusMessage: `added ${type}`,
+        statusMessage: `Opened ${viewTitle(type)}`,
         layoutDirty: true,
       };
     });
@@ -569,7 +583,7 @@ export function useExplorer() {
         mosaicNode: newTree,
         viewStacks: prunedStacks,
         focusedViewId,
-        statusMessage: `closed ${viewId}`,
+        statusMessage: `Closed ${viewTitle(viewId)}`,
         layoutDirty: true,
       };
     });
@@ -623,7 +637,7 @@ export function useExplorer() {
         mosaicNode: newTree,
         viewStacks: prunedStacks,
         focusedViewId: nextTarget.activeView,
-        statusMessage: `stacked into ${nextTarget.activeView}`,
+        statusMessage: `Moved into ${viewTitle(nextTarget.activeView)}`,
         layoutDirty: true,
       };
     });
@@ -727,7 +741,7 @@ export function useExplorer() {
           ...s,
           viewStacks: nextStacks,
           focusedViewId: viewId,
-          statusMessage: `reordered ${viewId}`,
+          statusMessage: `Reordered ${viewTitle(viewId)}`,
           layoutDirty: true,
         };
       }
@@ -753,7 +767,7 @@ export function useExplorer() {
         mosaicNode: nextTree,
         viewStacks: prunedStacks,
         focusedViewId: viewId,
-        statusMessage: `moved ${viewId}`,
+        statusMessage: `Moved ${viewTitle(viewId)}`,
         layoutDirty: true,
       };
     });
@@ -778,7 +792,7 @@ export function useExplorer() {
           ...s,
           viewStacks: nextStacks,
           focusedViewId: viewId,
-          statusMessage: `focused ${viewId}`,
+          statusMessage: `Showing ${viewTitle(viewId)}`,
           layoutDirty: s.layoutDirty,
         };
       }
@@ -810,7 +824,7 @@ export function useExplorer() {
         mosaicNode: nextTree,
         viewStacks: prunedStacks,
         focusedViewId: viewId,
-        statusMessage: `stacked ${viewId}`,
+        statusMessage: `Stacked ${viewTitle(viewId)}`,
         layoutDirty: true,
       };
     });
@@ -831,7 +845,7 @@ export function useExplorer() {
           ...s,
           viewStacks: nextStacks,
           focusedViewId: viewId,
-          statusMessage: `focused ${viewId}`,
+          statusMessage: `Showing ${viewTitle(viewId)}`,
           layoutDirty: s.layoutDirty,
         };
       }
@@ -881,7 +895,7 @@ export function useExplorer() {
         mosaicNode: nextTree,
         viewStacks: prunedStacks,
         focusedViewId: viewId,
-        statusMessage: `added ${viewId} to panel`,
+        statusMessage: `Added ${viewTitle(viewId)} to the panel`,
         layoutDirty: true,
         ...(flyoutCleared
           ? {
@@ -912,7 +926,7 @@ export function useExplorer() {
           ...s,
           viewStacks: nextStacks,
           focusedViewId: newViewId,
-          statusMessage: `focused ${newViewId}`,
+          statusMessage: `Showing ${viewTitle(newViewId)}`,
           layoutDirty: s.layoutDirty,
         };
       }
@@ -952,7 +966,7 @@ export function useExplorer() {
         mosaicNode: nextTree,
         viewStacks: prunedStacks,
         focusedViewId: newViewId,
-        statusMessage: `swapped ${oldViewId} for ${newViewId}`,
+        statusMessage: `Replaced ${viewTitle(oldViewId)} with ${viewTitle(newViewId)}`,
         layoutDirty: true,
       };
     });
@@ -1004,7 +1018,7 @@ export function useExplorer() {
           mosaicNode: newLeafId,
           viewStacks: nextStacks,
           focusedViewId: viewId,
-          statusMessage: `split ${viewId}`,
+          statusMessage: `Split ${viewTitle(viewId)}`,
           layoutDirty: true,
         };
       }
@@ -1027,7 +1041,7 @@ export function useExplorer() {
         mosaicNode: nextTree,
         viewStacks: prunedStacks,
         focusedViewId: viewId,
-        statusMessage: `split ${viewId}`,
+        statusMessage: `Split ${viewTitle(viewId)}`,
         layoutDirty: true,
       };
     });
@@ -1079,7 +1093,7 @@ export function useExplorer() {
         mosaicNode: nextTree,
         viewStacks: prunedStacks,
         focusedViewId: viewId,
-        statusMessage: `split ${viewId} to edge`,
+        statusMessage: `Moved ${viewTitle(viewId)} to the window edge`,
         layoutDirty: true,
       };
     });
@@ -1097,7 +1111,7 @@ export function useExplorer() {
         focusedViewId: leaves[0] ?? null,
         expandedViewId: null,
         savedWorkspaceBeforeExpand: null,
-        statusMessage: `layout: ${preset.label}`,
+        statusMessage: `Layout: ${preset.label}`,
         layoutDirty: false,
         activePresetId: preset.name,
         activePresetLabel: preset.label,
@@ -1116,7 +1130,7 @@ export function useExplorer() {
         focusedViewId: leaves[0] ?? null,
         expandedViewId: null,
         savedWorkspaceBeforeExpand: null,
-        statusMessage: `layout: ${saved.name}`,
+        statusMessage: `Layout: ${saved.name}`,
         layoutDirty: false,
         activePresetId: saved.id,
         activePresetLabel: saved.name,
@@ -1218,7 +1232,7 @@ export function useExplorer() {
             focusedViewId,
             expandedViewId: null,
             savedWorkspaceBeforeExpand: null,
-            statusMessage: `closed ${type}`,
+            statusMessage: `Closed ${viewTitle(type)}`,
             layoutDirty: true,
           };
         }
@@ -1230,7 +1244,7 @@ export function useExplorer() {
           focusedViewId: type,
           expandedViewId: null,
           savedWorkspaceBeforeExpand: null,
-          statusMessage: `focused ${type}`,
+          statusMessage: `Showing ${viewTitle(type)}`,
           layoutDirty: s.layoutDirty,
         };
       }
@@ -1253,7 +1267,7 @@ export function useExplorer() {
             flyoutOpen: true,
             flyoutDismissed: false,
             focusedViewId: type,
-            statusMessage: `focused ${type} (flyout)`,
+            statusMessage: `Showing ${viewTitle(type)} in a flyout`,
           };
         }
       }
@@ -1277,7 +1291,7 @@ export function useExplorer() {
         focusedViewId: type,
         expandedViewId: null,
         savedWorkspaceBeforeExpand: null,
-        statusMessage: `added ${type}`,
+        statusMessage: `Opened ${viewTitle(type)}`,
         layoutDirty: true,
       };
     });
@@ -1292,7 +1306,7 @@ export function useExplorer() {
       return {
         ...s,
         layoutDirty: false,
-        statusMessage: `saved layout: ${name}`,
+        statusMessage: `Saved layout “${name}”`,
       };
     });
   }, []);
@@ -1311,7 +1325,7 @@ export function useExplorer() {
       if (leafId) {
         stacks[leafId].activeView = next;
       }
-      return { ...s, focusedViewId: next, viewStacks: stacks, statusMessage: `focus: ${next}` };
+      return { ...s, focusedViewId: next, viewStacks: stacks, statusMessage: `Showing ${viewTitle(next)}` };
     });
   }, []);
 
@@ -1333,7 +1347,7 @@ export function useExplorer() {
       const next = stack.views[nextIdx];
       const stacks = cloneViewStacks(s.viewStacks);
       stacks[leafId].activeView = next;
-      return { ...s, focusedViewId: next, viewStacks: stacks, statusMessage: `tab: ${next}` };
+      return { ...s, focusedViewId: next, viewStacks: stacks, statusMessage: `Switched to ${viewTitle(next)}` };
     });
   }, []);
 
@@ -1485,7 +1499,7 @@ export function useExplorer() {
           viewStacks: s.savedWorkspaceBeforeExpand.stacks,
           expandedViewId: null,
           savedWorkspaceBeforeExpand: null,
-          statusMessage: `restored layout`,
+          statusMessage: `Restored layout`,
         };
       }
       // Expand focused panel to fill the whole workspace
@@ -1513,7 +1527,7 @@ export function useExplorer() {
           },
         },
         expandedViewId: focusedLeafId,
-        statusMessage: `maximized ${s.focusedViewId}`,
+        statusMessage: `Maximized ${viewTitle(s.focusedViewId)}`,
       };
     });
   }, []);
@@ -1590,7 +1604,7 @@ export function useExplorer() {
     setState((s) => ({
       ...s,
       showCommand: false,
-      statusMessage: `no jump target: ${result.label}`,
+      statusMessage: `No jump target for ${result.label}`,
     }));
   }, [addView, setSelected]);
 
@@ -1614,7 +1628,7 @@ export function useExplorer() {
         setState((s) => ({
           ...s,
           showCommand: false,
-          statusMessage: `unknown panel: ${type}`,
+          statusMessage: `Unknown panel “${type}”`,
         }));
         return;
       }
@@ -1645,7 +1659,7 @@ export function useExplorer() {
       return;
     }
 
-    setState((s) => ({ ...s, showCommand: false, statusMessage: `unknown: ${trimmed}` }));
+    setState((s) => ({ ...s, showCommand: false, statusMessage: `Unknown command “${trimmed}”` }));
   }, [
     addView,
     executeOmniboxResult,

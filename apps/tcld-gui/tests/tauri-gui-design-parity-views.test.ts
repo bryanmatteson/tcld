@@ -257,42 +257,29 @@ test("V6 Compare view is selector-backed without prototype pair rows or enabled 
   assert.doesNotMatch(panel, /set debug_types \[list main ctrl|foreach_start1|package provide fixture 1\.1|data-comparison-filter|data-compare-filter|comparison:filter/i);
 });
 
-test("V6 Inspector summary layout is selector-backed and preserves canonical panel navigation", () => {
+test("V6 Inspector describes only the selected instruction", () => {
   const detailPanel = readProductionSource("components/panels/DetailPanel.tsx");
   const surfaceContract = readProductionSource("lib/design-surface-contract.ts");
 
   for (const selector of [
     "data-inspector-summary=\"true\"",
-    // Section root + head toggle markers ride through the Subpanel
-    // primitive's sectionAttrs/headAttrs so the root marker stays in the
-    // DOM (with data-open) even while the section is collapsed.
-    "sectionAttrs={{ \"data-inspector-section\": id }}",
-    "headAttrs={{ \"data-inspector-section-toggle\": id }}",
-    "data-inspector-section-content={sectionId}",
-    "data-inspector-literals-summary=\"true\"",
-    "data-inspector-diagnostics-summary=\"true\"",
-    "data-inspector-action=\"show-all-literals\"",
-    "data-inspector-action=\"show-diagnostics\"",
-    "data-inspector-debug-summary=\"variables\"",
-    "data-inspector-debug-summary=\"stack\"",
-    "buildInspectorLiteralSummaryModel",
-    "buildInspectorDiagnosticsSummaryModel",
+    "data-inspector-identity=\"true\"",
+    "data-inspector-field={row.id}",
+    "buildDetailFields",
+    "describeControlFlow",
   ]) {
     assert.ok(detailPanel.includes(selector), `missing inspector selector or model marker ${selector}`);
   }
 
-  // The disclosure caret affordance moved into the Subpanel primitive head.
-  const subpanel = readProductionSource("components/primitives/Subpanel.tsx");
-  assert.match(subpanel, /\{open \? "▾" : "▸"\}/);
-  assert.match(subpanel, /aria-expanded=\{open\}/);
-  assert.match(subpanel, /\{\.\.\.sectionAttrs\}/);
-  assert.match(subpanel, /\{\.\.\.headAttrs\}/);
-
+  // Variables, call stack, diagnostics, and literals have their own views;
+  // the Inspector does not keep summary copies of them.
+  assert.doesNotMatch(
+    detailPanel,
+    /data-inspector-section|data-inspector-literals-summary|data-inspector-diagnostics-summary|data-inspector-debug-summary|useDebugStore|Subpanel/,
+  );
   assert.doesNotMatch(detailPanel, /package provide fixture Revision: 1\.1/, "inspector must not copy prototype literal sample data");
-  assert.match(detailPanel, /debugActive && debug\.variables\.length > 0/);
-  assert.match(detailPanel, /debugActive && debug\.stack\.length > 0/);
-  assert.match(surfaceContract, /id: "inspector\.literals-summary"[\s\S]*productionAction: "panel:literals"/);
-  assert.match(surfaceContract, /id: "inspector\.diagnostics-summary"[\s\S]*productionAction: "panel:diagnostics"/);
+  assert.match(surfaceContract, /id: "inspector\.selection"[\s\S]*productionFile: "components\/panels\/DetailPanel\.tsx"/);
+  assert.doesNotMatch(surfaceContract, /inspector\.literals-summary|inspector\.diagnostics-summary/);
 });
 
 test("V6 Issues View renders Diagnostics as selector-backed issue rows without prototype rows", () => {
@@ -435,9 +422,8 @@ test("V6 rendered Instructions, Source, Flow, Trace, and Console actions mutate 
     await app.page.click('[title="Filter instructions (⌘F /)"]');
     await app.page.select('[data-panel-id="instructions"] select', "group");
     await app.page.type('input[placeholder="group #"]', "0");
-    // Filter status reads "n/m filt" in the toolbar meta since the panel
-    // toolbar refresh.
-    await waitForText(app.page, '[data-panel-id="instructions"]', /\d+\/\d+ filt/);
+    // Filter status reads "n of m shown" in the toolbar meta.
+    await waitForText(app.page, '[data-panel-id="instructions"]', /\d+ of \d+ shown/);
 
     await app.page.click('[title="Fold all commands"]');
     await app.page.waitForFunction(() => [...document.querySelectorAll("[data-fold-disclosure='command']")].some((node) => node.getAttribute("data-fold-state") === "collapsed"));

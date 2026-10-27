@@ -25,8 +25,7 @@ import {
 import {
   buildComparisonPanelModel,
   buildDiagnosticsPanelModel,
-  buildInspectorDiagnosticsSummaryModel,
-  buildInspectorLiteralSummaryModel,
+  buildDiagnosticsSummaryModel,
   buildSymbolsPanelModel,
   buildProvenancePanelModel,
   buildSourcePanelModel,
@@ -190,19 +189,8 @@ test("active snapshot detail is derived from TcldData without backend global sta
   assert.match(detail?.value ?? "", /popped: \[x\]/);
 });
 
-test("inspector summaries are derived from loaded TcldData", () => {
+test("diagnostics summary is derived from loaded TcldData", () => {
   const data = fixtureData({
-    metadata: { ...fixtureData().metadata, literalCount: 8 },
-    literals: [
-      { idx: 0, kind: "XString", value: "package" },
-      { idx: 1, kind: "XString", value: "provide" },
-      { idx: 2, kind: "XString", value: "fixture" },
-      { idx: 3, kind: "XString", value: "Revision: 1.1" },
-      { idx: 4, kind: "Int", value: "1" },
-      { idx: 5, kind: "Int", value: "2" },
-      { idx: 6, kind: "XString", value: "tailcall" },
-      { idx: 7, kind: "XString", value: "puts" },
-    ],
     diagnostics: {
       ...fixtureData().diagnostics!,
       approximations: [{ kind: "UnresolvedInstruction", bytecodeRange: [0, 3], reason: "stack expression folded" }],
@@ -213,13 +201,7 @@ test("inspector summaries are derived from loaded TcldData", () => {
     },
   });
 
-  const literals = buildInspectorLiteralSummaryModel(data);
-  assert.equal(literals.count, 8);
-  assert.equal(literals.previewRows.length, 7);
-  assert.deepEqual(literals.previewRows[0], { index: 0, kind: "XString", value: "package" });
-  assert.equal(literals.hiddenCount, 1);
-
-  const diagnostics = buildInspectorDiagnosticsSummaryModel(data);
+  const diagnostics = buildDiagnosticsSummaryModel(data);
   assert.equal(diagnostics.available, true);
   assert.equal(diagnostics.status, "issues");
   assert.equal(diagnostics.rows.find((row) => row.kind === "approximation")?.count, 1);
@@ -228,7 +210,7 @@ test("inspector summaries are derived from loaded TcldData", () => {
   assert.equal(diagnostics.rows.find((row) => row.kind === "suppressed")?.status, "1 suppressed");
   assert.equal(diagnostics.rows.find((row) => row.kind === "pass")?.status, "1 changed · 1 disabled");
 
-  const cleanDiagnostics = buildInspectorDiagnosticsSummaryModel(fixtureData({
+  const cleanDiagnostics = buildDiagnosticsSummaryModel(fixtureData({
     diagnostics: {
       reconstruction: "Strict",
       recognizedConstructs: [],
@@ -243,7 +225,7 @@ test("inspector summaries are derived from loaded TcldData", () => {
   assert.equal(cleanDiagnostics.status, "ok");
   assert.equal(cleanDiagnostics.message, "no approximations · all opcodes reduced · all fast paths enabled");
 
-  const unavailableDiagnostics = buildInspectorDiagnosticsSummaryModel(fixtureData({ diagnostics: undefined }));
+  const unavailableDiagnostics = buildDiagnosticsSummaryModel(fixtureData({ diagnostics: undefined }));
   assert.equal(unavailableDiagnostics.status, "unavailable");
   assert.equal(unavailableDiagnostics.message, "diagnostics unavailable for this load");
 });

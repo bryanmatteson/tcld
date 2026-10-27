@@ -1,6 +1,6 @@
 "use client";
 
-import { useTcldStore } from "@/lib/store";
+import { useTcldData } from "@/lib/store";
 import { Panel } from "./Panel";
 import { ViewIcon } from "@/components/ViewIcon";
 import { EmptyState } from "@/components/EmptyState";
@@ -13,7 +13,7 @@ interface SummaryPanelProps {
 }
 
 export function SummaryPanel({ id, focused, onClose, onFocus }: SummaryPanelProps) {
-  const { data } = useTcldStore();
+  const { data } = useTcldData();
   const text = data?.summaryText ?? "";
 
   return (

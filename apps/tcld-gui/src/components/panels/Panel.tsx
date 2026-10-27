@@ -234,6 +234,167 @@ const AdaptivePanelTab = React.memo(function AdaptivePanelTab({
   );
 });
 
+type PanelTab = NonNullable<ReturnType<typeof usePanelMeta>["tabs"]>[number];
+
+interface PanelTabStripProps {
+  tabs: PanelTab[];
+  activeTabId?: ViewId;
+  leafId?: WorkspaceLeafId;
+  isAnyTabDragging: boolean;
+  onSelectTab?: (tabId: ViewId) => void;
+  onCloseTab?: (tabId: ViewId) => void;
+}
+
+/**
+ * Tab strip for a multi-view leaf. Its own memoized component so a panel body
+ * re-rendering (every cursor move, for most panels) leaves the tabs, sortable
+ * context, and drop slots untouched.
+ */
+const PanelTabStrip = React.memo(function PanelTabStrip({
+  tabs,
+  activeTabId,
+  leafId,
+  isAnyTabDragging,
+  onSelectTab,
+  onCloseTab,
+}: PanelTabStripProps) {
+  const tabStripRef = React.useRef<HTMLDivElement | null>(null);
+  const [tabStripWidth, setTabStripWidth] = React.useState(4096);
+  // Compute which tabs render inline at full/ellipsis mode and which spill
+  // into the +N overflow menu. Strategy:
+  //   1. Always keep the active tab inline.
+  //   2. Walk the remaining tabs in order; keep adding inline as long as
+  //      fitAdaptiveTabs reports `full` for every kept tab.
+  //   3. Anything that would degrade to iconCount/iconOnly goes to overflow.
+  // Reserves OVERFLOW_BUTTON_WIDTH at the end so the +N button itself fits.
+  const OVERFLOW_BUTTON_WIDTH = 56;
+  const { inlineModes, overflowTabs } = React.useMemo(() => {
+    const buildInputs = (subset: typeof tabs) => subset.map((tab) => ({
+      label: tab.label,
+      active: tab.id === activeTabId,
+      badge: tab.badge ?? null,
+      dot: tab.dot,
+    }));
+
+    // Start with all tabs inline at full; if everyone fits, no overflow.
+    const allInputs = buildInputs(tabs);
+    const allModes = fitAdaptiveTabs(allInputs, Math.max(0, tabStripWidth - 4));
+    if (allModes.every((mode) => mode === "full" || mode === "ellipsis")) {
+      return {
+        inlineModes: allModes.map((mode, i) => ({ tab: tabs[i], mode })),
+        overflowTabs: [] as typeof tabs,
+      };
+    }
+
+    // At least one would degrade — start removing the *last* non-active tab
+    // until the remaining set fits at full mode. Reserves space for the
+    // +N overflow button after the inline strip.
+    const reserved = OVERFLOW_BUTTON_WIDTH;
+    const inline: typeof tabs = [];
+    const overflow: typeof tabs = [];
+    const activeId = activeTabId;
+    // Active tab is always inline (first if not already at front).
+    const activeTab = tabs.find((t) => t.id === activeId);
+    const others = tabs.filter((t) => t.id !== activeId);
+    if (activeTab) inline.push(activeTab);
+
+    for (const tab of others) {
+      const candidate = [...inline, tab];
+      const modes = fitAdaptiveTabs(buildInputs(candidate), Math.max(0, tabStripWidth - 4 - reserved));
+      const fitsFull = modes.every((mode) => mode === "full" || mode === "ellipsis");
+      if (fitsFull) {
+        inline.push(tab);
+      } else {
+        overflow.push(tab);
+      }
+    }
+
+    // Restore original tab order in `inline` so the active tab doesn't jump.
+    const inlineSet = new Set(inline.map((t) => t.id));
+    const orderedInline = tabs.filter((t) => inlineSet.has(t.id));
+    const inlineModes = fitAdaptiveTabs(buildInputs(orderedInline), Math.max(0, tabStripWidth - 4 - reserved));
+    return {
+      inlineModes: orderedInline.map((tab, i) => ({ tab, mode: inlineModes[i] ?? "full" as AdaptiveTabMode })),
+      overflowTabs: overflow,
+    };
+  }, [activeTabId, tabStripWidth, tabs]);
+
+  React.useEffect(() => {
+    const node = tabStripRef.current;
+    if (!node) return;
+    const update = () => setTabStripWidth(Math.max(0, Math.floor(node.getBoundingClientRect().width)));
+    update();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", update);
+      return () => window.removeEventListener("resize", update);
+    }
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <span
+      ref={tabStripRef}
+      data-design-surface="adaptive-tab-bar"
+      className="tcld-inline-tabs is-bare"
+    >
+      {/*
+       * Sortable context for in-strip reorder. items[] must be the
+       * sortable ids in current order so dnd-kit/sortable can compute
+       * the FLIP-style slide animation as the user drags one tab past
+       * another. Cross-leaf moves still go through the tab-slot drop
+       * targets and the leaf-level handlers.
+       */}
+      <SortableContext
+        items={inlineModes.map(({ tab }) => tabHandle(leafId ?? "panel", tab.id))}
+        strategy={horizontalListSortingStrategy}
+      >
+        {/* Slot at index 0 — lets users drop a tab at the very start. */}
+        {leafId && (
+          <TabSlotDrop
+            leafId={leafId}
+            index={0}
+            visible={isAnyTabDragging}
+          />
+        )}
+        {inlineModes.map(({ tab, mode }, i) => (
+          <React.Fragment key={tab.id}>
+            <AdaptivePanelTab
+              leafId={leafId}
+              tab={tab}
+              active={tab.id === activeTabId}
+              mode={mode}
+              onSelect={onSelectTab}
+              onClose={onCloseTab}
+            />
+            {leafId && (
+              <TabSlotDrop
+                leafId={leafId}
+                index={i + 1}
+                visible={isAnyTabDragging}
+              />
+            )}
+          </React.Fragment>
+        ))}
+      </SortableContext>
+      {overflowTabs.length > 0 && (
+        <TabOverflowMenu
+          tabs={overflowTabs.map<OverflowTab>((tab) => ({
+            id: tab.id,
+            label: tab.label,
+            icon: tab.icon,
+            badge: tab.badge,
+            active: tab.id === activeTabId,
+          }))}
+          onSelect={(tabId) => onSelectTab?.(tabId)}
+          onClose={onCloseTab ? (tabId) => onCloseTab?.(tabId) : undefined}
+        />
+      )}
+    </span>
+  );
+});
+
 export const Panel = React.memo(React.forwardRef<HTMLDivElement, PanelProps>(
   (
     {
@@ -264,80 +425,6 @@ export const Panel = React.memo(React.forwardRef<HTMLDivElement, PanelProps>(
     const actions = actionsProp ?? meta.actions;
     const tabs = meta.tabs ?? EMPTY_PANEL_TABS;
     const hasTabs = tabs.length > 1;
-    const tabStripRef = React.useRef<HTMLDivElement | null>(null);
-    const [tabStripWidth, setTabStripWidth] = React.useState(4096);
-    // Compute which tabs render inline at full/ellipsis mode and which spill
-    // into the +N overflow menu. Strategy:
-    //   1. Always keep the active tab inline.
-    //   2. Walk the remaining tabs in order; keep adding inline as long as
-    //      fitAdaptiveTabs reports `full` for every kept tab.
-    //   3. Anything that would degrade to iconCount/iconOnly goes to overflow.
-    // Reserves OVERFLOW_BUTTON_WIDTH at the end so the +N button itself fits.
-    const OVERFLOW_BUTTON_WIDTH = 56;
-    const { inlineModes, overflowTabs } = React.useMemo(() => {
-      const buildInputs = (subset: typeof tabs) => subset.map((tab) => ({
-        label: tab.label,
-        active: tab.id === meta.activeTabId,
-        badge: tab.badge ?? null,
-        dot: tab.dot,
-      }));
-
-      // Start with all tabs inline at full; if everyone fits, no overflow.
-      const allInputs = buildInputs(tabs);
-      const allModes = fitAdaptiveTabs(allInputs, Math.max(0, tabStripWidth - 4));
-      if (allModes.every((mode) => mode === "full" || mode === "ellipsis")) {
-        return {
-          inlineModes: allModes.map((mode, i) => ({ tab: tabs[i], mode })),
-          overflowTabs: [] as typeof tabs,
-        };
-      }
-
-      // At least one would degrade — start removing the *last* non-active tab
-      // until the remaining set fits at full mode. Reserves space for the
-      // +N overflow button after the inline strip.
-      const reserved = OVERFLOW_BUTTON_WIDTH;
-      const inline: typeof tabs = [];
-      const overflow: typeof tabs = [];
-      const activeId = meta.activeTabId;
-      // Active tab is always inline (first if not already at front).
-      const activeTab = tabs.find((t) => t.id === activeId);
-      const others = tabs.filter((t) => t.id !== activeId);
-      if (activeTab) inline.push(activeTab);
-
-      for (const tab of others) {
-        const candidate = [...inline, tab];
-        const modes = fitAdaptiveTabs(buildInputs(candidate), Math.max(0, tabStripWidth - 4 - reserved));
-        const fitsFull = modes.every((mode) => mode === "full" || mode === "ellipsis");
-        if (fitsFull) {
-          inline.push(tab);
-        } else {
-          overflow.push(tab);
-        }
-      }
-
-      // Restore original tab order in `inline` so the active tab doesn't jump.
-      const inlineSet = new Set(inline.map((t) => t.id));
-      const orderedInline = tabs.filter((t) => inlineSet.has(t.id));
-      const inlineModes = fitAdaptiveTabs(buildInputs(orderedInline), Math.max(0, tabStripWidth - 4 - reserved));
-      return {
-        inlineModes: orderedInline.map((tab, i) => ({ tab, mode: inlineModes[i] ?? "full" as AdaptiveTabMode })),
-        overflowTabs: overflow,
-      };
-    }, [meta.activeTabId, tabStripWidth, tabs]);
-
-    React.useEffect(() => {
-      const node = tabStripRef.current;
-      if (!node) return;
-      const update = () => setTabStripWidth(Math.max(0, Math.floor(node.getBoundingClientRect().width)));
-      update();
-      if (typeof ResizeObserver === "undefined") {
-        window.addEventListener("resize", update);
-        return () => window.removeEventListener("resize", update);
-      }
-      const observer = new ResizeObserver(update);
-      observer.observe(node);
-      return () => observer.disconnect();
-    }, [hasTabs]);
 
     // Build the typed menu list shown in the unified ⋯ panel-header dropdown.
     // Order: upstream `actionItems` (e.g. swap view, add view) → separator →
@@ -417,64 +504,14 @@ export const Panel = React.memo(React.forwardRef<HTMLDivElement, PanelProps>(
         )}
       >
         {hasTabs ? (
-          <span
-            ref={tabStripRef}
-            data-design-surface="adaptive-tab-bar"
-            className="tcld-inline-tabs is-bare"
-          >
-            {/*
-             * Sortable context for in-strip reorder. items[] must be the
-             * sortable ids in current order so dnd-kit/sortable can compute
-             * the FLIP-style slide animation as the user drags one tab past
-             * another. Cross-leaf moves still go through the tab-slot drop
-             * targets and the leaf-level handlers.
-             */}
-            <SortableContext
-              items={inlineModes.map(({ tab }) => tabHandle(meta.leafId ?? "panel", tab.id))}
-              strategy={horizontalListSortingStrategy}
-            >
-              {/* Slot at index 0 — lets users drop a tab at the very start. */}
-              {meta.leafId && (
-                <TabSlotDrop
-                  leafId={meta.leafId}
-                  index={0}
-                  visible={!!meta.isAnyTabDragging}
-                />
-              )}
-              {inlineModes.map(({ tab, mode }, i) => (
-                <React.Fragment key={tab.id}>
-                  <AdaptivePanelTab
-                    leafId={meta.leafId}
-                    tab={tab}
-                    active={tab.id === meta.activeTabId}
-                    mode={mode}
-                    onSelect={meta.onSelectTab}
-                    onClose={meta.onCloseTab}
-                  />
-                  {meta.leafId && (
-                    <TabSlotDrop
-                      leafId={meta.leafId}
-                      index={i + 1}
-                      visible={!!meta.isAnyTabDragging}
-                    />
-                  )}
-                </React.Fragment>
-              ))}
-            </SortableContext>
-            {overflowTabs.length > 0 && (
-              <TabOverflowMenu
-                tabs={overflowTabs.map<OverflowTab>((tab) => ({
-                  id: tab.id,
-                  label: tab.label,
-                  icon: tab.icon,
-                  badge: tab.badge,
-                  active: tab.id === meta.activeTabId,
-                }))}
-                onSelect={(tabId) => meta.onSelectTab?.(tabId)}
-                onClose={meta.onCloseTab ? (tabId) => meta.onCloseTab?.(tabId) : undefined}
-              />
-            )}
-          </span>
+          <PanelTabStrip
+            tabs={tabs}
+            activeTabId={meta.activeTabId}
+            leafId={meta.leafId}
+            isAnyTabDragging={!!meta.isAnyTabDragging}
+            onSelectTab={meta.onSelectTab}
+            onCloseTab={meta.onCloseTab}
+          />
         ) : (
           <>
             {icon && (
@@ -559,7 +596,7 @@ export const Panel = React.memo(React.forwardRef<HTMLDivElement, PanelProps>(
               // Focused = third cue (rail + header tint + border). The
               // border emphasis catches any glance even when the panel
               // header is scrolled off-screen.
-              ? "border-tcld-border-focus"
+              ? "border-[color-mix(in_srgb,var(--accent)_45%,var(--line-2))]"
               // Static dim border for unfocused panels. Subtle but present
               // so the panel always reads as a separate surface.
               : "border-tcld-border-dim"

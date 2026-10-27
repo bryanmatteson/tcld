@@ -245,7 +245,7 @@ test("V3 Welcome open/drop/recents drive the rendered app store and workspace ch
 
     // Browse examples is now wired to the production backend: the button is
     // live, opens the bundled-examples dialog, and picking an example loads
-    // it through the real `load_text` IPC boundary into the workspace.
+    // it through the real `load_example` IPC boundary into the workspace.
     await recent.page.goto(`${recent.baseUrl}/`, { waitUntil: "networkidle0" });
     const browseExamples = await recent.page.evaluate(() => {
       const button = document.querySelector<HTMLButtonElement>('[data-testid="welcome-browse-examples"]');
@@ -264,10 +264,9 @@ test("V3 Welcome open/drop/recents drive the rendered app store and workspace ch
     await recent.page.click('[data-example-id="hello"]');
     await waitForVisibleText(recent.page, '[data-design-surface="top-tab-strip"]', /hello\.tcl/);
     const exampleInvokes = await recent.page.evaluate(() => window.__TCLD_TEST_INVOKES__ ?? []);
-    const loadTextCall = exampleInvokes.find((call) => call.cmd === "load_text");
-    assert.ok(loadTextCall, "picking an example must dispatch load_text through the Tauri boundary");
-    assert.equal(loadTextCall?.args?.label, "hello.tcl");
-    assert.match(String(loadTextCall?.args?.source ?? ""), /set msg/, "example source text reaches the backend");
+    const loadExampleCall = exampleInvokes.find((call) => call.cmd === "load_example");
+    assert.ok(loadExampleCall, "picking an example must dispatch load_example through the Tauri boundary");
+    assert.equal(loadExampleCall?.args?.id, "hello");
   } finally {
     await closeProductionPage(recent);
   }
@@ -518,71 +517,35 @@ test("V4 local panel view picker shows the all-views-used empty state and closes
   }
 });
 
-test("V6 Inspector summaries collapse, expand, and focus canonical panels", async () => {
+test("V6 Inspector follows the selected instruction without summary sections", async () => {
   const app = await withProductionPage("/", { dialogPath: "/tmp/inspector.tbc", debugPath: "/tmp/inspector-debug.tcl" });
   try {
     await app.page.click('[data-testid="welcome-open-file"]');
     await waitForVisibleText(app.page, '[data-design-surface="top-tab-strip"]', /inspector\.tbc/);
     await app.page.waitForSelector('[data-panel-id="detail"] [data-inspector-summary="true"]');
+    await waitForVisibleText(app.page, '[data-panel-id="detail"] [data-inspector-identity="true"]', /push1/);
 
-    // Accordion default state (Subpanel model): Detail open; Variables /
-    // Stack / Diagnostics stay collapsed until a paused debug session or
-    // real issues warrant them. The literals preview lives inside Detail.
-    const defaults = await app.page.$$eval("[data-panel-id='detail'] [data-inspector-section]", (sections) =>
-      sections.reduce<Record<string, string | null>>((state, section) => {
-        state[section.getAttribute("data-inspector-section") ?? ""] = section.getAttribute("data-open");
-        return state;
-      }, {}),
+    // Variables, call stack, diagnostics, and literals live in their own
+    // views; the Inspector carries no accordion sections or summary copies.
+    const summaryMarkers = await app.page.$$(
+      '[data-panel-id="detail"] :is([data-inspector-section], [data-inspector-literals-summary], [data-inspector-diagnostics-summary], [data-inspector-debug-summary])',
     );
-    assert.deepEqual(defaults, {
-      detail: "true",
-      variables: "false",
-      stack: "false",
-      diagnostics: "false",
-    });
+    assert.equal(summaryMarkers.length, 0);
 
-    await waitForVisibleText(app.page, '[data-panel-id="detail"] [data-inspector-literals-summary="true"]', /set/);
-    await waitForVisibleText(app.page, '[data-panel-id="detail"] [data-inspector-literals-summary="true"]', /x/);
+    await app.page.click('[data-panel-id="instructions"] [data-idx="2"]');
+    await waitForVisibleText(app.page, '[data-panel-id="detail"] [data-inspector-identity="true"]', /invokeStk1/);
+    await waitForVisibleText(app.page, '[data-panel-id="detail"] [data-inspector-field="control-flow"]', /Continues at 0x0003/);
+    await waitForVisibleText(app.page, '[data-panel-id="detail"] [data-inspector-field="stack-depth"]', /2 → 1 \(-1\)/);
+    await waitForVisibleText(app.page, '[data-panel-id="detail"] [data-inspector-field="pops"]', /"set", "x"/);
 
-    await app.page.click('[data-panel-id="detail"] [data-inspector-section-toggle="diagnostics"]');
-    await app.page.waitForSelector('[data-panel-id="detail"] [data-inspector-section-content="diagnostics"]');
-    await waitForVisibleText(app.page, '[data-panel-id="detail"] [data-inspector-diagnostics-summary="true"]', /Approximations/);
-    await waitForVisibleText(app.page, '[data-panel-id="detail"] [data-inspector-diagnostics-summary="true"]', /unsupportedDemo/);
+    await app.page.click('[data-panel-id="instructions"] [data-idx="3"]');
+    await waitForVisibleText(app.page, '[data-panel-id="detail"] [data-inspector-field="control-flow"]', /no following instruction/);
+    const idleText = await app.page.$eval('[data-panel-id="detail"]', (node) => node.textContent ?? "");
+    assert.doesNotMatch(idleText, /argv|sample_proc/, "inspector must not fabricate debug rows while idle");
 
-    // Keyboard contract: the section heads are real buttons — Enter
-    // collapses, Space re-expands, and the collapsed section root stays in
-    // the DOM carrying data-open="false".
-    await app.page.focus('[data-panel-id="detail"] [data-inspector-section-toggle="detail"]');
-    await app.page.keyboard.press("Enter");
-    await app.page.waitForSelector('[data-panel-id="detail"] [data-inspector-section="detail"][data-open="false"]');
-    await app.page.keyboard.press("Space");
-    await app.page.waitForSelector('[data-panel-id="detail"] [data-inspector-section="detail"][data-open="true"]');
-
-    await app.page.click('[data-panel-id="detail"] [data-inspector-action="show-all-literals"]');
-    await app.page.waitForSelector('[data-panel-id="literals"][data-design-surface="view-symbols"]');
-    await app.page.waitForSelector('[data-panel-id="literals"] [data-symbol-row][data-symbol-kind="var"][data-symbol-name="x"]');
-
-    await app.page.click('[data-tab-view-id="detail"]');
-    await app.page.waitForSelector('[data-panel-id="detail"]');
-    await app.page.click('[data-panel-id="detail"] [data-inspector-section-toggle="diagnostics"]');
-    await app.page.waitForSelector('[data-panel-id="detail"] [data-inspector-section-content="diagnostics"]');
-    await app.page.click('[data-panel-id="detail"] [data-inspector-action="show-diagnostics"]');
-    await app.page.waitForSelector('[data-panel-id="diagnostics"][data-design-surface="view-issues"]');
+    // Issues stays one tab away in the Inspector's pane.
+    await app.page.click('[data-tab-view-id="diagnostics"]');
     await waitForVisibleText(app.page, '[data-panel-id="diagnostics"]', /unsupportedDemo/);
-
-    // Without a debug session, Variables and Stack remain unavailable: collapsed
-    // by default, and when opened they show the explicit no-session empty
-    // state instead of fabricated variable/stack rows.
-    await app.page.click('[data-tab-view-id="detail"]');
-    await app.page.waitForSelector('[data-panel-id="detail"]');
-    await app.page.click('[data-panel-id="detail"] [data-inspector-section-toggle="variables"]');
-    await app.page.waitForSelector('[data-panel-id="detail"] [data-inspector-section="variables"][data-open="true"]');
-    await waitForVisibleText(app.page, '[data-panel-id="detail"] [data-inspector-section-content="variables"]', /No debug session active/);
-    await app.page.click('[data-panel-id="detail"] [data-inspector-section-toggle="stack"]');
-    await app.page.waitForSelector('[data-panel-id="detail"] [data-inspector-section="stack"][data-open="true"]');
-    await waitForVisibleText(app.page, '[data-panel-id="detail"] [data-inspector-section-content="stack"]', /No debug session active/);
-    const idleDebugText = await app.page.$eval('[data-panel-id="detail"]', (node) => node.textContent ?? "");
-    assert.doesNotMatch(idleDebugText, /argv|sample_proc/, "inspector must not fabricate debug rows while idle");
   } finally {
     await closeProductionPage(app);
   }
@@ -871,7 +834,8 @@ test("V4 cursor/location selection synchronizes mapped workspace views", async (
     await app.page.waitForFunction(() =>
       document.querySelector('[data-file-label="selection-sync.tbc"]')?.getAttribute("data-selected-inst") === "3",
     );
-    await waitForVisibleText(app.page, '[data-panel-id="detail"]', /instruction index:\s*3/);
+    // The Inspector identity card names the selected instruction (i003).
+    await waitForVisibleText(app.page, '[data-panel-id="detail"] [data-inspector-identity="true"]', /i003/);
 
     await app.page.click('[data-testid="panel-picker-trigger"]');
     await app.page.click('[data-panel-picker-option="provenance"]');
@@ -901,7 +865,7 @@ test("V4 cursor/location selection synchronizes mapped workspace views", async (
       document.querySelector('[data-file-label="selection-sync.tbc"]')?.getAttribute("data-active-line") === "0",
     );
     await app.page.click('[data-tab-view-id="detail"]');
-    await waitForVisibleText(app.page, '[data-panel-id="detail"]', /instruction index:\s*0/);
+    await waitForVisibleText(app.page, '[data-panel-id="detail"] [data-inspector-identity="true"]', /i000/);
     await app.page.click('[data-tab-view-id="comparison"]');
     await app.page.waitForSelector('[data-panel-id="comparison"] [data-source-map-index="0"][data-selected="true"]');
 

@@ -1182,10 +1182,99 @@ pub struct LoadResult {
 }
 
 pub fn do_load(path: &str) -> Result<LoadResult, String> {
+    let source = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(extension.as_str(), "tcl" | "tk" | "itcl" | "tm")
+        && tcld_syntax::extract_from_contents(&source).is_err()
+    {
+        let mut result = do_load_source(&source, path)?;
+        result.provenance.kind = "Path".into();
+        result.metadata.path = std::fs::canonicalize(path)
+            .unwrap_or_else(|_| path.into())
+            .display()
+            .to_string();
+        result.provenance.label = result.metadata.path.clone();
+        result.metadata.filename = std::path::Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(path)
+            .into();
+        return Ok(result);
+    }
     let snapshot =
         tcld_decompile::AnalysisSnapshot::from_input(tcld_decompile::LoadInput::path(path))
             .map_err(|e| e.to_string())?;
     Ok(snapshot_to_dto(&snapshot, "tree-sitter-tcl"))
+}
+
+/// Compile admitted source without evaluating it, then use the shared analysis
+/// snapshot. Unsupported Tcl forms retain the compiler's precise diagnostic.
+pub fn do_load_source(source: &str, label: &str) -> Result<LoadResult, String> {
+    if tcld_syntax::extract_from_contents(source).is_ok() {
+        let snapshot = tcld_decompile::AnalysisSnapshot::from_input(
+            tcld_decompile::LoadInput::tcl_source_text(source, label),
+        )
+        .map_err(|error| error.to_string())?;
+        return Ok(snapshot_to_dto(&snapshot, "tree-sitter-tcl"));
+    }
+    let image = tcld_compile::compile_source(
+        label.into(),
+        source.into(),
+        tcld_compile::CompileMode::Hybrid,
+    )
+    .map_err(|error| error.to_string())?;
+    let snapshot = tcld_decompile::AnalysisSnapshot::from_loaded(tcld_decompile::LoadedBytecode {
+        bytecode: image.top_level().bytecode.clone(),
+        provenance: tcld_decompile::LoadProvenance {
+            kind: tcld_decompile::LoadKind::TclSourceText,
+            label: label.into(),
+            normalized_path: None,
+            original_source_available: true,
+            debugger_sequence: None,
+        },
+        payload_text: String::new(),
+        original_source: Some(source.into()),
+    })
+    .map_err(|error| error.to_string())?;
+    let mut result = snapshot_to_dto(&snapshot, "tree-sitter-tcl");
+    result.metadata.tcl_version = "8.6".into();
+    Ok(result)
+}
+
+/// Compile each bundled example from source through the same path as edits.
+pub fn load_bundled_example(id: &str) -> Result<LoadResult, String> {
+    let (source, label) = match id {
+        "hello" => (
+            include_str!("../../tcld/tests/fixtures/hello.tcl"),
+            "hello.tcl",
+        ),
+        "proc" => (
+            include_str!("../../tcld/tests/fixtures/proc.tcl"),
+            "proc.tcl",
+        ),
+        "for-break" => (
+            include_str!("../../tcld/tests/fixtures/break.tcl"),
+            "break.tcl",
+        ),
+        "expr" => (
+            include_str!("../../tcld/tests/fixtures/expr.tcl"),
+            "expr.tcl",
+        ),
+        "foreach" => (
+            include_str!("../../tcld/tests/fixtures/foreach.tcl"),
+            "foreach.tcl",
+        ),
+        "catch" => (
+            include_str!("../../tcld/tests/fixtures/catch.tcl"),
+            "catch.tcl",
+        ),
+        _ => return Err(format!("Unknown bundled example: {id}")),
+    };
+    do_load_source(source, label)
 }
 
 pub fn do_load_from_payload(payload_text: &str, label: &str) -> Result<LoadResult, String> {

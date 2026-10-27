@@ -37,7 +37,7 @@ test("panel picker menu escapes header stacking contexts", () => {
   // document.body, and it sits on the tokenized context-menu z-layer (the
   // token must actually be defined, or the utility class silently resolves
   // to z-index:auto and the menu falls behind panel chrome).
-  assert.match(source, /createPortal\(menu, document\.body\)/);
+  assert.match(source, /createPortal\([\s\S]*document\.body/);
   assert.match(source, /z-\[var\(--z-context-menu\)\]/);
   assert.match(globals, /--z-context-menu:\s*\d+/);
 });

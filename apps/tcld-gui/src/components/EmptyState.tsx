@@ -83,13 +83,13 @@ export function EmptyState({
     >
       <div className="flex max-w-xs flex-col items-center gap-2 text-center">
         {icon && (
-          <div className="flex items-center justify-center text-2xl text-tcld-fg-dim opacity-60">
+          <div className="tcld-empty-icon" aria-hidden>
             {icon}
           </div>
         )}
-        <div className="text-meta font-mono text-tcld-fg-dim">{title}</div>
+        <div className="font-ui text-body font-medium text-tcld-fg-muted">{title}</div>
         {message && (
-          <div className="text-label font-mono text-tcld-fg-muted leading-snug">
+          <div className="font-ui text-meta leading-relaxed text-tcld-text-comment">
             {message}
           </div>
         )}
@@ -98,8 +98,8 @@ export function EmptyState({
             type="button"
             onClick={action.onClick}
             className={clsx(
-              "mt-1 rounded border border-tcld-border-dim px-2 py-1",
-              "text-label font-mono text-tcld-accent",
+              "mt-1 rounded-[var(--radius-button)] border border-tcld-border-dim px-2.5 py-1",
+              "font-ui text-meta font-medium text-tcld-accent",
               "transition-colors hover:border-tcld-border-focus hover:bg-tcld-accent/10",
             )}
           >
@@ -122,7 +122,7 @@ export function PanelEmpty({ children, className }: { children: React.ReactNode;
       data-empty-state="inline"
       className={clsx(
         "flex h-full w-full flex-1 items-center justify-center px-6 text-center",
-        "text-meta font-mono text-tcld-fg-dim",
+        "font-ui text-control text-tcld-text-comment",
         className,
       )}
     >

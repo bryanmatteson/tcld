@@ -49,8 +49,8 @@
   --color-tcld-success: #7adfb6;
 
   --spacing: 0.25rem;
-  --ui: "Geist", "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --mono: "Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+  --ui: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "Geist Mono", ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
   --font-ui: var(--ui);
   --font-mono: var(--mono);
   --type-tracking: 0;
@@ -104,6 +104,9 @@
    * consistent across screens.
    */
   --text-ui: 13px;
+  --text-body: 12.5px;    /* sans chrome copy: menus, navigation, forms */
+  --text-control: 12px;   /* control labels, filenames in panel headers */
+  --text-caption: 11.5px; /* status bar and secondary chrome text */
   --text-meta: 11px;
   --text-label: 10.5px;
   --text-tag: 9.5px;       /* tag/keyhint chips on welcome-screen tiles */
@@ -378,7 +381,7 @@ body {
   border-radius: var(--radius-panel);
   background: var(--bg-input);
   color: var(--fg-3);
-  font-family: var(--mono);
+  font-family: var(--ui);
   font-size: var(--type-status);
   padding: 10px 14px;
 }
@@ -400,20 +403,66 @@ body {
 
 .tcld-pref-card {
   display: grid;
-  gap: 6px;
-  border: 1px solid var(--line);
+  gap: 8px;
+  border: 1px solid var(--line-2);
   border-radius: var(--radius-card);
   background: var(--bg-panel-2);
   color: var(--fg);
-  font-family: var(--mono);
-  font-size: 11.5px;
-  padding: 12px;
+  font-family: var(--ui);
+  font-size: 12px;
+  padding: 8px 8px 10px;
   text-align: left;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.tcld-pref-card:hover {
+  border-color: var(--line);
 }
 
 .tcld-pref-card.is-active {
   border-color: var(--accent);
   background: var(--accent-bg);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.tcld-pref-card-name {
+  padding: 0 2px;
+  font-weight: 500;
+}
+
+.tcld-theme-swatch {
+  position: relative;
+  display: flex;
+  height: 54px;
+  padding: 8px;
+  overflow: hidden;
+  border: 1px solid;
+  border-radius: 6px;
+}
+
+.tcld-theme-swatch-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 8px;
+  border-radius: 4px;
+}
+
+.tcld-theme-swatch-panel > span {
+  height: 4px;
+  border-radius: 2px;
+}
+
+.tcld-theme-swatch-accent {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
 }
 
 .tcld-segment-button.is-active {
@@ -427,7 +476,7 @@ body {
   align-items: center;
   gap: 8px;
   color: var(--fg-2);
-  font-family: var(--mono);
+  font-family: var(--ui);
   font-size: 11.5px;
   padding-block: 4px;
 }
@@ -460,6 +509,13 @@ body {
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--color-tcld-bg-3) transparent;
+}
+
+input[type="checkbox"],
+input[type="radio"],
+input[type="range"],
+progress {
+  accent-color: var(--accent);
 }
 
 /* ─── Selection ───────────────────────────────────────────────── */
@@ -568,7 +624,7 @@ textarea:focus-visible,
   align-items: center;
   gap: 8px;
   padding: 4px 0;
-  font: 11px var(--mono);
+  font: 11px var(--ui);
 }
 
 .tcld-titlebar-trail {
@@ -659,7 +715,6 @@ textarea:focus-visible,
   cursor: default;
 }
 
-.tcld-product-tab,
 .tcld-open-file-tab,
 .tcld-no-file-tab,
 .tcld-tab-open-button,
@@ -673,19 +728,27 @@ textarea:focus-visible,
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  padding-left: 12px;
   color: var(--fg);
-  font: 700 12px var(--mono);
+  font: 600 12.5px var(--mono);
+  letter-spacing: 0.01em;
+}
+
+.tcld-titlebar-gap + .tcld-product-tab {
+  padding-left: 0;
 }
 
 .tcld-product-mark {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
   color: var(--accent-fg-on);
-  background: var(--accent);
+  background: linear-gradient(160deg, var(--accent), var(--accent-2));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 30%, transparent);
+  font-weight: 700;
 }
 
 .tcld-file-tabs {
@@ -706,7 +769,7 @@ textarea:focus-visible,
   border-bottom-color: var(--line);
   border-radius: var(--radius-tab-top);
   color: var(--fg-3);
-  font: 500 11.5px var(--mono);
+  font: 500 11.5px var(--ui);
 }
 
 .tcld-open-file-tab {
@@ -743,7 +806,7 @@ textarea:focus-visible,
   border-bottom: 2px solid transparent;
   background: transparent;
   color: var(--text-inactive);
-  font: 500 11.5px var(--mono);
+  font: 500 12px var(--ui);
   white-space: nowrap;
   /* Tabs are draggable — show the open-hand cursor at rest, the closed-hand
    * during the drag, and disable native text-selection so the label doesn't
@@ -798,22 +861,34 @@ textarea:focus-visible,
   background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 
+/* Open/new-document affordances are ghost buttons beside the tabs, not
+   tab-shaped placeholders. */
 .tcld-no-file-tab,
 .tcld-tab-open-button {
-  border-style: dashed;
+  align-self: center;
+  height: 26px;
+  border-color: transparent;
+  border-radius: var(--radius-button);
   background: transparent;
+  color: var(--fg-2);
 }
 
 .tcld-no-file-tab {
+  white-space: nowrap;
   max-width: min(32rem, 44vw);
   padding: 0 10px;
 }
 
+.tcld-no-file-tab > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .tcld-no-file-tab:hover,
 .tcld-tab-open-button:hover {
-  border-color: var(--accent);
+  border-color: transparent;
   color: var(--fg);
-  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
 }
 
 .tcld-no-file-tab:disabled,
@@ -832,8 +907,10 @@ textarea:focus-visible,
 
 .tcld-tab-open-button {
   justify-content: center;
-  width: 30px;
-  padding: 0;
+  width: auto;
+  min-width: 30px;
+  gap: 6px;
+  padding: 0 9px;
 }
 
 .tcld-tab-status-dot {
@@ -886,7 +963,10 @@ textarea:focus-visible,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
+  width: auto;
+  min-width: 28px;
+  gap: 6px;
+  padding: 0 8px;
   height: 28px;
   border: 0;
   border-radius: 6px;
@@ -1020,7 +1100,10 @@ textarea:focus-visible,
   gap: 8px;
 }
 
+/* The Run split button names itself; the cluster label stays in the DOM for
+   assistive tech and tests but no longer competes visually. */
 .tcld-actionbar-label {
+  display: none;
   color: var(--fg-3);
   font: 700 10px var(--mono);
   text-transform: uppercase;
@@ -1033,16 +1116,17 @@ textarea:focus-visible,
 .tcld-layout-menu-trigger {
   height: 28px;
   border-radius: var(--radius-button);
-  font-family: var(--mono);
+  font-family: var(--ui);
 }
 
 .tcld-layout-menu-label {
-  color: var(--fg-3);
-  font-weight: 700;
-  text-transform: uppercase;
+  color: var(--fg-4);
+  font-weight: 500;
+  text-transform: none;
 }
 
 .tcld-layout-menu-separator {
+  display: none;
   width: 3px;
   height: 3px;
   flex: 0 0 auto;
@@ -1078,7 +1162,7 @@ textarea:focus-visible,
   align-items: start;
   padding: 7px 10px;
   color: var(--fg);
-  font: 12px var(--mono);
+  font: 12px var(--ui);
   text-align: left;
 }
 
@@ -1146,22 +1230,33 @@ textarea:focus-visible,
 }
 
 .tcld-segmented-control {
-  display: flex;
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--color-tcld-border) 62%, transparent);
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line-2);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--color-tcld-bg-2) 76%, transparent);
+  background: var(--bg-input);
 }
 
 .tcld-segment-button {
-  border: 0;
-  border-radius: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
   background: transparent;
   box-shadow: none;
+  color: var(--fg-2);
+  cursor: pointer;
 }
 
-.tcld-segment-button + .tcld-segment-button {
-  border-left: 1px solid var(--color-tcld-border-dim);
+.tcld-segment-button:hover:not(.is-active) {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  color: var(--fg);
+}
+
+.tcld-segmented-control .tcld-segment-button.is-active {
+  border-color: var(--line);
+  background: var(--bg-elev);
+  color: var(--fg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
 }
 
 .tcld-launch-controls {
@@ -1186,7 +1281,7 @@ textarea:focus-visible,
   border: 0;
   background: transparent;
   color: var(--fg);
-  font: 12px var(--mono);
+  font: 12px var(--ui);
   outline: none;
 }
 
@@ -1244,7 +1339,7 @@ textarea:focus-visible,
   max-width: 210px;
   overflow: hidden;
   color: var(--fg-4);
-  font: 10px var(--mono);
+  font: 10px var(--ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1281,7 +1376,7 @@ textarea:focus-visible,
   background: color-mix(in srgb, var(--accent) 16%, var(--bg-input));
   border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
   overflow: hidden;
-  font: 12px var(--mono);
+  font: 12px var(--ui);
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 
@@ -1365,7 +1460,7 @@ textarea:focus-visible,
   background: var(--bg-panel);
   /* Token-driven popover elevation. */
   box-shadow: var(--shadow-popover);
-  font: 12px var(--mono);
+  font: 12px var(--ui);
   color: var(--fg);
 }
 
@@ -1475,9 +1570,11 @@ textarea:focus-visible,
 }
 
 .tcld-welcome {
+  container: welcome / inline-size;
   display: grid;
   grid-template-columns: minmax(420px, 1fr) 380px;
   min-height: 0;
+  overflow: auto;
   background:
     radial-gradient(1200px 600px at 30% 0%, color-mix(in srgb, var(--accent-bg) 45%, transparent) 0%, transparent 60%),
     var(--bg-window);
@@ -1489,9 +1586,99 @@ textarea:focus-visible,
   align-items: flex-start;
   justify-content: center;
   min-width: 0;
-  padding: 0 60px 40px 80px;
+  padding: 48px clamp(28px, 5vw, 80px);
   border-right: 1px solid var(--line-2);
   transition: background 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease;
+}
+
+/* Hero = intro column + (when there is room) a decorative linked-view
+ * preview, so wide windows don't leave a dead band between the CTAs and
+ * the recent-files column. */
+.tcld-welcome-intro {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  max-width: 560px;
+}
+
+.tcld-welcome-preview {
+  display: none;
+}
+
+@container welcome (min-width: 1380px) {
+  .tcld-welcome-hero {
+    flex-direction: row;
+    align-items: center;
+    gap: clamp(40px, 4cqw, 80px);
+  }
+
+  .tcld-welcome-intro {
+    flex: 0 1 520px;
+  }
+
+  .tcld-welcome-preview {
+    display: grid;
+    flex: 1 1 0;
+    max-width: 560px;
+    gap: 12px;
+    padding: 14px;
+    border: 1px solid var(--line-2);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--bg-panel) 80%, transparent);
+    box-shadow: var(--shadow-panel), 0 24px 60px -32px color-mix(in srgb, var(--accent) 30%, transparent);
+    font: 12px/1 var(--mono);
+    pointer-events: none;
+    user-select: none;
+  }
+}
+
+.tcld-welcome-preview-pane {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--bg-window);
+}
+
+.tcld-welcome-preview-title {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line-2);
+  color: var(--fg-3);
+  font: 500 11px var(--ui);
+}
+
+.tcld-welcome-preview-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 24px;
+  padding: 0 12px 0 0;
+  color: var(--fg-2);
+  white-space: pre;
+  box-shadow: inset 2px 0 0 transparent;
+}
+
+.tcld-welcome-preview-line[data-active] {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--fg);
+}
+
+.tcld-welcome-preview-gutter {
+  width: 44px;
+  flex-shrink: 0;
+  text-align: right;
+  color: var(--fg-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.tcld-welcome-preview-line[data-active] .tcld-welcome-preview-gutter {
+  color: var(--fg-2);
+}
+
+.tcld-welcome-preview-arg {
+  color: var(--str);
 }
 
 .tcld-welcome-kicker {
@@ -1510,10 +1697,10 @@ textarea:focus-visible,
   color: var(--fg);
   /* Pinned to --text-welcome (40px) — the canonical hero size from the
      tcld-design-system. The previous hardcoded 40px duplicated that. */
-  font-family: var(--mono);
+  font-family: var(--ui);
   font-size: var(--text-welcome);
   font-weight: 700;
-  line-height: 1;
+  line-height: 1.12;
   letter-spacing: 0;
 }
 
@@ -1525,23 +1712,32 @@ textarea:focus-visible,
 }
 
 .tcld-welcome-actions {
-  display: flex;
-  align-items: center;
+  display: grid;
+  width: 100%;
+  max-width: 490px;
   gap: 10px;
 }
 
 .tcld-hero-action {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  height: 38px;
+  gap: 14px;
+  min-height: 70px;
+  width: 100%;
+  text-align: left;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 0 16px;
+  padding: 14px 18px;
   font: 600 13px var(--font-ui);
   cursor: pointer;
   transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
 }
+
+.tcld-hero-action > svg { flex-shrink: 0; }
+.tcld-hero-action > svg:last-child { margin-left: auto; opacity: 0.7; }
+.tcld-hero-action > span { display: grid; gap: 5px; min-width: 0; }
+.tcld-hero-action strong { font-size: 14px; font-weight: 600; }
+.tcld-hero-action small { font-size: 12px; font-weight: 400; line-height: 1.45; opacity: 0.85; }
 
 .tcld-hero-action-primary {
   border-color: transparent;
@@ -1574,7 +1770,7 @@ textarea:focus-visible,
   border-radius: 0;
   background: transparent;
   color: var(--fg-4);
-  font: 11px var(--mono);
+  font: 11px var(--ui);
   letter-spacing: 0.01em;
   transition: color 0.14s ease;
 }
@@ -1619,7 +1815,7 @@ textarea:focus-visible,
   border: 0;
   background: none;
   color: var(--fg-3);
-  font: 11px var(--mono);
+  font: 11px var(--ui);
   cursor: pointer;
 }
 
@@ -1674,12 +1870,23 @@ textarea:focus-visible,
   align-items: baseline;
   gap: 8px;
   color: var(--fg);
-  font: 600 12.5px var(--mono);
+  font: 600 12.5px var(--ui);
 }
 
 .tcld-recent-name span {
   color: var(--fg-4);
-  font: 400 10px var(--mono);
+  font: 400 10px var(--ui);
+}
+
+.tcld-recent-name strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: inherit;
+}
+
+.tcld-recent-name > span {
+  flex-shrink: 0;
 }
 
 .tcld-recent-path {
@@ -1695,7 +1902,7 @@ textarea:focus-visible,
 .tcld-recent-meta {
   flex-shrink: 0;
   color: var(--fg-4);
-  font: 10.5px var(--mono);
+  font: 10.5px var(--ui);
   text-align: right;
 }
 
@@ -1705,10 +1912,115 @@ textarea:focus-visible,
 }
 
 .tcld-recent-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
   padding: 24px 12px;
-  color: var(--fg-4);
-  font: 12px var(--mono);
+  color: var(--fg-3);
+  font: 12px/1.6 var(--font-ui);
 }
+
+.tcld-recent-empty strong { color: var(--fg-2); font-weight: 500; }
+
+.tcld-chrome-label { font: 500 11px var(--font-ui); white-space: nowrap; }
+.tcld-panel-picker-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-button);
+  background: var(--bg-panel);
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.tcld-panel-picker-trigger:hover,
+.tcld-panel-picker-trigger[aria-expanded="true"] { background: var(--bg-highlight); border-color: var(--border-focus); color: var(--fg); }
+.tcld-panel-picker {
+  display: flex;
+  flex-direction: column;
+  width: min(380px, calc(100vw - 24px));
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-popover);
+}
+.tcld-panel-picker-search {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--fg-3);
+}
+.tcld-panel-picker-search input { min-width: 0; width: 100%; outline: none; background: transparent; color: var(--fg); font: 13px var(--font-ui); }
+.tcld-panel-picker-search kbd { font: 10px var(--mono); }
+.tcld-panel-picker-list { overflow-y: auto; min-height: 0; padding: 5px; }
+.tcld-panel-picker-option {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 12px;
+  padding: 11px 9px;
+  border-radius: 5px;
+  text-align: left;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.tcld-panel-picker-option:hover,
+.tcld-panel-picker-option:focus-visible { background: var(--bg-highlight); color: var(--fg); outline: 1px solid var(--border-focus); outline-offset: -1px; }
+.tcld-panel-picker-option > svg { color: var(--accent); flex-shrink: 0; }
+.tcld-panel-picker-option > span:first-of-type { min-width: 0; flex: 1; display: grid; gap: 4px; }
+.tcld-panel-picker-option strong { font: 500 12px var(--font-ui); }
+.tcld-panel-picker-option small { font: 11px/1.4 var(--font-ui); color: var(--fg-3); }
+.tcld-panel-picker-state { display: inline-flex; align-items: center; gap: 3px; color: var(--fg-3); font: 10px var(--font-ui); }
+.tcld-picker-empty { padding: 24px 16px; color: var(--fg-3); font: 12px/1.6 var(--font-ui); overflow-wrap: anywhere; }
+.tcld-palette-heading { padding: 10px 16px 6px; color: var(--fg-3); font: 11px var(--font-ui); }
+@media (max-width: 1100px) {
+  .tcld-chrome-label { display: none; }
+  .tcld-layout-select { min-width: 150px; }
+  .tcld-actionbar-label { display: none; }
+}
+
+/* The palette dialog is the focus context; its borderless search field
+   should not draw a second ring inside the header. */
+.tcld-command-palette input:focus-visible {
+  outline: none;
+}
+
+.tcld-palette-footer {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line-2);
+  color: var(--fg-3);
+  font: 11px var(--ui);
+}
+
+.tcld-load-notice {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line-2);
+  background: var(--bg-panel);
+  color: var(--accent);
+  font: 12px/1.5 var(--font-ui);
+}
+
+.tcld-load-notice > svg { flex-shrink: 0; }
+.tcld-load-notice > span { min-width: 0; overflow-wrap: anywhere; }
+.tcld-load-notice > button { margin-left: auto; padding: 6px; border-radius: 4px; }
+.tcld-load-error { color: var(--err); }
+.tcld-welcome-error { max-width: 100%; overflow-wrap: anywhere; }
 
 .tcld-welcome-tips {
   display: flex;
@@ -1724,7 +2036,7 @@ textarea:focus-visible,
   align-items: center;
   gap: 10px;
   color: var(--fg-3);
-  font: 11px var(--mono);
+  font: 11px var(--ui);
 }
 
 .tcld-welcome-tip span {
@@ -1767,18 +2079,18 @@ textarea:focus-visible,
 .panel-root.is-focused::before {
   content: "";
   position: absolute;
-  left: 0;
-  top: 6px;
-  bottom: 6px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
+  left: -1px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
   background: var(--accent);
   pointer-events: none;
   z-index: 1;
 }
 
 .panel-root.is-focused .panel-header {
-  background: color-mix(in srgb, var(--accent) 14%, var(--bg-window));
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-window));
 }
 
 /*
@@ -1840,7 +2152,7 @@ textarea:focus-visible,
   background: color-mix(in srgb, var(--bg-input) 58%, transparent);
   color: var(--fg-3);
   padding: 0 7px;
-  font: 10.5px var(--mono);
+  font: 10.5px var(--ui);
   white-space: nowrap;
   cursor: pointer;
   transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
@@ -1957,7 +2269,7 @@ textarea:focus-visible,
   background: transparent;
   color: var(--fg-2);
   padding: 6px 7px;
-  font: 11px var(--mono);
+  font: 11px var(--ui);
   text-align: left;
   cursor: pointer;
 }
@@ -1970,7 +2282,7 @@ textarea:focus-visible,
 .tcld-panel-view-menu-empty {
   padding: 12px 7px 14px;
   color: var(--fg-4);
-  font: 11px var(--mono);
+  font: 11px var(--ui);
   text-align: center;
 }
 
@@ -2050,43 +2362,40 @@ textarea:focus-visible,
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
-  min-height: 26px;
-  border-bottom: 1px solid color-mix(in srgb, var(--line-2) 70%, transparent);
+  min-height: 34px;
+  border-bottom: 1px solid var(--line-2);
   background: color-mix(in srgb, var(--bg-window) 60%, transparent);
   padding: 4px 8px;
 }
 
 .tcld-source-toolbar button,
-.tcld-console-action,
 .tcld-breakpoint-add,
 .tcld-breakpoint-clear,
 .tcld-flow-icon-button,
 .tcld-flow-segment {
   border: 0;
-  border-radius: 4px;
+  border-radius: 5px;
   background: transparent;
-  color: var(--fg-3);
-  font: 10.5px var(--mono);
+  color: var(--fg-2);
+  font: 500 11.5px var(--ui);
   cursor: pointer;
   transition: background 0.1s ease, color 0.1s ease;
 }
 
 .tcld-source-toolbar button:hover,
-.tcld-console-action:hover,
 .tcld-breakpoint-add:hover,
 .tcld-breakpoint-clear:hover,
 .tcld-flow-icon-button:hover,
 .tcld-flow-segment:hover {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
   color: var(--fg);
 }
 
 .tcld-source-toolbar button,
-.tcld-console-action,
 .tcld-breakpoint-add,
 .tcld-breakpoint-clear {
-  height: 20px;
-  padding: 0 6px;
+  height: 24px;
+  padding: 0 8px;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -2244,7 +2553,7 @@ textarea:focus-visible,
   align-items: center;
   justify-content: center;
   color: var(--fg-4);
-  font: 12px var(--mono);
+  font: 12px var(--ui);
 }
 
 .tcld-console-chip {
@@ -2322,19 +2631,15 @@ textarea:focus-visible,
   outline: 0;
   background: transparent;
   color: var(--fg);
-  font: 11px var(--mono);
+  font: 11px var(--ui);
 }
 
 .tcld-console-filter span,
 .tcld-console-footer {
   color: var(--fg-4);
-  font: 10.5px var(--mono);
+  font: 10.5px var(--ui);
 }
 
-.tcld-console-action-active {
-  background: var(--accent-bg);
-  color: var(--accent);
-}
 
 .tcld-console-output {
   min-height: 0;
@@ -2552,7 +2857,7 @@ textarea:focus-visible,
 
 .tcld-breakpoints-toolbar {
   color: var(--fg-3);
-  font: 11px var(--mono);
+  font: 11px var(--ui);
 }
 
 .tcld-breakpoint-add {
@@ -2696,7 +3001,7 @@ textarea:focus-visible,
   outline: 0;
   background: transparent;
   color: var(--fg);
-  font: 11px var(--mono);
+  font: 11px var(--ui);
 }
 
 .tcld-variables-toolbar button,
@@ -2783,12 +3088,12 @@ textarea:focus-visible,
   white-space: nowrap;
 }
 
+/* Sparkline slot: reserved for value history. The debugger does not report
+   history yet, so the slot stays empty instead of drawing a placeholder line
+   that reads as real data. */
 .tcld-variable-sparkline {
-  width: 26px;
+  width: 0;
   height: 8px;
-  border-bottom: 1px solid var(--accent);
-  border-radius: 999px;
-  opacity: 0.45;
 }
 
 .tcld-variable-type {
@@ -2831,9 +3136,10 @@ textarea:focus-visible,
   border: 1px solid var(--line-2);
   border-radius: 999px;
   background: var(--bg-input);
-  color: var(--fg-3);
-  padding: 2px 7px;
-  font: 10.5px var(--mono);
+  color: var(--fg-2);
+  padding: 2px 8px;
+  font: 500 11px var(--ui);
+  white-space: nowrap;
 }
 
 .tcld-flow-icon-button {
@@ -2851,9 +3157,10 @@ textarea:focus-visible,
 }
 
 .tcld-flow-zoom {
-  min-width: 34px;
-  color: var(--fg-3);
-  font: 10.5px var(--mono);
+  min-width: 40px;
+  color: var(--fg-2);
+  font: 11px var(--mono);
+  font-variant-numeric: tabular-nums;
   text-align: center;
 }
 
@@ -2870,8 +3177,8 @@ textarea:focus-visible,
 }
 
 .tcld-flow-legend-item {
-  gap: 4px;
-  font: 9px var(--mono);
+  gap: 5px;
+  font: 10.5px var(--ui);
 }
 
 .tcld-flow-status {
@@ -2880,9 +3187,10 @@ textarea:focus-visible,
   gap: 12px;
   border-top: 1px solid var(--line);
   background: var(--bg-panel);
-  color: var(--fg-3);
+  color: var(--fg-2);
   padding: 5px 10px;
-  font: 10.5px var(--mono);
+  font: 11px var(--ui);
+  font-variant-numeric: tabular-nums;
 }
 
 .tcld-flow-status span:first-child {
@@ -2954,7 +3262,7 @@ textarea:focus-visible,
   background: transparent;
   border: none;
   outline: none;
-  font: 11px var(--mono);
+  font: 11px var(--ui);
   color: var(--fg);
 }
 
@@ -3322,7 +3630,7 @@ textarea:focus-visible,
   padding: 6px 10px;
   border-bottom: 1px solid var(--line);
   background: var(--bg-input);
-  font: 11px var(--mono);
+  font: 11px var(--ui);
   color: var(--fg-3);
 }
 
@@ -3466,14 +3774,14 @@ textarea:focus-visible,
 .tcld-symbols-empty {
   padding: 24px;
   text-align: center;
-  font: 11px var(--mono);
+  font: 11px var(--ui);
   color: var(--fg-3);
 }
 
 .tcld-symbols-substitute {
   border-top: 1px solid var(--line-2);
   padding: 6px 10px;
-  font: 10px var(--mono);
+  font: 10px var(--ui);
   color: var(--fg-4);
 }
 
@@ -3492,7 +3800,7 @@ textarea:focus-visible,
 
 /* Polish: align decompile editor toolbar with rest */
 .decompile-editor-toolbar {
-  min-height: 26px;
+  min-height: 34px;
   background: color-mix(in srgb, var(--color-tcld-bg-1) 55%, transparent) !important;
   border-bottom: 1px solid color-mix(in srgb, var(--color-tcld-border-dim) 50%, transparent) !important;
 }
@@ -3506,12 +3814,41 @@ textarea:focus-visible,
   flex-shrink: 0;
 }
 
+/* Mode switches render as one segmented control; the selected segment lifts
+   onto the elevated surface instead of washing the whole pill in accent. */
+.tcld-toolbar-group[role="tablist"] {
+  gap: 0;
+  padding: 2px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--bg-input);
+}
+
+.tcld-toolbar-group[role="tablist"] .tcld-toolbar-pill {
+  height: 20px;
+  border-color: transparent;
+  border-radius: 4px;
+  background: transparent;
+}
+
+.tcld-toolbar-group[role="tablist"] .tcld-toolbar-pill:hover:not(.is-disabled) {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+
+.tcld-toolbar-group[role="tablist"] .tcld-toolbar-pill.is-active {
+  border-color: var(--line);
+  background: var(--bg-elev);
+  color: var(--fg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
 .tcld-toolbar-divider {
   display: inline-block;
   width: 1px;
-  height: 14px;
-  margin: 0 2px;
-  background: color-mix(in srgb, var(--line) 60%, transparent);
+  height: 16px;
+  margin: 0 4px;
+  background: var(--line-2);
   flex-shrink: 0;
 }
 
@@ -3520,57 +3857,65 @@ textarea:focus-visible,
   align-items: center;
   justify-content: center;
   gap: 3px;
-  width: 22px;
-  height: 20px;
-  padding: 0;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 4px;
   border: 0;
-  border-radius: 4px;
+  border-radius: 5px;
   background: transparent;
-  color: var(--fg-3);
+  color: var(--fg-2);
   cursor: pointer;
   flex-shrink: 0;
   transition: background 0.1s ease, color 0.1s ease;
 }
 
 .tcld-toolbar-icon:hover {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
   color: var(--fg);
 }
 
 .tcld-toolbar-icon.is-active {
+  background: var(--accent-bg);
   color: var(--accent);
 }
 
 .tcld-toolbar-icon.is-active:hover {
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  background: var(--accent-bg-strong);
+}
+
+.tcld-toolbar-icon:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+  background: transparent;
 }
 
 .tcld-toolbar-icon-badge {
-  font: 9px var(--mono);
+  font: 10px var(--mono);
   font-variant-numeric: tabular-nums;
   color: inherit;
-  padding-right: 2px;
+  padding-right: 1px;
 }
 
 .tcld-toolbar-pill {
   display: inline-flex;
   align-items: center;
-  height: 20px;
-  padding: 0 8px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--line-2);
+  border-radius: 5px;
   background: transparent;
-  color: var(--fg-3);
-  font: 10px var(--mono);
+  color: var(--fg-2);
+  font: 500 11.5px var(--ui);
+  white-space: nowrap;
   cursor: pointer;
   flex-shrink: 0;
   transition: background 0.1s ease, border-color 0.1s ease, color 0.1s ease;
 }
 
 .tcld-toolbar-pill:hover:not(.is-disabled) {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
   color: var(--fg);
-  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  border-color: var(--line);
 }
 
 .tcld-toolbar-pill.is-active {
@@ -3580,22 +3925,248 @@ textarea:focus-visible,
 }
 
 .tcld-toolbar-pill.is-disabled {
-  opacity: 0.55;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
 .tcld-toolbar-meta {
   flex-shrink: 0;
-  font: 10px var(--mono);
+  font: 11px var(--ui);
   font-variant-numeric: tabular-nums;
   color: var(--fg-4);
-  padding: 0 2px;
+  padding: 0 4px;
+  white-space: nowrap;
 }
 
-/* Polish: refine panel dividers and inspector spacing */
+/* Informational counts give way before controls do: a narrow Disassembly
+ * leaf drops them instead of clipping them at the panel edge. */
+.tcld-disasm-toolbar {
+  container-type: inline-size;
+}
 
-[data-design-surface^="view-"] [data-inspector-section]:not(:last-child) {
-  border-bottom-color: var(--line-2);
+@container (max-width: 620px) {
+  .tcld-disasm-toolbar [data-toolbar-optional] {
+    display: none;
+  }
+}
+
+/* ─── Debug session toolbar ──────────────────────────────────────
+ * Status (left) · grouped controls (center) · script identity (right).
+ * Primary actions carry text labels while the window is wide enough;
+ * below that they collapse to icons with the same tooltips. */
+.tcld-debug-toolbar {
+  container-type: inline-size;
+  min-height: 38px;
+}
+
+.tcld-debug-status {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font: 12px var(--ui);
+}
+
+.tcld-debug-state {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 7px;
+  color: var(--fg);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.tcld-debug-state-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--text-inactive);
+}
+
+.tcld-debug-status[data-tone="accent"] .tcld-debug-state-dot {
+  background: var(--accent);
+  box-shadow: var(--shadow-glow-accent);
+}
+
+.tcld-debug-status[data-tone="success"] .tcld-debug-state-dot {
+  background: var(--ok);
+  box-shadow: var(--shadow-glow-accent);
+  animation: pulse-subtle 1.6s ease-in-out infinite;
+}
+
+.tcld-debug-status[data-tone="warn"] .tcld-debug-state-dot {
+  background: var(--warn);
+  box-shadow: var(--shadow-glow-warn);
+}
+
+.tcld-debug-status[data-tone="warn"] .tcld-debug-state {
+  color: var(--warn);
+}
+
+.tcld-debug-location {
+  overflow: hidden;
+  min-width: 0;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-2);
+  font: 12px var(--ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tcld-debug-location:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  color: var(--fg);
+}
+
+.tcld-debug-location:disabled {
+  cursor: default;
+}
+
+.tcld-debug-controls {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.tcld-debug-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.tcld-debug-sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 6px;
+  background: var(--line-2);
+}
+
+.tcld-debug-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  min-width: 28px;
+  justify-content: center;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-2);
+  font: 500 12px var(--ui);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.tcld-debug-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--fg);
+}
+
+.tcld-debug-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.tcld-debug-btn.is-go:not(:disabled) {
+  color: var(--accent);
+}
+
+.tcld-debug-btn.is-go:hover:not(:disabled) {
+  background: var(--accent-bg);
+}
+
+.tcld-debug-btn.is-danger:not(:disabled) {
+  color: var(--err);
+}
+
+.tcld-debug-btn.is-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+}
+
+.tcld-debug-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+}
+
+.tcld-debug-meta {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+  color: var(--fg-2);
+  font: 12px var(--ui);
+  white-space: nowrap;
+}
+
+.tcld-debug-bp-count {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+  color: var(--err);
+  font: 500 11.5px var(--ui);
+  cursor: pointer;
+}
+
+@container (max-width: 1180px) {
+  .tcld-debug-btn-label {
+    display: none;
+  }
+}
+
+@container (max-width: 760px) {
+  .tcld-debug-meta {
+    display: none;
+  }
+}
+
+/* Status bar: analysis health of the open document (opens Issues). */
+.tcld-status-health {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  margin-left: -6px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg-2);
+  font: 11.5px var(--ui);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tcld-status-health svg {
+  color: var(--ok);
+}
+
+.tcld-status-health[data-status="issues"] svg {
+  color: var(--warn);
+}
+
+.tcld-status-health:hover {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  color: var(--fg);
 }
 
 /*
@@ -3923,7 +4494,8 @@ textarea:focus-visible,
 }
 
 /* ─── Settings: user font size override ──────────────────────── */
-.tcld-panel-body .font-mono {
+/* Code text follows the user's size; role-sized labels keep their scale. */
+.tcld-panel-body .font-mono:not(.text-meta, .text-label, .text-tag, .text-caption, .text-control, .text-body, [data-section-eyebrow]) {
   font-size: var(--font-size-base) !important;
 }
 
@@ -3983,44 +4555,10 @@ html[data-density="ultra"] .panel-root:focus-within .panel-chrome-action {
   display: none;
 }
 
-/* ─── Debug-mode condensed chrome ────────────────────────────── */
-html[data-debug] {
-  --panel-header-height: 20px;
-  --code-row-height: 20px;
-}
-
-html[data-debug] .panel-header {
-  padding-top: 1px;
-  padding-bottom: 1px;
-  min-height: 20px;
-}
-
-html[data-debug] .panel-title {
-  font-size: 10px;
-}
-
-html[data-debug] .panel-keyhint,
-html[data-debug] .panel-subtitle {
-  display: none;
-}
-
-html[data-debug] .panel-icon {
-  font-size: 10px;
-}
-
-html[data-debug] .panel-chrome-action {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.1s ease;
-  padding: 2px;
-}
-
-html[data-debug] .panel-root:hover .panel-chrome-action,
-html[data-debug] .panel-root:focus-within .panel-chrome-action {
-  opacity: 1;
-  pointer-events: auto;
-}
-
+/* ─── Debug session chrome ─────────────────────────────────────
+ * Debugging keeps the same type scale and control sizes as inspection, so
+ * starting a session never reflows the workspace. Only the debugger rail
+ * panels take a tint that marks them as live session state. */
 html[data-debug] [data-debug-rail="true"] .panel-root {
   border-color: color-mix(in srgb, var(--accent) 18%, var(--line));
   background: color-mix(in srgb, var(--bg-panel) 92%, black);
@@ -4032,93 +4570,6 @@ html[data-debug] [data-debug-rail="true"] .panel-header {
 
 html[data-debug] [data-debug-rail="true"] .tcld-panel-body {
   background: var(--bg-window);
-}
-
-html[data-debug] [data-debug-rail="true"] [data-design-surface="adaptive-tab-bar"] > div {
-  min-height: 22px;
-}
-
-html[data-debug] .decompile-editor-tabs {
-  min-height: 22px;
-  padding-top: 1px;
-  padding-bottom: 1px;
-}
-
-html[data-debug] .decompile-editor-toolbar {
-  min-height: 16px;
-  padding-top: 0;
-  padding-bottom: 0;
-  font-size: 10px;
-}
-
-html[data-debug] .decompile-editor-status {
-  min-height: 16px;
-}
-
-html[data-debug] .decompile-editor-tab {
-  font-size: 10px;
-  padding: 2px 6px;
-}
-
-html[data-debug] .decompile-editor-crumbs {
-  font-size: 9px;
-}
-
-/* File header */
-html[data-debug] .tcld-file-header {
-  padding-top: 3px;
-  padding-bottom: 3px;
-  gap: 6px;
-  font-size: 10px;
-}
-
-html[data-debug] .tcld-file-header span {
-  font-size: 10px !important;
-}
-
-/* Main toolbar */
-html[data-debug] .tcld-main-toolbar {
-  min-height: 22px !important;
-  padding-top: 1px;
-  padding-bottom: 1px;
-  font-size: 10px;
-}
-
-html[data-debug] .tcld-main-toolbar button {
-  font-size: 10px;
-  padding: 1px 6px;
-}
-
-html[data-debug] .tcld-main-toolbar .text-sm {
-  font-size: 10px !important;
-}
-
-/* Status bar */
-html[data-debug] .tcld-status-bar > div:first-child {
-  height: 22px;
-  gap: 6px;
-  font-size: 10px;
-}
-
-html[data-debug] .tcld-status-bar > div:last-child {
-  height: 18px;
-  font-size: 10px;
-}
-
-html[data-debug] .tcld-status-bar span,
-html[data-debug] .tcld-status-bar button {
-  font-size: 10px !important;
-}
-
-/* Console input */
-html[data-debug] .tcld-console-input {
-  padding-top: 4px;
-  padding-bottom: 4px;
-}
-
-html[data-debug] .tcld-console-input span,
-html[data-debug] .tcld-console-input input {
-  font-size: 11px !important;
 }
 
 /* ─── Utility Classes ─────────────────────────────────────────── */
@@ -4169,8 +4620,19 @@ html[data-debug] .tcld-console-input input {
 }
 
 .instruction-row-selected {
-  background: color-mix(in srgb, var(--accent) 9%, transparent);
-  box-shadow: inset 2px 0 0 var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+
+/* Selection outranks hover: hover is a faint neutral wash, selection an
+ * accent sheet with an accent edge. */
+.instruction-row-selected:hover,
+.instruction-row-selected[data-hover] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: none;
+}
+
+.instruction-row-selected [data-token-role="address"] {
+  color: var(--fg);
 }
 
 .tcld-disasm-group-rail {
@@ -4210,8 +4672,8 @@ html[data-debug] .tcld-console-input input {
   margin-top: 0;
 }
 
-.instruction-row[data-selected-group="true"][data-group-start="true"] {
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
+.instruction-row[data-selected-group="true"][data-group-start="true"]:not(.instruction-row-selected) {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
 }
 
 .instruction-row[data-fold-state="collapsed"] {
@@ -4245,9 +4707,7 @@ html[data-debug] .tcld-console-input input {
 }
 
 .tcld-disasm-group-label,
-.tcld-disasm-group-source,
 .tcld-disasm-group-detail,
-.tcld-disasm-group-range,
 .tcld-disasm-folded-count {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4259,28 +4719,158 @@ html[data-debug] .tcld-console-input input {
   color: var(--fg-2);
 }
 
-.tcld-disasm-group-source {
-  color: var(--fg-4);
-  font-size: 10px;
-  font-weight: 500;
-}
 
+/* A command's source rides on its header row and takes whatever width the
+   operand leaves. */
 .tcld-disasm-group-detail {
-  max-width: 34%;
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--fg-4);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 
-.tcld-disasm-group-range {
-  flex: 0 0 auto;
-  color: var(--fg-4);
-  font-size: 10px;
-}
 
 .tcld-disasm-folded-count {
   flex: 0 0 auto;
   color: var(--accent);
   font-size: 10px;
+}
+
+/* Operand cell: the value an operand stands for — a literal, a jump
+   target, a word count — with the raw encoding left to the row tooltip. */
+.tcld-operand {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  padding-right: 12px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.tcld-operand-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tcld-operand-value[data-literal-kind="string"] {
+  color: var(--str);
+}
+
+.tcld-operand-value[data-literal-kind="number"],
+.tcld-operand-raw {
+  color: var(--num);
+}
+
+.tcld-operand-raw {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tcld-operand-index {
+  flex-shrink: 0;
+  color: var(--fg-4);
+  font-size: 10.5px;
+}
+
+.tcld-operand-words {
+  color: var(--fg-2);
+}
+
+.tcld-operand-jump {
+  margin-left: -3px;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--warn);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tcld-operand-jump:hover {
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+}
+
+/* Jump-target marker: something jumps here; ↺ when a loop closes on it. */
+.tcld-disasm-target {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: color-mix(in srgb, var(--warn) 75%, var(--fg-4));
+  cursor: pointer;
+}
+
+.tcld-disasm-target:hover {
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  color: var(--warn);
+}
+
+/* Pinned command header (sticky scroll): names the command the top row
+   belongs to once that command's header row has scrolled away. */
+.tcld-disasm-sticky {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--disassembly-row-height, 22px);
+  padding: 0 12px 0 14px;
+  border: 0;
+  border-bottom: 1px solid var(--line-2);
+  background: color-mix(in srgb, var(--bg-panel) 94%, transparent);
+  box-shadow: 0 6px 12px -8px rgba(0, 0, 0, 0.55);
+  color: var(--fg-2);
+  font: 12px var(--mono);
+  text-align: left;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+}
+
+.tcld-disasm-sticky:hover {
+  color: var(--fg);
+}
+
+.tcld-disasm-sticky-label {
+  flex-shrink: 0;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.tcld-disasm-sticky-source {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tcld-disasm-sticky-lines {
+  flex-shrink: 0;
+  color: var(--fg-4);
+  font: 11px var(--ui);
+}
+
+/* Narrow Disassembly panels give the operand the room first: the group rail
+   and pinned header already name the command. */
+@container (max-width: 400px) {
+  .instruction-row .tcld-disasm-source-group-column,
+  .tcld-operand-index {
+    display: none;
+  }
 }
 
 .instruction-row[data-fold-state="collapsed"] [data-disasm-column="address"],
@@ -4325,42 +4915,7 @@ html[data-debug] .tcld-console-input input {
 .decompile-editor-toolbar {
   background: color-mix(in srgb, var(--color-tcld-bg-1) 70%, transparent);
   border-bottom: 1px solid color-mix(in srgb, var(--color-tcld-border-dim) 60%, transparent);
-  min-height: 22px;
-}
-
-.decompile-editor-toolbar-action {
-  display: inline-flex;
-  height: 20px;
-  min-width: 20px;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--color-tcld-fg-dim);
-  padding: 0 4px;
-  font: 10px var(--mono);
-  cursor: pointer;
-  transition: color 0.1s ease, background 0.1s ease;
-}
-
-.decompile-editor-toolbar-action:hover {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-  color: var(--color-tcld-fg);
-}
-
-.decompile-editor-toolbar-action.is-active {
-  color: var(--accent);
-}
-
-.decompile-editor-toolbar-action.is-active:hover {
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
-}
-
-.decompile-editor-toolbar-action:hover {
-  background: var(--color-tcld-bg-highlight);
-  color: var(--color-tcld-fg);
+  min-height: 34px;
 }
 
 .decompile-editor-fold-count {
@@ -4459,15 +5014,16 @@ html[data-debug] .tcld-console-input input {
  * The accent left-edge stripe (the inset box-shadow) anchors at the gutter
  * edge so it remains visible regardless of line length.
  */
+/* Long lines scroll horizontally (max-content), but every row spans at
+ * least the viewport so multi-line washes — the cursor's command, the
+ * paused command — read as one even band instead of a ragged staircase. */
 .decompile-editor-row {
   width: max-content;
-  min-width: 0;
+  min-width: 100%;
 }
 
 .decompile-editor-row:hover {
   background: color-mix(in srgb, var(--color-tcld-bg-highlight) 50%, transparent);
-  /* Add ~32px of breathing room past the text so the highlight reads as a
-   * "pill" hugging the line, not flush against the last character. */
   padding-right: 2rem;
 }
 
@@ -4507,8 +5063,18 @@ html[data-debug] .tcld-console-input input {
   min-width: 48px;
 }
 
-.decompile-editor-gutter-focus {
-  /* line number highlights only */
+/*
+ * Lines of the command under the shared cursor (moved from any panel). A
+ * quieter cousin of selection: a faint wash plus an accent rail at the
+ * gutter edge, so the Source View always shows where the Disassembly is.
+ */
+/* The paused command's wash outranks the cursor's. */
+.decompile-editor-row[data-cursor-group]:not([data-execution]):not([data-execution-group]) {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
+.decompile-editor-row[data-cursor-group] .decompile-editor-gutter {
+  box-shadow: inset -2px 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 .decompile-editor-line-number {
@@ -4517,7 +5083,8 @@ html[data-debug] .tcld-console-input input {
 }
 
 .decompile-editor-row:hover .decompile-editor-line-number,
-.decompile-editor-row[data-selected] .decompile-editor-line-number {
+.decompile-editor-row[data-selected] .decompile-editor-line-number,
+.decompile-editor-row[data-cursor-group] .decompile-editor-line-number {
   color: var(--color-tcld-fg-bright);
   opacity: 1;
 }
@@ -4539,14 +5106,18 @@ html[data-debug] .tcld-console-input input {
 }
 
 .decompile-editor-status {
-  background: var(--color-tcld-accent);
-  border-top: none;
+  background: var(--bg-window);
+  border-top: 1px solid var(--line-2);
   min-height: 22px;
 }
 
 .decompile-editor-status span {
-  color: var(--color-tcld-bg) !important;
+  color: var(--text-inactive) !important;
   font-weight: 500;
+}
+
+.decompile-editor-status span:last-child {
+  color: var(--accent) !important;
 }
 
 .comparison-view {
@@ -5100,7 +5671,7 @@ html[data-debug] .tcld-console-input input {
   padding: 3px 6px;
   background: var(--bg-elev);
   color: var(--fg);
-  font-family: var(--mono);
+  font-family: var(--ui);
   font-size: 10px;
   font-weight: 500;
   letter-spacing: 0;
@@ -5209,16 +5780,16 @@ html[data-debug] .tcld-console-input input {
  * markup instead of hand-rolling their own header layout.
  */
 .tcld-panel-titlebar {
-  height: 28px;
+  height: calc(var(--header-h, 34px) - 4px);
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 0 4px 0 10px;
   background: var(--bg-window);
   border-bottom: 1px solid var(--line-2);
-  font: 600 11px var(--mono);
+  font: 500 12px var(--ui);
   color: var(--fg-2);
-  letter-spacing: 0.02em;
+  letter-spacing: 0;
   flex-shrink: 0;
 }
 
@@ -5259,6 +5830,18 @@ html[data-debug] .tcld-console-input input {
   flex-shrink: 0;
 }
 
+/* Panel shortcut chips surface on hover or focus; at rest they were a row of
+   unexplained single letters across every header. */
+.tcld-panel-titlebar .panel-keyhint {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.panel-root:hover .tcld-panel-titlebar .panel-keyhint,
+.panel-root.is-focused .tcld-panel-titlebar .panel-keyhint {
+  opacity: 1;
+}
+
 .tcld-panel-titlebar .tcld-pt-btn {
   height: 22px;
   width: 22px;
@@ -5271,7 +5854,7 @@ html[data-debug] .tcld-console-input input {
   border-radius: 3px;
   background: transparent;
   color: var(--fg-3);
-  font: 12px var(--mono);
+  font: 12px var(--ui);
   cursor: pointer;
   transition: background 0.1s ease-out, color 0.1s ease-out, border-color 0.1s ease-out;
 }
@@ -5307,7 +5890,7 @@ html[data-debug] .tcld-console-input input {
    three-cue focus stack; cue 1 is the rail pseudo-element on .tcld-panel.is-focused). */
 .tcld-panel.is-focused > .tcld-panel-titlebar,
 .panel-root.is-focused > .tcld-panel-titlebar {
-  background: color-mix(in srgb, var(--accent) 14%, var(--bg-window));
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-window));
 }
 .tcld-panel.is-focused > .tcld-panel-titlebar .tcld-pt-name,
 .panel-root.is-focused > .tcld-panel-titlebar .tcld-pt-name {
@@ -5347,17 +5930,15 @@ html[data-debug] .tcld-console-input input {
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   height: 100%;
   padding: 0 10px;
-  border: 1px solid var(--line-2);
-  border-bottom: 0;
-  border-radius: 4px 4px 0 0;
-  margin-right: 1px;
-  margin-bottom: -1px;
-  background: color-mix(in srgb, var(--bg-window) 60%, transparent);
-  color: var(--text-inactive);
-  font: 500 11px var(--mono);
+  border: 0;
+  border-radius: 0;
+  margin: 0;
+  background: transparent;
+  color: var(--fg-2);
+  font: 500 12px var(--ui);
   letter-spacing: 0;
   cursor: pointer;
   text-transform: none;
@@ -5368,31 +5949,37 @@ html[data-debug] .tcld-console-input input {
 
 .tcld-panel-titlebar .tcld-inline-tabs.is-bare .tcld-inline-tab:first-child {
   padding-left: 12px;
-  border-left: 0;
-  border-top-left-radius: 0;
 }
 
 .tcld-panel-titlebar .tcld-inline-tab:hover {
-  color: var(--fg-2);
-  background: var(--bg-elev);
-  border-color: var(--line);
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
 }
 
+/* Active tab joins the panel body; its underline turns accent only in the
+   focused panel, so accent marks focus rather than every tab strip. */
 .tcld-panel-titlebar .tcld-inline-tab.is-active {
   color: var(--fg);
   background: var(--bg-panel);
-  border-color: var(--line);
-  box-shadow: inset 0 2px 0 0 var(--accent);
+  box-shadow: inset 0 -2px 0 0 var(--line);
   z-index: var(--z-tab-active, 10);
 }
 
+.panel-root.is-focused .tcld-panel-titlebar .tcld-inline-tab.is-active {
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+
 .tcld-panel-titlebar .tcld-inline-tab .tcld-pt-glyph {
-  color: var(--fg-3);
-  width: 12px;
-  height: 12px;
+  color: var(--fg-4);
+  width: 13px;
+  height: 13px;
 }
 
 .tcld-panel-titlebar .tcld-inline-tab.is-active .tcld-pt-glyph {
+  color: var(--fg-2);
+}
+
+.panel-root.is-focused .tcld-panel-titlebar .tcld-inline-tab.is-active .tcld-pt-glyph {
   color: var(--accent);
 }
 
@@ -5416,7 +6003,7 @@ html[data-debug] .tcld-console-input input {
   border-radius: 2px;
   background: transparent;
   color: var(--fg-4);
-  font: 10px var(--mono);
+  font: 10px var(--ui);
   cursor: pointer;
   opacity: 0;
   transition: opacity 0.08s ease-out, background 0.08s ease-out, color 0.08s ease-out;
@@ -5433,176 +6020,65 @@ html[data-debug] .tcld-console-input input {
   color: var(--fg);
 }
 
-/*
- * ──────────────────────────────────────────────────────────────────
- * Design system: stacked sub-panel accordion (Inspector pattern)
- * ──────────────────────────────────────────────────────────────────
- * VSCode-style. Each sub-panel: 22px ALL-CAPS letterspaced header bar
- * + optional inline meta + optional action cluster + resizable body.
- * The active sub-panel paints an accent border-top + accent name.
- */
-.tcld-subpanels {
+/* Inspector identity card: the selected instruction's opcode, address, and
+   annotation, read before the property rows below it. */
+.tcld-inspector-identity {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-card);
+  background: var(--bg-panel-2);
+}
+
+.tcld-inspector-opcode {
+  color: var(--kw);
+  font: 600 15px/1.2 var(--mono);
+}
+
+.tcld-inspector-identity-meta {
   display: flex;
-  flex-direction: column;
-}
-
-.tcld-subpanel {
-  border-bottom: 1px solid var(--line);
-  background: var(--bg-panel);
-}
-
-.tcld-subpanel:first-child {
-  border-top: 1px solid var(--line);
-}
-
-.tcld-subpanel-head {
-  height: 22px;
-  display: flex;
-  align-items: center;
+  flex-wrap: wrap;
+  align-items: baseline;
   gap: 6px;
-  padding: 0 6px 0 8px;
-  background: var(--bg-window);
-  font: 700 9.5px var(--mono);
   color: var(--fg-2);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  cursor: pointer;
-  user-select: none;
-  border: 0;
-  width: 100%;
-  text-align: left;
+  font: 11.5px var(--ui);
 }
 
-.tcld-subpanel-head:hover {
-  color: var(--fg);
-}
-
-.tcld-subpanel-head .chev {
-  color: var(--fg-3);
-  width: 10px;
-  font-size: 10px;
-  flex-shrink: 0;
-}
-
-.tcld-subpanel-head .name {
-  color: var(--fg);
-  font-weight: 700;
-}
-
-.tcld-subpanel-head .meta {
-  margin-left: auto;
+.tcld-inspector-identity-meta [aria-hidden] {
   color: var(--fg-4);
-  font-weight: 500;
-  letter-spacing: 0;
-  text-transform: none;
-  font-size: 10px;
 }
 
-.tcld-subpanel-head .actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  margin-left: 6px;
+.tcld-inspector-annotation {
+  overflow: hidden;
+  margin-top: 2px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: var(--str);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.tcld-subpanel-head .sp-btn {
-  height: 16px;
-  min-width: 16px;
-  padding: 0 4px;
-  display: inline-flex;
+/* Empty-state glyph tile: a quiet frame so the icon reads as an illustration,
+   not a control. */
+.tcld-empty-icon {
+  display: flex;
   align-items: center;
   justify-content: center;
-  border: 0;
-  border-radius: 2px;
-  background: transparent;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 4px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  background: var(--bg-panel-2);
   color: var(--fg-4);
-  font: 11px var(--mono);
-  cursor: pointer;
+  font-size: 18px;
 }
 
-.tcld-subpanel-head .sp-btn:hover {
-  background: var(--bg-elev);
-  color: var(--fg);
-}
-
-.tcld-subpanel.is-active > .tcld-subpanel-head {
-  color: var(--accent);
-  border-top: 1px solid var(--accent);
-  margin-top: -1px;
-}
-
-.tcld-subpanel.is-active > .tcld-subpanel-head .name {
-  color: var(--accent);
-}
-
-.tcld-subpanel.is-collapsed .tcld-subpanel-body {
-  display: none;
-}
-
-.tcld-subpanel-body {
-  padding: 4px 0;
-  font: 11.5px var(--mono);
-  color: var(--fg-2);
-  position: relative;
-  resize: vertical;
-  overflow: auto;
-  min-height: 40px;
-}
-
-/* Resize grip — a 4px hover-visible affordance along the bottom edge
-   of an expanded sub-panel. Native CSS resize provides functionality;
-   this just makes the affordance visible. */
-.tcld-subpanel:not(.is-collapsed) {
-  position: relative;
-}
-
-.tcld-subpanel:not(.is-collapsed)::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -2px;
-  height: 4px;
-  cursor: ns-resize;
-  background: transparent;
-  transition: background 0.08s ease-out;
-  z-index: 2;
-  pointer-events: none;
-}
-
-.tcld-subpanel:not(.is-collapsed):hover::after {
-  background: color-mix(in srgb, var(--accent) 22%, transparent);
-}
-
-.tcld-subpanel:not(.is-collapsed):last-child::after {
-  display: none;
-}
-
-/* The canonical kv row inside a sub-panel body: 22px tall, 100px gutter
-   for the key, ellipsizing value column. Don't reach for grid utilities
-   when this shape is what you want — use this. */
-.tcld-subpanel .kv {
-  display: grid;
-  grid-template-columns: 100px minmax(0, 1fr);
-  gap: 12px;
-  padding: 1px 12px;
-  height: 22px;
-  align-items: center;
-  font: 11.5px var(--mono);
-}
-
-.tcld-subpanel .kv .k {
-  color: var(--fg-4);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.tcld-subpanel .kv .v {
-  color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.tcld-empty-icon svg {
+  width: 18px;
+  height: 18px;
 }
 
 /* ─── Workbench row primitives ──────────────────────────────────
@@ -5708,4 +6184,44 @@ html[data-debug] .tcld-console-input input {
 .console-row.is-error {
   border-left-color: var(--err);
   background: color-mix(in srgb, var(--err) 4%, transparent);
+}
+
+/*
+ * ─── Overlay enter/exit ───────────────────────────────────────────
+ * Palette and keyboard reference: the scrim fades, the dialog fades in
+ * from a hair smaller (the palette also drops 2px). Exit plays in reverse
+ * while usePresence keeps the node mounted (OVERLAY_EXIT_MS = 120ms).
+ */
+@keyframes tcld-overlay-fade-in { from { opacity: 0; } }
+@keyframes tcld-overlay-fade-out { to { opacity: 0; } }
+@keyframes tcld-overlay-dialog-in { from { opacity: 0; transform: translateY(var(--dialog-enter-y, 0)) scale(var(--dialog-enter-scale, 0.96)); } }
+@keyframes tcld-overlay-dialog-out { to { opacity: 0; transform: translateY(var(--dialog-enter-y, 0)) scale(var(--dialog-enter-scale, 0.96)); } }
+
+.tcld-overlay-anim {
+  animation: tcld-overlay-fade-in 120ms ease-out both;
+}
+
+.tcld-overlay-anim[data-state="closed"] {
+  animation: tcld-overlay-fade-out 120ms ease-in both;
+  pointer-events: none;
+}
+
+.tcld-overlay-dialog {
+  animation: tcld-overlay-dialog-in 150ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+.tcld-overlay-dialog[data-state="closed"] {
+  animation: tcld-overlay-dialog-out 120ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+.tcld-overlay-dialog--drop {
+  --dialog-enter-y: -2px;
+  --dialog-enter-scale: 0.98;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tcld-overlay-anim,
+  .tcld-overlay-dialog {
+    animation-duration: 1ms;
+  }
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useTcldStore } from "@/lib/store";
+import { useTcldData } from "@/lib/store";
 import { useDebugStore } from "@/lib/debug-store";
 import { Panel } from "./Panel";
 import { PanelEmpty } from "@/components/EmptyState";
@@ -13,7 +13,7 @@ interface DumpPanelProps {
 }
 
 export function DumpPanel({ id, focused, onClose, onFocus }: DumpPanelProps) {
-  const { data } = useTcldStore();
+  const { data } = useTcldData();
   const debug = useDebugStore();
   const liveText = debug.disassemblyHeader
     ? `${debug.disassemblyHeader}\n\n${debug.disassemblyText ?? ""}`

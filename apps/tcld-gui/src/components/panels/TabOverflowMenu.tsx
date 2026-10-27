@@ -101,7 +101,7 @@ export function TabOverflowMenu({ tabs, onSelect, onClose }: TabOverflowMenuProp
             }}
             className={clsx(
               "flex flex-1 items-center gap-2 px-3 h-8 text-left",
-              "font-mono text-xs cursor-pointer",
+              "font-ui text-xs cursor-pointer",
               tab.active
                 ? "bg-tcld-bg-highlight text-tcld-fg"
                 : "text-tcld-text-inactive hover:text-tcld-fg hover:bg-tcld-bg-highlight",
@@ -159,7 +159,7 @@ export function TabOverflowMenu({ tabs, onSelect, onClose }: TabOverflowMenuProp
         onPointerDown={(event) => event.stopPropagation()}
         className={clsx(
           "tcld-view-tab-overflow inline-flex items-center gap-1 px-2 h-7 rounded",
-          "font-mono text-meta",
+          "font-ui text-meta",
           "border border-tcld-border-dim bg-tcld-bg-2",
           "text-tcld-text-inactive hover:text-tcld-fg hover:border-tcld-border",
           "transition-colors duration-150 flex-shrink-0",

@@ -66,7 +66,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             route, so the stylesheet loads exactly once for the whole app. */}
         <link
           rel="stylesheet"
-          href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600;700&family=Geist:wght@400;500;600;700&display=swap"
+          href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600;700&family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
         />
         <script
           dangerouslySetInnerHTML={{
@@ -74,7 +74,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           }}
         />
       </head>
-      <body className="m-0 p-0 overflow-hidden bg-tcld-bg text-tcld-fg font-mono antialiased">
+      <body className="m-0 p-0 overflow-hidden bg-tcld-bg text-tcld-fg font-ui antialiased">
         <TcldStoreProvider>
           <DebugStoreProvider>
             <LocationStoreProvider>{children}</LocationStoreProvider>

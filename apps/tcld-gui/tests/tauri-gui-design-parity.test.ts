@@ -419,7 +419,7 @@ test("V1 retained registry glyphs are explicit contracts and rendered view icons
   assert.match(viewIcon, /size = 13/);
   assert.match(mosaic, /<ViewIcon viewId=\{activeView\} size=\{13\}/);
   assert.match(mosaic, /<ViewIcon viewId=\{view\} size=\{12\}/);
-  assert.match(panelPicker, /<ViewIcon viewId=\{view\.id\} size=\{13\}/);
+  assert.match(panelPicker, /<ViewIcon viewId=\{view\.id\} size=\{16\}/);
 });
 
 test("V1 production panel, chrome, and overlay sources do not render unapproved raw icon glyphs", () => {

@@ -4,19 +4,21 @@ import React from "react";
 import clsx from "clsx";
 import {
   AlertTriangle,
-  ArrowDown,
-  ArrowRight,
-  ArrowUp,
+  ArrowDownToDot,
+  ArrowUpFromDot,
+  ChevronsRight,
   Circle,
   CircleOff,
   Copy,
   CornerDownRight,
+  Crosshair,
+  ListEnd,
   Pause,
   Play,
+  RedoDot,
   RotateCcw,
-  RotateCw,
-  SkipForward,
   Square,
+  StepForward,
   Terminal,
   X,
 } from "lucide-react";
@@ -24,11 +26,9 @@ import { useDebugStore } from "@/lib/debug-store";
 import { T } from "@/lib/theme";
 import { commandRegistry } from "@/lib/command-registry";
 import { useLocationStore } from "@/lib/location-store";
-import { useTcldStore } from "@/lib/store";
+import { useShallow } from "zustand/react/shallow";
+import { useTcldData } from "@/lib/store";
 import { resolveBreakpointTarget } from "@/lib/workflow-contracts";
-
-const BTN =
-  "px-2 py-1 rounded text-xs font-mono transition-all duration-150 flex items-center gap-1 flex-shrink-0 select-none";
 
 interface ToolbarButtonProps {
   label: string;
@@ -37,33 +37,41 @@ interface ToolbarButtonProps {
   onClick: () => void;
   disabled?: boolean;
   danger?: boolean;
+  /** Primary actions also show their label when the toolbar has room. */
+  primary?: boolean;
+  tone?: "go";
   iconStyle?: React.CSSProperties;
 }
 
-function ToolbarButton({ label, icon, shortcut, onClick, disabled, danger, iconStyle }: ToolbarButtonProps) {
+function ToolbarButton({ label, icon, shortcut, onClick, disabled, danger, primary, tone, iconStyle }: ToolbarButtonProps) {
   return (
     <button
+      type="button"
       onClick={onClick}
       disabled={disabled}
-      className={clsx(
-        BTN,
-        disabled
-          ? "text-tcld-fg-muted cursor-not-allowed opacity-40"
-          : danger
-            ? "text-tcld-error hover:bg-tcld-error/10"
-            : "text-tcld-fg-dim hover:text-tcld-fg hover:bg-tcld-bg-highlight",
-      )}
+      className={clsx("tcld-debug-btn", danger && "is-danger", tone === "go" && "is-go")}
       title={shortcut ? `${label} (${shortcut})` : label}
+      aria-label={label}
     >
-      <span className="flex h-3.5 w-3.5 items-center justify-center" style={iconStyle}>{icon}</span>
+      <span className="tcld-debug-btn-icon" style={iconStyle} aria-hidden>{icon}</span>
+      {primary && <span className="tcld-debug-btn-label">{label}</span>}
     </button>
   );
 }
 
+const STOP_REASON_TEXT: Record<string, string> = {
+  breakpoint: "at breakpoint",
+  exception: "on exception",
+  watchpoint: "on watchpoint",
+  step: "after step",
+  pause: "by request",
+  entry: "at entry",
+};
+
 export function DebugToolbar() {
   const debug = useDebugStore();
-  const { cursor, setCursor } = useLocationStore();
-  const { data } = useTcldStore();
+  const { cursor, setCursor } = useLocationStore(useShallow((s) => ({ cursor: s.cursor, setCursor: s.setCursor })));
+  const { data } = useTcldData();
   const {
     sessionState,
     isBusy,
@@ -109,24 +117,27 @@ export function DebugToolbar() {
   type Tone = "neutral" | "warn" | "accent" | "success";
   let statusText: string;
   let statusTone: Tone;
+  let locationText: string | null = null;
   if (isTerminated) {
     statusText = "Ended";
     statusTone = "neutral";
   } else if (isStopping) {
-    statusText = "Stopping...";
+    statusText = "Stopping…";
     statusTone = "warn";
   } else if (isPausing) {
-    statusText = "Pausing...";
+    statusText = "Pausing…";
     statusTone = "warn";
   } else if (isLaunching) {
-    statusText = "Launching...";
+    statusText = "Launching…";
     statusTone = "warn";
-  } else if (isPaused && stoppedAt) {
-    const file = stoppedAt.file.split("/").pop() || stoppedAt.file;
-    statusText = `${file}:${stoppedAt.line}`;
-    if (stoppedAt.reason === "breakpoint") statusText += " (bp)";
-    if (stoppedAt.reason === "exception") statusText += " (exc)";
-    statusTone = "accent";
+  } else if (isPaused) {
+    statusText = isExceptionStop ? "Paused on exception" : "Paused";
+    statusTone = isExceptionStop ? "warn" : "accent";
+    if (stoppedAt) {
+      const file = stoppedAt.file.split("/").pop() || stoppedAt.file;
+      const reason = !isExceptionStop && stoppedAt.reason ? STOP_REASON_TEXT[stoppedAt.reason] : null;
+      locationText = `${reason ? `${reason} · ` : ""}${file}:${stoppedAt.line}`;
+    }
   } else if (isRunning) {
     statusText = "Running";
     statusTone = "success";
@@ -135,208 +146,213 @@ export function DebugToolbar() {
     statusTone = "neutral";
   }
 
-  const toneTextClass: Record<Tone, string> = {
-    neutral: "text-tcld-text-inactive",
-    warn: "text-tcld-warning",
-    accent: "text-tcld-accent",
-    success: "text-tcld-success",
-  };
-  // Glow tones use the canonical --shadow-glow-* tokens. The neutral case
-  // intentionally omits the glow so an idle/inactive dot stays quiet.
-  const toneDotClass: Record<Tone, string> = {
-    neutral: "bg-tcld-text-inactive",
-    warn: "bg-tcld-warning shadow-[var(--shadow-glow-warn)]",
-    accent: "bg-tcld-accent shadow-[var(--shadow-glow-accent)]",
-    success: "bg-tcld-success shadow-[var(--shadow-glow-accent)]",
-  };
+  const steppingDisabled = !isPaused || isTerminated || isBusy || isExceptionStop || isPausing || isStopping;
+  const scriptName = scriptPath ? scriptPath.split("/").pop() : null;
+  const stopReasonPanel = stoppedAt?.reason === "breakpoint"
+    ? "panel:breakpoints"
+    : stoppedAt?.reason === "exception"
+      ? "panel:console"
+      : stoppedAt?.reason === "watchpoint"
+        ? "panel:variables"
+        : null;
 
   return (
     <div
       className={clsx(
-        "tcld-debug-toolbar relative flex items-center justify-between px-3 py-1 border-b border-tcld-border-dim bg-tcld-bg-1",
+        "tcld-debug-toolbar relative flex items-center gap-3 px-3 border-b border-tcld-border-dim bg-tcld-bg-1",
         // Slide-down enter animation so the toolbar appearance signals a
         // session-state transition rather than just inserting a row.
         "animate-[slide-up_0.16s_ease-out]",
       )}
       data-design-surface="debug-paused-overlay"
-      style={{ minHeight: 30 }}
     >
-      {/* Left: status */}
-      <div className="flex items-center gap-2 min-w-0">
-        <span
-          className={clsx("w-1.5 h-1.5 rounded-full flex-shrink-0", toneDotClass[statusTone])}
-          aria-hidden
-        />
-        <button
-          type="button"
-          className={clsx(
-            "text-xs font-mono truncate rounded px-1 py-0.5",
-            toneTextClass[statusTone],
-            stoppedAt?.reason ? "hover:bg-tcld-bg-highlight/60" : "pointer-events-none",
-          )}
-          onClick={() => {
-            if (stoppedAt?.reason === "breakpoint") commandRegistry.execute("panel:breakpoints");
-            if (stoppedAt?.reason === "exception") commandRegistry.execute("panel:console");
-            if (stoppedAt?.reason === "watchpoint") commandRegistry.execute("panel:variables");
-          }}
-          title={stoppedAt?.reason ? `Open ${stoppedAt.reason} context panel` : undefined}
-        >
+      {/* Left: session state and where execution stopped */}
+      <div className="tcld-debug-status" data-tone={statusTone}>
+        <span className="tcld-debug-state">
+          <span className="tcld-debug-state-dot" aria-hidden />
           {statusText}{isBusy ? " · syncing…" : ""}
-        </button>
+        </span>
+        {locationText && (
+          <button
+            type="button"
+            className="tcld-debug-location"
+            disabled={!stopReasonPanel}
+            onClick={() => {
+              if (stopReasonPanel) commandRegistry.execute(stopReasonPanel);
+            }}
+            title={stoppedAt?.reason ? `Open ${stoppedAt.reason} context panel` : undefined}
+          >
+            {locationText}
+          </button>
+        )}
       </div>
 
-      {/* Center: step controls */}
-      <div className="flex items-center gap-0.5">
-        <ToolbarButton
-          label="Continue"
-          icon={<Play size={13} aria-hidden />}
-          shortcut="F5"
-          onClick={() => runDebugAction("debug:continue", resume)}
-          disabled={!isPaused || isTerminated || isBusy || isExceptionStop || isPausing || isStopping}
-        />
-        <ToolbarButton
-          label="Pause"
-          icon={<Pause size={13} aria-hidden />}
-          shortcut="F6"
-          onClick={() => runDebugAction("debug:pause", pause)}
-          disabled={!isRunning || isTerminated || isBusy || isPausing || isStopping}
-        />
-        <div className="w-px h-3 bg-tcld-border-dim mx-1" />
-        <ToolbarButton
-          label="Step Into"
-          icon={<ArrowDown size={13} aria-hidden />}
-          shortcut="F11"
-          onClick={() => runDebugAction("debug:step_into", stepInto)}
-          disabled={!isPaused || isTerminated || isBusy || isExceptionStop || isPausing || isStopping}
-        />
+      {/* Center: execution controls, grouped run → step → session → breakpoints */}
+      <div className="tcld-debug-controls" role="toolbar" aria-label="Debugger controls">
+        <div className="tcld-debug-group">
+          {isRunning || isPausing ? (
+            <ToolbarButton
+              label="Pause"
+              icon={<Pause size={15} />}
+              shortcut="F6"
+              onClick={() => runDebugAction("debug:pause", pause)}
+              disabled={isTerminated || isBusy || isPausing || isStopping}
+              primary
+            />
+          ) : (
+            <ToolbarButton
+              label="Continue"
+              icon={<Play size={15} />}
+              shortcut="F5"
+              onClick={() => runDebugAction("debug:continue", resume)}
+              disabled={steppingDisabled}
+              primary
+              tone="go"
+            />
+          )}
+        </div>
+        <span className="tcld-debug-sep" aria-hidden />
+        <div className="tcld-debug-group" role="group" aria-label="Step">
+          <ToolbarButton
+            label="Step Over"
+            icon={<RedoDot size={15} />}
+            shortcut="F10"
+            onClick={() => runDebugAction("debug:step_over", stepOver)}
+            disabled={steppingDisabled}
+            primary
+          />
+          <ToolbarButton
+            label="Step Into"
+            icon={<ArrowDownToDot size={15} />}
+            shortcut="F11"
+            onClick={() => runDebugAction("debug:step_into", stepInto)}
+            disabled={steppingDisabled}
+            primary
+          />
+          <ToolbarButton
+            label="Step Out"
+            icon={<ArrowUpFromDot size={15} />}
+            shortcut="⇧F11"
+            onClick={() => runDebugAction("debug:step_out", stepOut)}
+            disabled={steppingDisabled}
+            primary
+          />
+          <ToolbarButton
+            label="Next Group"
+            icon={<ListEnd size={15} />}
+            shortcut="⇧]"
+            onClick={() => runDebugAction("debug:step_next_group", stepToNextGroup)}
+            disabled={steppingDisabled}
+          />
+        </div>
         {canStepInstruction && (
           <>
-            <ToolbarButton
-              label="Step Instruction"
-              icon={<ArrowRight size={13} aria-hidden />}
-              shortcut="⌥F11"
-              onClick={() => runDebugAction("debug:step_instruction", stepInstruction)}
-              disabled={!isPaused || isTerminated || isBusy || isExceptionStop || isPausing || isStopping}
-            />
-            <ToolbarButton
-              label="Step Over Instruction"
-              icon={<CornerDownRight size={13} aria-hidden />}
-              onClick={() => runDebugAction("debug:step_over_instruction", stepOverInstruction)}
-              disabled={!isPaused || isTerminated || isBusy || isExceptionStop || isPausing || isStopping}
-            />
-            <ToolbarButton
-              label="Step Out Instruction"
-              icon={<ArrowUp size={13} aria-hidden />}
-              onClick={() => runDebugAction("debug:step_out_instruction", stepOutInstruction)}
-              disabled={!isPaused || isTerminated || isBusy || isExceptionStop || isPausing || isStopping}
-            />
-            <ToolbarButton
-              label="Run To PC"
-              icon={<SkipForward size={13} aria-hidden />}
-              onClick={() => {
-                if (cursor.pc != null) {
-                  runDebugAction("debug:run_to_pc", () => runToPc(cursor.pc!));
-                }
-              }}
-              disabled={
-                !isPaused
-                || isTerminated
-                || isBusy
-                || isExceptionStop
-                || isPausing
-                || isStopping
-                || cursor.pc == null
-              }
-            />
+            <span className="tcld-debug-sep" aria-hidden />
+            <div className="tcld-debug-group" role="group" aria-label="Instruction stepping">
+              <ToolbarButton
+                label="Step Instruction"
+                icon={<StepForward size={15} />}
+                shortcut="⌥F11"
+                onClick={() => runDebugAction("debug:step_instruction", stepInstruction)}
+                disabled={steppingDisabled}
+              />
+              <ToolbarButton
+                label="Step Over Instruction"
+                icon={<ChevronsRight size={15} />}
+                onClick={() => runDebugAction("debug:step_over_instruction", stepOverInstruction)}
+                disabled={steppingDisabled}
+              />
+              <ToolbarButton
+                label="Step Out Instruction"
+                icon={<CornerDownRight size={15} />}
+                onClick={() => runDebugAction("debug:step_out_instruction", stepOutInstruction)}
+                disabled={steppingDisabled}
+              />
+              <ToolbarButton
+                label="Run To PC"
+                icon={<Crosshair size={15} />}
+                onClick={() => {
+                  if (cursor.pc != null) {
+                    runDebugAction("debug:run_to_pc", () => runToPc(cursor.pc!));
+                  }
+                }}
+                disabled={steppingDisabled || cursor.pc == null}
+              />
+            </div>
           </>
         )}
-        <ToolbarButton
-          label="Step Over"
-          icon={<RotateCw size={13} aria-hidden />}
-          shortcut="F10"
-          onClick={() => runDebugAction("debug:step_over", stepOver)}
-          disabled={!isPaused || isTerminated || isBusy || isExceptionStop || isPausing || isStopping}
-        />
-        <ToolbarButton
-          label="Next Group"
-          icon={<SkipForward size={13} aria-hidden />}
-          shortcut="⇧]"
-          onClick={() => runDebugAction("debug:step_next_group", stepToNextGroup)}
-          disabled={!isPaused || isTerminated || isBusy || isExceptionStop || isPausing || isStopping}
-        />
-        <ToolbarButton
-          label="Step Out"
-          icon={<ArrowUp size={13} aria-hidden />}
-          shortcut="⇧F11"
-          onClick={() => runDebugAction("debug:step_out", stepOut)}
-          disabled={!isPaused || isTerminated || isBusy || isExceptionStop || isPausing || isStopping}
-        />
-        <div className="w-px h-3 bg-tcld-border-dim mx-1" />
-        <ToolbarButton
-          label="Stop"
-          icon={<Square size={12} aria-hidden />}
-          shortcut="⇧F5"
-          onClick={() => runDebugAction("debug:stop", stop)}
-          disabled={isTerminated || isStopping}
-          danger
-        />
-        <div className="w-px h-3 bg-tcld-border-dim mx-1" />
-        <ToolbarButton
-          label="Restart"
-          icon={<RotateCcw size={13} aria-hidden />}
-          shortcut="⌘⇧F5"
-          onClick={() => runDebugAction("debug:restart", restart)}
-          disabled={isLaunching || isBusy}
-        />
-        {isTerminated && (
+        <span className="tcld-debug-sep" aria-hidden />
+        <div className="tcld-debug-group" role="group" aria-label="Session">
           <ToolbarButton
-            label="Close"
-            icon={<X size={13} aria-hidden />}
-            onClick={resetSession}
-            disabled={false}
+            label="Restart"
+            icon={<RotateCcw size={15} />}
+            shortcut="⌘⇧F5"
+            onClick={() => runDebugAction("debug:restart", restart)}
+            disabled={isLaunching || isBusy}
           />
-        )}
-        <div className="w-px h-3 bg-tcld-border-dim mx-1" />
-        <ToolbarButton
-          label="Breakpoint"
-          icon={<Circle size={12} fill="currentColor" aria-hidden />}
-          shortcut="F9"
-          onClick={() => runDebugAction("debug:toggle_breakpoint", () => {
-            const target = resolveBreakpointTarget({
-              data,
-              selectedInstructionIndex: cursor.instIdx,
-              stoppedAt,
-              scriptPath,
-            });
-            if (target) {
-              toggleBreakpoint(target.file, target.line);
-            }
-          })}
-          disabled={!isPaused || !stoppedAt || isBusy}
-          iconStyle={{ color: (!isPaused || !stoppedAt || isBusy) ? undefined : T.error }}
-        />
-        <ToolbarButton
-          label="Clear All"
-          icon={<CircleOff size={13} aria-hidden />}
-          onClick={() => runDebugAction("debug:clear_breakpoints", clearAllBreakpoints)}
-          disabled={breakpoints.length === 0 || isBusy}
-        />
+          <ToolbarButton
+            label="Stop"
+            icon={<Square size={14} />}
+            shortcut="⇧F5"
+            onClick={() => runDebugAction("debug:stop", stop)}
+            disabled={isTerminated || isStopping}
+            danger
+          />
+          {isTerminated && (
+            <ToolbarButton
+              label="Close"
+              icon={<X size={15} />}
+              onClick={resetSession}
+              disabled={false}
+            />
+          )}
+        </div>
+        <span className="tcld-debug-sep" aria-hidden />
+        <div className="tcld-debug-group" role="group" aria-label="Breakpoints">
+          <ToolbarButton
+            label="Toggle Breakpoint"
+            icon={<Circle size={13} fill="currentColor" />}
+            shortcut="F9"
+            onClick={() => runDebugAction("debug:toggle_breakpoint", () => {
+              const target = resolveBreakpointTarget({
+                data,
+                selectedInstructionIndex: cursor.instIdx,
+                stoppedAt,
+                scriptPath,
+              });
+              if (target) {
+                toggleBreakpoint(target.file, target.line);
+              }
+            })}
+            disabled={!isPaused || !stoppedAt || isBusy}
+            iconStyle={{ color: (!isPaused || !stoppedAt || isBusy) ? undefined : T.error }}
+          />
+          <ToolbarButton
+            label="Clear All Breakpoints"
+            icon={<CircleOff size={15} />}
+            onClick={() => runDebugAction("debug:clear_breakpoints", clearAllBreakpoints)}
+            disabled={breakpoints.length === 0 || isBusy}
+          />
+        </div>
       </div>
 
-      {/* Right: script info + breakpoint count */}
-      <div className="flex items-center gap-2 text-xs font-mono text-tcld-fg-muted">
+      {/* Right: script identity + breakpoint count */}
+      <div className="tcld-debug-meta">
         {breakpoints.length > 0 && (
-          <span
-            className="px-1.5 py-0.5 rounded text-label font-semibold"
-            style={{ color: T.error, background: `color-mix(in srgb, ${T.error} 12%, transparent)` }}
+          <button
+            type="button"
+            className="tcld-debug-bp-count"
+            onClick={() => commandRegistry.execute("panel:breakpoints")}
+            title="Show breakpoints"
           >
-            <Circle size={8} fill="currentColor" aria-hidden /> {breakpoints.length}
-          </span>
+            <Circle size={8} fill="currentColor" aria-hidden />
+            {breakpoints.length} {breakpoints.length === 1 ? "breakpoint" : "breakpoints"}
+          </button>
         )}
         {tclVersion && <span>Tcl {tclVersion}</span>}
-        {scriptPath && (
-          <span className="truncate max-w-48">
-            {scriptPath.split("/").pop()}
+        {scriptName && (
+          <span className="truncate font-mono text-meta" title={scriptPath ?? undefined}>
+            {scriptName}
           </span>
         )}
       </div>

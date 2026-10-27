@@ -67,7 +67,7 @@ interface ChipProps extends HTMLAttributes<HTMLSpanElement> {
   icon?: ReactNode;
   /** When true and tone="neutral", uses the inactive ramp (for unfocused tabs). */
   muted?: boolean;
-  /** Numeric values are passed through compactCount (1234 → "999+"). */
+  /** Numeric values are passed through compactCount (1234 → "1.2k"). */
   children: ReactNode | number;
   className?: string;
   title?: string;

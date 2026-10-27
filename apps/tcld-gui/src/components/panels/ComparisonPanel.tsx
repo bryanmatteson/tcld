@@ -2,8 +2,9 @@
 
 import React from "react";
 import { Panel } from "./Panel";
-import { useTcldStore } from "@/lib/store";
+import { useTcldData } from "@/lib/store";
 import { useLocationStore } from "@/lib/location-store";
+import { useShallow } from "zustand/react/shallow";
 import { buildComparisonPanelModel, sourceMapSelectionTarget } from "@/lib/panel-models";
 import { ViewIcon } from "@/components/ViewIcon";
 import { EmptyState } from "@/components/EmptyState";
@@ -19,8 +20,8 @@ interface ComparisonPanelProps {
 const STATUS_LABELS: ComparisonRowStatus[] = ["match", "partial", "stripped"];
 
 export const ComparisonPanel = React.memo(function ComparisonPanel({ focused, id, onClose, onFocus }: ComparisonPanelProps) {
-  const data = useTcldStore().data;
-  const { cursor, setCursor } = useLocationStore();
+  const data = useTcldData().data;
+  const { cursor, setCursor } = useLocationStore(useShallow((s) => ({ cursor: s.cursor, setCursor: s.setCursor })));
   const model = buildComparisonPanelModel(data, cursor);
   const rows = model?.rows ?? [];
   const emptyMessage = data

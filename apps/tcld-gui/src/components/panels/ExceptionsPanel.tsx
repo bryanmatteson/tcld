@@ -1,6 +1,6 @@
 "use client";
 
-import { useTcldStore } from "@/lib/store";
+import { useTcldData } from "@/lib/store";
 import { Panel } from "./Panel";
 import { PanelEmpty } from "@/components/EmptyState";
 import { Chip } from "@/components/primitives/Chip";
@@ -14,7 +14,7 @@ interface ExceptionsPanelProps {
 }
 
 export function ExceptionsPanel({ id, focused, onClose, onFocus }: ExceptionsPanelProps) {
-  const { data } = useTcldStore();
+  const { data } = useTcldData();
   const exceptions = data?.exceptions ?? [];
 
   if (exceptions.length === 0) {

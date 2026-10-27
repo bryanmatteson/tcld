@@ -269,7 +269,12 @@ export function buildNativeMenuAvailabilityPayload(
   ctx: CommandContext,
   registry: { getForContext(ctx: CommandContext): { id: string }[] },
 ): Record<string, boolean> {
-  return Object.fromEntries(itemIds.map((itemId) => [itemId, nativeMenuAvailability(itemId, ctx, registry)]));
+  // Resolve the context once rather than once per menu item.
+  const available = new Set(registry.getForContext(ctx).map((command) => command.id));
+  return Object.fromEntries(itemIds.map((itemId) => {
+    const actionId = nativeMenuActionId(itemId);
+    return [itemId, actionId != null && available.has(actionId)];
+  }));
 }
 
 const nativeMenuActionMap: Record<string, string> = {

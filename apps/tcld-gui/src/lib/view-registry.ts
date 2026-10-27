@@ -42,6 +42,28 @@ export const VIEW_DEFINITIONS: ViewDef[] = [
   { id: "commandResolver", label: "Command Resolver", icon: "⌘", iconRole: "command", key: "" },
 ];
 
+/** Purpose-first descriptions shared by workspace discovery controls. */
+export const VIEW_DESCRIPTIONS: Record<ViewId, string> = {
+  instructions: "Read bytecode instructions and operands",
+  literals: "Browse literal values and symbol references",
+  decompile: "Read reconstructed Tcl source",
+  source: "Map source lines to bytecode instructions",
+  comparison: "Compare original and reconstructed source",
+  diagnostics: "Inspect analysis warnings and errors",
+  provenance: "Trace how reconstructed code was derived",
+  project: "Browse project files and procedures",
+  detail: "Inspect the selected instruction and its effects",
+  exceptions: "Explore exception handlers and protected ranges",
+  graph: "Follow branches, loops, and control flow",
+  summary: "See file metadata and bytecode statistics",
+  variables: "Inspect live variables while paused",
+  stack: "Explore active calls and stack frames",
+  console: "Read runtime output and evaluate Tcl expressions",
+  breakpoints: "Manage where execution pauses",
+  watchpoints: "Pause when watched variables change",
+  commandResolver: "Inspect runtime command resolution",
+};
+
 export const ALL_VIEW_IDS = VIEW_DEFINITIONS.map((view) => view.id);
 
 export const VIEW_TITLES: Record<ViewId, string> = Object.fromEntries(

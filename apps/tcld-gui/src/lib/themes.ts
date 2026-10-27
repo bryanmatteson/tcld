@@ -260,10 +260,10 @@ export const DESIGN_TYPE_SYSTEMS: Record<TypeSystemId, {
     label: "Mono Brutalist",
   },
   "modern-sans": {
-    ui: "'Inter', -apple-system, sans-serif",
-    mono: "'IBM Plex Mono', ui-monospace, monospace",
+    ui: "'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+    mono: "'JetBrains Mono', 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace",
     scale: 1,
-    tracking: "-0.005em",
+    tracking: "0",
     weight: "450",
     label: "Modern Sans",
   },

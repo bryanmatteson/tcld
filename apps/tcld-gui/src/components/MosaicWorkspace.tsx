@@ -17,7 +17,7 @@ import { Plus, Replace } from "lucide-react";
 import { ViewIcon } from "./ViewIcon";
 import { Panel } from "./panels/Panel";
 import { PanelMetaProvider } from "./panels/PanelContext";
-import { useTcldStore } from "@/lib/store";
+import { useTcldData } from "@/lib/store";
 import { useDebugStore } from "@/lib/debug-store";
 import { useLocationStore } from "@/lib/location-store";
 import { computeScopeId } from "@/lib/location-index";
@@ -561,7 +561,7 @@ interface MosaicWorkspaceProps {
   setFlyoutOpen: (open: boolean) => void;
 }
 
-export function MosaicWorkspace({
+export const MosaicWorkspace = React.memo(function MosaicWorkspace({
   mosaicNode,
   viewStacks,
   focusedViewId,
@@ -594,9 +594,9 @@ export function MosaicWorkspace({
   restoreFlyoutLeaf,
   setFlyoutOpen,
 }: MosaicWorkspaceProps) {
-  const store = useTcldStore();
+  const store = useTcldData();
   const debug = useDebugStore();
-  const { setExecution } = useLocationStore();
+  const setExecution = useLocationStore((s) => s.setExecution);
   const instructions = useMemo(() => store.data?.instructions ?? [], [store.data?.instructions]);
 
   // Debug execution state — correlate from stoppedAt
@@ -1098,17 +1098,11 @@ export function MosaicWorkspace({
               // session is running, fall back to the active document's
               // sourcePath so users can set breakpoints BEFORE launch —
               // they'll be replayed when the session starts.
-              const activeDoc = store.session.documents.find(
-                (doc) => doc.id === store.session.activeDocumentId,
-              );
-              const file = debug.scriptPath || activeDoc?.sourcePath;
+              const file = debug.scriptPath || store.activeSourcePath;
               if (file) debug.toggleBreakpoint(file, line);
             }}
             onRemoveBreakpoint={(line) => {
-              const activeDoc = store.session.documents.find(
-                (doc) => doc.id === store.session.activeDocumentId,
-              );
-              const file = debug.scriptPath || activeDoc?.sourcePath;
+              const file = debug.scriptPath || store.activeSourcePath;
               if (file) debug.clearBreakpoint(file, line);
             }}
             onRunToCursor={(line) => {
@@ -1124,10 +1118,7 @@ export function MosaicWorkspace({
         provenance: () => <ProvenancePanel {...baseProps} />,
         project: () => <ProjectPanel {...baseProps} />,
         detail: () => (
-          <DetailPanel
-            {...baseProps}
-            onOpenView={(viewId) => addViewToLeaf(viewId, leafId)}
-          />
+          <DetailPanel {...baseProps} />
         ),
         literals: () => <LiteralsPanel {...baseProps} />,
         exceptions: () => <ExceptionsPanel {...baseProps} />,
@@ -1514,4 +1505,4 @@ export function MosaicWorkspace({
       </DragOverlay>
     </DndContext>
   );
-}
+});

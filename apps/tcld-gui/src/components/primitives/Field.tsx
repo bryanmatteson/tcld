@@ -19,6 +19,8 @@ interface FieldProps {
   wrap?: boolean;
   className?: string;
   title?: string;
+  /** Pass-through for data-* attributes (parity probes, tests). */
+  [dataAttr: `data-${string}`]: string | boolean | number | undefined;
 }
 
 const TONE: Record<NonNullable<FieldProps["tone"]>, string> = {
@@ -45,9 +47,11 @@ export function Field({
   wrap = false,
   className,
   title,
+  ...rest
 }: FieldProps) {
   return (
     <div
+      {...rest}
       title={title}
       // Row height pinned to --row-h (compact:22, regular:26, comfy:30) so
       // the inspector field row scales with the workspace density mode
@@ -55,21 +59,21 @@ export function Field({
       // in the canonical workbench mock.
       className={clsx(
         "flex items-baseline gap-2 leading-[var(--row-h)] py-px min-h-[var(--row-h)]",
-        mono && "font-mono",
         "text-meta",
         className,
       )}
     >
       <span
-        className="flex-shrink-0 text-tcld-fg-muted whitespace-nowrap"
+        className="flex-shrink-0 font-ui text-tcld-fg-muted whitespace-nowrap"
         style={{ width: labelWidth }}
       >
         {label}
       </span>
       <span
         className={clsx(
-          "min-w-0 flex-1",
-          wrap ? "break-words" : "truncate",
+          "min-w-0 flex-1 text-meta",
+          mono ? "font-mono" : "font-ui",
+          wrap ? "break-words leading-normal py-1" : "truncate",
           TONE[tone],
         )}
       >

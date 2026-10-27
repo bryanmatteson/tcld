@@ -33,7 +33,6 @@ interface FileHeaderProps {
 }
 
 export function FileHeader({
-  meta,
   documents,
   activeDocumentId,
   onOpenFile,
@@ -77,6 +76,7 @@ export function FileHeader({
             aria-label="Command Palette"
           >
             <Command size={14} aria-hidden />
+            <span className="tcld-chrome-label">Commands</span>
           </button>
           <PanelPicker openPanels={openPanels} onAddPanel={onAddPanel} />
         </div>
@@ -160,17 +160,11 @@ export function FileHeader({
             disabled={!onOpenFile}
           >
             <FilePlus2 size={13} aria-hidden />
+            <span className="tcld-chrome-label">Open file</span>
           </button>
         </div>
 
         <div className="tcld-tabbar-spacer" />
-
-        {!meta && (
-          <span className="hidden min-w-0 items-center gap-1.5 font-mono text-label text-tcld-fg-dim lg:flex">
-            <FileCode2 size={12} aria-hidden />
-            Open Tcl bytecode or source to populate the workspace.
-          </span>
-        )}
 
         <span className="sr-only" data-status-panel-count={panelCount}>{panelCount} panel{panelCount !== 1 ? "s" : ""}</span>
       </div>

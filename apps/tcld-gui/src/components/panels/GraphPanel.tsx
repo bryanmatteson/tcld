@@ -2,17 +2,19 @@
 
 import React, { useMemo, useRef, useState, useCallback, useEffect } from "react";
 import dagre from "@dagrejs/dagre";
-import { useTcldStore } from "@/lib/store";
+import { useTcldData } from "@/lib/store";
 import { T } from "@/lib/theme";
 import { Panel } from "./Panel";
 import clsx from "clsx";
-import { ArrowRight, ChevronDown, ChevronRight, Crosshair, Maximize, Play, ZoomIn, ZoomOut } from "lucide-react";
+import { ArrowRight, ChevronDown, ChevronRight, Crosshair, Maximize, Play, Workflow, ZoomIn, ZoomOut } from "lucide-react";
+import { EmptyState } from "@/components/EmptyState";
 import type { BasicBlock, Instruction } from "@/types";
 import { useContextMenu } from "@/hooks/use-context-menu";
 import { ContextMenu, type ContextMenuItem } from "@/components/overlays/ContextMenu";
 import { useCommands } from "@/hooks/use-commands";
 import { commandRegistry } from "@/lib/command-registry";
 import { useLocationStore } from "@/lib/location-store";
+import { useShallow } from "zustand/react/shallow";
 import { hoverBus } from "@/lib/hover-bus";
 import { useHoverHighlight } from "@/hooks/use-hover-highlight";
 import { useDebugStore } from "@/lib/debug-store";
@@ -31,31 +33,51 @@ import {
 
 type DetailMode = "compact" | "medium" | "full";
 
-const NODE_W = 200;
-const NODE_PAD_X = 10;
+const NODE_W = 232;
+const NODE_PAD_X = 12;
 const NODE_PAD_TOP = 6;
-const LINE_H = 15;
-const HEADER_H = 18;
+const LINE_H = 17;
+const HEADER_H = 22;
+const SOURCE_LINE_H = 13;
+const SOURCE_GAP = 6;
+const FOOTER_H = 16;
 const NODE_SEP = 30;
 const RANK_SEP = 50;
 const GRAPH_PAD = 40;
 const ZOOM_MIN = 0.25;
+// Opening zoom never drops below this: a whole-graph fit of a large proc is
+// unreadable, so the first view favors legible blocks near the entry.
+const READABLE_ZOOM = 0.8;
 const ZOOM_MAX = 2.5;
 const ZOOM_STEP = 0.1;
 
 // ─── Layout Helpers ──────────────────────────────────────────────
 
+function visibleSourceLineCount(mode: DetailMode, sourceLines: string[]): number {
+  if (mode === "compact") return 0;
+  return Math.min(sourceLines.length, mode === "medium" ? 1 : 3);
+}
+
+function visibleInstructionLineCount(block: BasicBlock, mode: DetailMode): number {
+  if (mode === "compact") return 1; // terminal opcode
+  if (mode === "medium") return Math.min(block.instructions.length, 4); // first 2 + ... + last 1
+  return block.instructions.length;
+}
+
+// Vertical stack inside a node: header, instruction rows, optional source
+// preview, then a footer row for the edge-count marker. Rendering reads the
+// same offsets so rows never overlap.
+function sourceTop(instructionLines: number): number {
+  return NODE_PAD_TOP + HEADER_H + instructionLines * LINE_H + SOURCE_GAP;
+}
+
 function nodeHeight(block: BasicBlock, mode: DetailMode, sourceLines: string[] = []): number {
-  const headerLines = 1;
-  let bodyLines: number;
-  if (mode === "compact") {
-    bodyLines = 1; // terminal opcode
-  } else if (mode === "medium") {
-    bodyLines = Math.min(block.instructions.length, 4) + (sourceLines.length > 0 ? 1 : 0); // first 2 + ... + last 1 + source hint
-  } else {
-    bodyLines = block.instructions.length + Math.min(sourceLines.length, 3);
-  }
-  return NODE_PAD_TOP + (headerLines + bodyLines) * LINE_H + 8;
+  const instructionLines = visibleInstructionLineCount(block, mode);
+  const sourceCount = visibleSourceLineCount(mode, sourceLines);
+  const body = sourceCount > 0
+    ? sourceTop(instructionLines) + sourceCount * SOURCE_LINE_H
+    : NODE_PAD_TOP + HEADER_H + instructionLines * LINE_H;
+  return body + FOOTER_H;
 }
 
 interface LayoutNode {
@@ -301,7 +323,7 @@ const BlockNode = React.memo(function BlockNode({
         ? T.group
         : T.border;
 
-  const opacity = isDimmed && !isExecution ? 0.45 : 1;
+  const opacity = isDimmed && !isExecution ? 0.6 : 1;
 
   return (
     <g
@@ -333,16 +355,19 @@ const BlockNode = React.memo(function BlockNode({
       <rect
         width={w}
         height={h}
-        rx={3}
+        rx={6}
         fill={T.bg3}
         stroke={borderColor}
         strokeWidth={isSelected ? 2 : 1}
         style={{ transition: "stroke 150ms, stroke-width 150ms" }}
       />
+      {/* Role rail, inset so it stays inside the rounded corners. */}
       <rect
-        width={4}
-        height={h}
-        rx={3}
+        x={3}
+        y={6}
+        width={3}
+        height={Math.max(0, h - 12)}
+        rx={1.5}
         fill={roleColor}
         opacity={isSelected ? 0.95 : 0.72}
       />
@@ -351,7 +376,7 @@ const BlockNode = React.memo(function BlockNode({
         <rect
           width={w}
           height={h}
-          rx={3}
+          rx={6}
           fill="none"
           stroke={T.success}
           strokeWidth={1}
@@ -366,7 +391,7 @@ const BlockNode = React.memo(function BlockNode({
         <rect
           width={w}
           height={h}
-          rx={3}
+          rx={6}
           fill="none"
           stroke={T.accent}
           strokeWidth={0.5}
@@ -380,7 +405,7 @@ const BlockNode = React.memo(function BlockNode({
         x={NODE_PAD_X}
         y={NODE_PAD_TOP + HEADER_H - 4}
         fontFamily="var(--font-mono)"
-        fontSize={10.5}
+        fontSize={12}
         fontWeight={600}
         fill={isSelected ? T.accent : T.fg}
       >
@@ -395,8 +420,9 @@ const BlockNode = React.memo(function BlockNode({
         <text
           x={w - NODE_PAD_X}
           y={NODE_PAD_TOP + HEADER_H - 4}
-          fontFamily="var(--font-mono)"
-          fontSize={9}
+          fontFamily="var(--font-ui)"
+          fontSize={10.5}
+          fontWeight={500}
           fill={roleColor}
           textAnchor="end"
         >
@@ -410,7 +436,7 @@ const BlockNode = React.memo(function BlockNode({
           x={NODE_PAD_X}
           y={NODE_PAD_TOP + HEADER_H + LINE_H - 4}
           fontFamily="var(--font-mono)"
-          fontSize={9.5}
+          fontSize={11}
           fill={T.keyword}
         >
           {terminalOp}
@@ -424,12 +450,12 @@ const BlockNode = React.memo(function BlockNode({
           x={NODE_PAD_X}
           y={NODE_PAD_TOP + HEADER_H + (i + 1) * LINE_H - 4}
           fontFamily="var(--font-mono)"
-          fontSize={9}
+          fontSize={11}
           fill={inst.pc === -1 ? T.fgDim : T.keyword}
         >
           {inst.pc === -1 ? inst.name : (
             <>
-              <tspan fill={T.fgDim} fontSize={8}>
+              <tspan fill={T.fgDim} fontSize={10}>
                 {inst.pc.toString(16).padStart(4, "0")}
               </tspan>
               <tspan fill={T.keyword}>{" "}{inst.name}</tspan>
@@ -438,28 +464,16 @@ const BlockNode = React.memo(function BlockNode({
         </text>
       ))}
 
-      {effectiveMode === "medium" && sourceLines.length > 0 && (
-        <text
-          x={NODE_PAD_X}
-          y={h - 17}
-          fontFamily="var(--font-mono)"
-          fontSize={8}
-          fill={T.fgDim}
-        >
-          {sourceLines[0].slice(0, 30)}
-        </text>
-      )}
-
-      {effectiveMode === "full" && sourceLines.slice(0, 3).map((line, i) => (
+      {sourceLines.slice(0, visibleSourceLineCount(effectiveMode, sourceLines)).map((line, i) => (
         <text
           key={`source-${i}`}
           x={NODE_PAD_X}
-          y={h - 17 - (Math.min(sourceLines.length, 3) - 1 - i) * 11}
+          y={sourceTop(visibleInstructionLineCount(block, effectiveMode)) + (i + 1) * SOURCE_LINE_H - 3}
           fontFamily="var(--font-mono)"
-          fontSize={8}
+          fontSize={10}
           fill={T.fgDim}
         >
-          {line.slice(0, 34)}
+          {line.slice(0, 32)}
         </text>
       ))}
 
@@ -467,12 +481,12 @@ const BlockNode = React.memo(function BlockNode({
       {block.edges.length > 0 && (
         <text
           x={w - NODE_PAD_X}
-          y={h - 4}
+          y={h - 5}
           fontFamily="var(--font-mono)"
-          fontSize={8}
+          fontSize={9.5}
           fill={T.fgDim}
           textAnchor="end"
-          opacity={0.5}
+          opacity={0.6}
         >
           →{block.edges.length}
         </text>
@@ -480,12 +494,12 @@ const BlockNode = React.memo(function BlockNode({
       {block.edges.length === 0 && (
         <text
           x={w - NODE_PAD_X}
-          y={h - 4}
-          fontFamily="var(--font-mono)"
-          fontSize={8}
+          y={h - 5}
+          fontFamily="var(--font-ui)"
+          fontSize={9.5}
           fill={T.error}
           textAnchor="end"
-          opacity={0.6}
+          opacity={0.75}
         >
           exit
         </text>
@@ -553,8 +567,8 @@ export function GraphPanel({
   onClose,
   onFocus,
 }: GraphPanelProps) {
-  const { cursor, execution, setCursor, jumpToBlock, index } = useLocationStore();
-  const { data } = useTcldStore();
+  const { cursor, execution, setCursor, jumpToBlock, index } = useLocationStore(useShallow((s) => ({ cursor: s.cursor, execution: s.execution, setCursor: s.setCursor, jumpToBlock: s.jumpToBlock, index: s.index })));
+  const { data } = useTcldData();
   const debug = useDebugStore();
   const blocks = useMemo(() => data?.blocks ?? [], [data?.blocks]);
   const instructions = useMemo(() => data?.instructions ?? [], [data?.instructions]);
@@ -683,6 +697,28 @@ export function GraphPanel({
     forceRender((n) => n + 1);
   }, [layout, applyTransform]);
 
+  // First view: fit when that stays legible, otherwise keep a readable zoom
+  // and frame the selected (or entry) block at the top of the viewport.
+  const showInitialView = useCallback(() => {
+    if (!viewportRef.current) return;
+    const vp = viewportRef.current.getBoundingClientRect();
+    if (layout.width === 0 || layout.height === 0) return;
+    const fitZoom = Math.min((vp.width - 20) / layout.width, (vp.height - 20) / layout.height, 1.5);
+    if (fitZoom >= READABLE_ZOOM) {
+      fitToView();
+      return;
+    }
+    const anchor = layout.nodes.find((n) => n.id === cursor.blockId)
+      ?? layout.nodes.reduce<LayoutNode | null>((top, n) => (top == null || n.y < top.y ? n : top), null);
+    const zoom = READABLE_ZOOM;
+    const panX = anchor ? vp.width / 2 - (anchor.x + anchor.w / 2) * zoom : (vp.width - layout.width * zoom) / 2;
+    const panY = anchor ? 24 - anchor.y * zoom : 24;
+    transformRef.current = { panX, panY, zoom };
+    setZoom(zoom);
+    applyTransform();
+    forceRender((n) => n + 1);
+  }, [layout, cursor.blockId, fitToView, applyTransform]);
+
   const centerOnBlock = useCallback(
     (blockId: number) => {
       if (!viewportRef.current) return;
@@ -717,11 +753,11 @@ export function GraphPanel({
     if (blocks.length > 0 && !hasFittedRef.current) {
       // Small delay for viewport to have dimensions
       requestAnimationFrame(() => {
-        fitToView();
+        showInitialView();
         hasFittedRef.current = true;
       });
     }
-  }, [blocks.length, fitToView]);
+  }, [blocks.length, showInitialView]);
 
   // Re-fit when detail mode changes
   useEffect(() => {
@@ -1041,9 +1077,11 @@ export function GraphPanel({
   if (blocks.length === 0) {
     return (
       <Panel id={id} title="Graph" badge="0 blocks" focused={focused} designSurface="view-flow" onClose={onClose} onFocus={onFocus}>
-        <div className="p-6 text-tcld-fg-dim font-mono text-xs text-center">
-          no control-flow graph available
-        </div>
+        <EmptyState
+          icon={<Workflow aria-hidden />}
+          title="No control-flow graph"
+          message="Open a file with bytecode to see its basic blocks and branches."
+        />
       </Panel>
     );
   }
@@ -1060,83 +1098,96 @@ export function GraphPanel({
     >
       {/* Toolbar */}
       <div className="tcld-flow-toolbar">
-        <span className="tcld-flow-toolbar-label">show</span>
-        {([
-          { mode: "basic-block", actionId: "graph:mode-basic-block" },
-          { mode: "source-snippet", actionId: "graph:mode-source-snippet" },
-        ] as const).map(({ mode, actionId }) => (
-          <button
-            key={mode}
-            onClick={() => commandRegistry.execute(actionId)}
-            className={graphMode === mode ? "tcld-flow-segment tcld-flow-segment-active" : "tcld-flow-segment"}
-            title={mode === "basic-block" ? "Basic Block Mode" : "Source Snippet Mode"}
-          >
-            {mode === "basic-block" ? "Disasm" : "Source"}
-          </button>
-        ))}
-        <div className="tcld-flow-divider" />
+        <div className="tcld-toolbar-group" role="tablist" aria-label="Block contents">
+          {([
+            { mode: "basic-block", actionId: "graph:mode-basic-block" },
+            { mode: "source-snippet", actionId: "graph:mode-source-snippet" },
+          ] as const).map(({ mode, actionId }) => (
+            <button
+              key={mode}
+              type="button"
+              role="tab"
+              aria-selected={graphMode === mode}
+              onClick={() => commandRegistry.execute(actionId)}
+              className={clsx("tcld-toolbar-pill", graphMode === mode && "is-active")}
+              title={mode === "basic-block" ? "Basic Block Mode" : "Source Snippet Mode"}
+            >
+              {mode === "basic-block" ? "Disasm" : "Source"}
+            </button>
+          ))}
+        </div>
 
         {/* Detail mode toggle */}
-        <span className="tcld-flow-toolbar-label">detail</span>
-        {([
-          { mode: "compact", actionId: "graph:detail-compact" },
-          { mode: "medium", actionId: "graph:detail-medium" },
-          { mode: "full", actionId: "graph:detail-full" },
-        ] as const).map(({ mode, actionId }) => (
-          <button
-            key={mode}
-            onClick={() => commandRegistry.execute(actionId)}
-            className={detailMode === mode ? "tcld-flow-segment tcld-flow-segment-active" : "tcld-flow-segment"}
-            title={`${mode} detail (${mode === "compact" ? "1" : mode === "medium" ? "2" : "3"})`}
-          >
-            {mode[0].toUpperCase()}
-          </button>
-        ))}
+        <div className="tcld-toolbar-group" role="tablist" aria-label="Block detail">
+          {([
+            { mode: "compact", actionId: "graph:detail-compact" },
+            { mode: "medium", actionId: "graph:detail-medium" },
+            { mode: "full", actionId: "graph:detail-full" },
+          ] as const).map(({ mode, actionId }) => (
+            <button
+              key={mode}
+              type="button"
+              role="tab"
+              aria-selected={detailMode === mode}
+              onClick={() => commandRegistry.execute(actionId)}
+              className={clsx("tcld-toolbar-pill", detailMode === mode && "is-active")}
+              title={`${mode} detail (${mode === "compact" ? "1" : mode === "medium" ? "2" : "3"})`}
+            >
+              {mode[0].toUpperCase() + mode.slice(1)}
+            </button>
+          ))}
+        </div>
 
-        <div className="tcld-flow-divider" />
-        <span className="tcld-flow-chip">{metrics.blockCount} blocks</span>
-        <span className="tcld-flow-chip">{metrics.edgeCount} edges</span>
-        <span className="tcld-flow-chip tcld-flow-chip-accent">{metrics.loopCount} loops</span>
-        <span className="tcld-flow-chip tcld-flow-chip-warn">{metrics.branchCount} branches</span>
-
-        {/* Fit to view */}
-        <button
-          onClick={() => commandRegistry.execute("graph:fit")}
-          className="tcld-flow-icon-button"
-          title="Fit to view (f)"
-        >
-          <Maximize size={11} />
-        </button>
-
-        {/* Center on selected */}
-        <button
-          onClick={() => commandRegistry.execute("graph:center-selection")}
-          className={selectedBlockId !== null ? "tcld-flow-icon-button" : "tcld-flow-icon-button tcld-flow-icon-button-disabled"}
-          title="Center on selected (c)"
-        >
-          <Crosshair size={11} />
-        </button>
-
-        {/* Zoom controls */}
-        <button
-          onClick={() => commandRegistry.execute("graph:zoom-out")}
-          className="tcld-flow-icon-button"
-          title="Zoom out"
-        >
-          <ZoomOut size={11} />
-        </button>
-        <span className="tcld-flow-zoom">
-          {zoomPercent}%
-        </span>
-        <button
-          onClick={() => commandRegistry.execute("graph:zoom-in")}
-          className="tcld-flow-icon-button"
-          title="Zoom in"
-        >
-          <ZoomIn size={11} />
-        </button>
+        <span className="tcld-toolbar-divider" aria-hidden />
+        <span className="tcld-toolbar-meta">{metrics.blockCount} blocks · {metrics.edgeCount} edges</span>
+        <span className="tcld-flow-chip tcld-flow-chip-accent" title="Back edges that close a loop">{metrics.loopCount} loops</span>
+        <span className="tcld-flow-chip tcld-flow-chip-warn" title="Blocks that end in a conditional jump">{metrics.branchCount} branches</span>
 
         <div className="flex-1" />
+
+        {/* Viewport: fit, center, zoom */}
+        <div className="tcld-toolbar-group" role="group" aria-label="Zoom">
+          <button
+            type="button"
+            onClick={() => commandRegistry.execute("graph:fit")}
+            className="tcld-toolbar-icon"
+            title="Fit to view (f)"
+            aria-label="Fit to view"
+          >
+            <Maximize size={14} aria-hidden />
+          </button>
+          <button
+            type="button"
+            onClick={() => commandRegistry.execute("graph:center-selection")}
+            className="tcld-toolbar-icon"
+            disabled={selectedBlockId === null}
+            title="Center on selected (c)"
+            aria-label="Center on selected block"
+          >
+            <Crosshair size={14} aria-hidden />
+          </button>
+          <button
+            type="button"
+            onClick={() => commandRegistry.execute("graph:zoom-out")}
+            className="tcld-toolbar-icon"
+            title="Zoom out"
+            aria-label="Zoom out"
+          >
+            <ZoomOut size={14} aria-hidden />
+          </button>
+          <span className="tcld-flow-zoom" aria-live="polite">
+            {zoomPercent}%
+          </span>
+          <button
+            type="button"
+            onClick={() => commandRegistry.execute("graph:zoom-in")}
+            className="tcld-toolbar-icon"
+            title="Zoom in"
+            aria-label="Zoom in"
+          >
+            <ZoomIn size={14} aria-hidden />
+          </button>
+        </div>
 
         <div className="tcld-flow-inline-legend" data-flow-edge-legend="toolbar">
           {EDGE_LEGEND.map((item) => (

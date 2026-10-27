@@ -109,7 +109,11 @@ exceptions, diagnostics, traces, or debugger controls forward. Panel tabs,
 folding, filters, column controls, and linked-navigation toggles let you tune
 how much context stays visible.
 
-The app loads `.tbc` artifacts and Tcl sources or wrappers. Run configurations
+The app loads `.tbc` artifacts, Tcl bytecode wrappers, and plain Tcl source
+admitted by the shared source compiler. Opening source compiles it without
+executing it; unsupported forms show a compiler diagnostic. Bundled examples
+include the matching original source and compiled fixtures, including loops and
+exception handling. Run configurations
 keep the interpreter/backend, arguments, working directory, environment, and
 debug options with the launch you use. Debug layouts bring the source,
 variables, stack, breakpoints, and console together.

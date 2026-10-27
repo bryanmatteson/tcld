@@ -71,6 +71,7 @@ import {
 } from "@/lib/tauri-api";
 import { addRecentFile, loadRecentFiles, type RecentFile } from "@/lib/recent-files";
 import { useLocationStore } from "@/lib/location-store";
+import { useShallow } from "zustand/react/shallow";
 import { computeScopeId } from "@/lib/location-index";
 import { buildFullReport, resolveBreakpointTarget } from "@/lib/workflow-contracts";
 import { formatOutputForCopy } from "@/lib/output-search";
@@ -109,8 +110,13 @@ import {
   Play,
   Plus,
   Settings2,
+  LoaderCircle,
+  X,
   type LucideIcon,
 } from "lucide-react";
+
+/** Leaves holding any of these views host panels revealed on a debugger stop. */
+const STOP_PANEL_HOST_VIEWS: readonly ViewId[] = ["variables", "stack", "breakpoints", "watchpoints", "console"];
 
 function browserStorage() {
   const memory = new Map<string, string>();
@@ -203,7 +209,24 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
     historyForward,
     goBackTo,
     cursor,
-  } = useLocationStore();
+  } = useLocationStore(useShallow((s) => ({
+    setMark: s.setMark,
+    goToMark: s.goToMark,
+    clearMark: s.clearMark,
+    togglePinA: s.togglePinA,
+    togglePinB: s.togglePinB,
+    setPinA: s.setPinA,
+    setPinB: s.setPinB,
+    pinA: s.pinA,
+    pinB: s.pinB,
+    marks: s.marks,
+    index: s.index,
+    execution: s.execution,
+    historyBack: s.historyBack,
+    historyForward: s.historyForward,
+    goBackTo: s.goBackTo,
+    cursor: s.cursor,
+  })));
   const {
     state,
     setState,
@@ -255,6 +278,27 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
 
   const debug = useDebugStore();
   const lastStopKeyRef = useRef<string | null>(null);
+  const workspaceRef = useRef({ tree: state.mosaicNode, stacks: state.viewStacks });
+  useEffect(() => {
+    workspaceRef.current = { tree: state.mosaicNode, stacks: state.viewStacks };
+  }, [state.mosaicNode, state.viewStacks]);
+
+  // A stop surfaces the relevant panel without reshaping the layout: as a tab
+  // beside the debugger panels (or the Inspector) when one is open, and only
+  // as a new split when nothing suitable is.
+  const revealOnStop = useCallback((view: ViewId) => {
+    const { tree, stacks } = workspaceRef.current;
+    const leaves = getLeafIds(tree);
+    if (leaves.some((leafId) => stacks[leafId]?.views.includes(view))) {
+      addView(view);
+      return;
+    }
+    const hostOf = (candidates: readonly ViewId[]) =>
+      leaves.find((leafId) => stacks[leafId]?.views.some((open) => candidates.includes(open)));
+    const host = hostOf(STOP_PANEL_HOST_VIEWS) ?? hostOf(["detail"]);
+    if (host) addViewToLeaf(view, host);
+    else addView(view);
+  }, [addView, addViewToLeaf]);
 
   useEffect(() => {
     const stopped = debug.stoppedAt;
@@ -264,13 +308,13 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
     lastStopKeyRef.current = key;
 
     if (stopped.reason === "exception") {
-      addView("console");
+      revealOnStop("console");
     } else if (stopped.reason === "breakpoint") {
-      addView("breakpoints");
+      revealOnStop("breakpoints");
     } else if (stopped.reason === "watchpoint") {
-      addView("variables");
+      revealOnStop("variables");
     }
-  }, [addView, debug.sessionState, debug.stoppedAt]);
+  }, [revealOnStop, debug.sessionState, debug.stoppedAt]);
 
   // ─── Debug-mode condensed chrome ─────────────────────────────
   useEffect(() => {
@@ -1309,7 +1353,7 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
         title: "Debug: Stop",
         category: "Debug",
         shortcut: ["Shift+F5"],
-        when: "!overlayOpen,debuggerAvailable",
+        when: "!overlayOpen,!debugState:idle,!debugState:terminated,debuggerAvailable",
         run: () => { void debug.stop(); },
       },
       {
@@ -1317,7 +1361,7 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
         title: "Debug: Restart",
         category: "Debug",
         shortcut: ["Mod+Shift+F5"],
-        when: "!overlayOpen,debuggerAvailable",
+        when: "!overlayOpen,!debugState:idle,!debugBusy,debuggerAvailable",
         run: () => {
           if (!debug.isBusy) void debug.restart();
         },
@@ -1327,7 +1371,7 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
         title: "Debug: Pause",
         category: "Debug",
         shortcut: ["F6"],
-        when: "!overlayOpen,debuggerAvailable",
+        when: "!overlayOpen,debugState:running,!debugBusy,debuggerAvailable",
         run: () => {
           if (!debug.isBusy) void debug.pause();
         },
@@ -1337,7 +1381,7 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
         title: "Debug: Step Into",
         category: "Debug",
         shortcut: ["F11"],
-        when: "!overlayOpen,debuggerAvailable",
+        when: "!overlayOpen,debugState:paused,!debugBusy,!isExceptionStop,debuggerAvailable",
         run: () => {
           if (!debug.isBusy && debug.stoppedAt?.reason !== "exception") void debug.stepInto();
         },
@@ -1406,7 +1450,7 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
         title: "Debug: Step Over",
         category: "Debug",
         shortcut: ["F10"],
-        when: "!overlayOpen,debuggerAvailable",
+        when: "!overlayOpen,debugState:paused,!debugBusy,!isExceptionStop,debuggerAvailable",
         run: () => {
           if (!debug.isBusy && debug.stoppedAt?.reason !== "exception") void debug.stepOver();
         },
@@ -1416,7 +1460,7 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
         title: "Debug: Step Out",
         category: "Debug",
         shortcut: ["Shift+F11"],
-        when: "!overlayOpen,debuggerAvailable",
+        when: "!overlayOpen,debugState:paused,!debugBusy,!isExceptionStop,debuggerAvailable",
         run: () => {
           if (!debug.isBusy && debug.stoppedAt?.reason !== "exception") void debug.stepOut();
         },
@@ -1425,7 +1469,7 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
         id: "debug:continue",
         title: "Debug: Continue",
         category: "Debug",
-        when: "debuggerAvailable",
+        when: "!overlayOpen,debugState:paused,!debugBusy,!isExceptionStop,debuggerAvailable",
         run: () => {
           if (!debug.isBusy && debug.stoppedAt?.reason !== "exception") void debug.resume();
         },
@@ -1767,13 +1811,26 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
 
   useCommands(commands);
 
+  // `commands` turns over with the cursor; the keybinding store only cares
+  // about ids and default shortcuts, so re-sync (and re-notify every registry
+  // subscriber) only when those change.
+  const commandShortcutDefaults = useMemo(
+    () => commands.map((command) => ({ id: command.id, defaultShortcuts: command.shortcut ?? [] })),
+    [commands],
+  );
+  const commandShortcutKey = useMemo(
+    () => commandShortcutDefaults.map((entry) => `${entry.id}=${entry.defaultShortcuts.join(",")}`).join("\n"),
+    [commandShortcutDefaults],
+  );
+  const commandShortcutDefaultsRef = useRef(commandShortcutDefaults);
   useEffect(() => {
-    keybindingStore.updateActions(commands.map((command) => ({
-      id: command.id,
-      defaultShortcuts: command.shortcut ?? [],
-    })));
+    commandShortcutDefaultsRef.current = commandShortcutDefaults;
+  }, [commandShortcutDefaults]);
+
+  useEffect(() => {
+    keybindingStore.updateActions(commandShortcutDefaultsRef.current);
     applyKeybindingOverrides();
-  }, [applyKeybindingOverrides, commands, keybindingRevision, keybindingStore]);
+  }, [applyKeybindingOverrides, commandShortcutKey, keybindingRevision, keybindingStore]);
 
   const commandContext = useMemo<CommandContext>(() => ({
     overlayOpen: state.showPalette || state.showHelp || state.showCommand,
@@ -1807,6 +1864,7 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
   useEffect(() => {
     const inTauri = isTauri();
     const handler = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || (e.target instanceof Element && e.target.closest('[aria-modal="true"]'))) return;
       if (inTauri && /^F\d+$/.test(e.key)) return;
       const handled = commandRegistry.handleKeydown(e, commandContext);
       if (handled) {
@@ -1867,11 +1925,25 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
     };
   }, [recentRunConfigurationActionByMenuItem]);
 
+  // `commands` turns over on every cursor move; only cross the IPC boundary
+  // (and rebuild native menus) when a payload actually changes.
+  const lastMenuAvailabilityRef = useRef<string | null>(null);
+  const lastRecentConfigurationsRef = useRef<string | null>(null);
   useEffect(() => {
     if (!isTauri()) return;
     const itemIds = defaultNativeMenuCoverageContract().nativeMenuItems.map((item) => item.itemId);
-    void emitTauriEvent("menu:availability", buildNativeMenuAvailabilityPayload(itemIds, commandContext, commandRegistry));
-    void emitTauriEvent("menu:recent-configurations", { items: recentRunConfigurationMenuItems });
+    const availability = buildNativeMenuAvailabilityPayload(itemIds, commandContext, commandRegistry);
+    const availabilityKey = JSON.stringify(availability);
+    if (availabilityKey !== lastMenuAvailabilityRef.current) {
+      lastMenuAvailabilityRef.current = availabilityKey;
+      void emitTauriEvent("menu:availability", availability);
+    }
+    const recentPayload = { items: recentRunConfigurationMenuItems };
+    const recentKey = JSON.stringify(recentPayload);
+    if (recentKey !== lastRecentConfigurationsRef.current) {
+      lastRecentConfigurationsRef.current = recentKey;
+      void emitTauriEvent("menu:recent-configurations", recentPayload);
+    }
   }, [commandContext, commands, recentRunConfigurationMenuItems]);
 
   useEffect(() => {
@@ -2027,43 +2099,6 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
   // ─── Loading state ──────────────────────────────────────────
 
   const debugActive = debug.sessionState !== "idle" && debug.sessionState !== "terminated";
-  if (store.loading && !debugActive && !visualParityState) {
-    return (
-      <div className="w-full h-screen bg-tcld-bg text-tcld-fg flex flex-col animate-fade-in">
-        {/* Skeleton header */}
-        <div className="flex items-center gap-3 px-4 py-2 bg-tcld-bg-1 border-b border-tcld-border-dim shrink-0">
-          <div className="h-4 w-10 rounded bg-tcld-bg-3 animate-pulse-subtle" />
-          <div className="w-px h-4 bg-tcld-border-dim" />
-          <div className="h-3.5 w-32 rounded bg-tcld-bg-3 animate-pulse-subtle" />
-        </div>
-
-        {/* Skeleton panels — mock default layout */}
-        <div className="flex-1 flex gap-px p-px">
-          {/* Left panel (instructions) */}
-          <SkeletonPanel rows={12} className="flex-1" />
-
-          {/* Right column */}
-          <div className="flex-1 flex flex-col gap-px">
-            <SkeletonPanel rows={8} className="flex-1" />
-            <SkeletonPanel rows={6} className="flex-1" />
-          </div>
-        </div>
-
-        {/* Label */}
-        <div className="flex items-center justify-center py-2">
-          <span className="font-mono text-xs text-tcld-fg-dim animate-pulse-subtle">
-            parsing bytecode...
-          </span>
-        </div>
-
-        {/* Skeleton status bar */}
-        <div className="flex items-center px-4 h-8 bg-tcld-bg-1 border-t border-tcld-border-dim">
-          <div className="h-3 w-24 rounded bg-tcld-bg-3 animate-pulse-subtle" />
-        </div>
-      </div>
-    );
-  }
-
   // ─── Main layout ─────────────────────────────────────────────
 
   return (
@@ -2159,6 +2194,20 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
       {/* ── Debug Toolbar (replaces titlebar chrome while debugging) ── */}
       {debugActive ? <DebugToolbar /> : null}
 
+      {store.loading && (
+        <div className="tcld-load-notice" role="status" aria-live="polite">
+          <LoaderCircle size={14} className="animate-spin" aria-hidden />
+          <span>Loading and analyzing file…</span>
+        </div>
+      )}
+      {store.error && store.loaded && (
+        <div className="tcld-load-notice tcld-load-error" role="alert">
+          <AlertTriangle size={14} aria-hidden />
+          <span>{store.error}</span>
+          <button type="button" onClick={store.dismissError} aria-label="Dismiss file error"><X size={14} aria-hidden /></button>
+        </div>
+      )}
+
       {/* ── Main Content ── */}
       {store.loaded || debugActive ? (
         <div className="tcld-workspace-shell flex-1 relative overflow-hidden">
@@ -2199,7 +2248,7 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
       ) : (
         <WelcomeScreen
           onOpenFile={handleOpenFile}
-          onLaunchDebug={handleLaunchDebug}
+          onLaunchDebug={debug.debuggerAvailable ? handleLaunchDebug : undefined}
           onRecentFile={handleRecentFile}
           isDropActive={dragOver}
         />
@@ -2234,6 +2283,7 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
 
       {/* ── Overlays ── */}
       <CommandPalette
+        commandContext={helpCommandContext}
         visible={state.showPalette}
         onSelect={handlePaletteSelect}
         onClose={closePalette}
@@ -2340,6 +2390,21 @@ function VisualParityProductionController({
   return null;
 }
 
+/** Miniature workbench drawn in the theme's own tokens, so themes are chosen
+ *  by how they look rather than by name. */
+function ThemeSwatch({ tokens }: { tokens: (typeof THEMES)[ThemeId]["tokens"] }) {
+  return (
+    <span className="tcld-theme-swatch" aria-hidden style={{ background: tokens["bg-canvas"], borderColor: tokens["line-2"] }}>
+      <span className="tcld-theme-swatch-panel" style={{ background: tokens["bg-panel"] }}>
+        <span style={{ background: tokens.kw, width: "34%" }} />
+        <span style={{ background: tokens.str, width: "58%" }} />
+        <span style={{ background: tokens.num, width: "22%" }} />
+      </span>
+      <span className="tcld-theme-swatch-accent" style={{ background: tokens.accent }} />
+    </span>
+  );
+}
+
 function PreferencesWindowApp() {
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
   const [activeSection, setActiveSection] = useState(() => {
@@ -2405,7 +2470,7 @@ function PreferencesWindowApp() {
                     data-preferences-section={section.label}
                     onClick={() => setActiveSection(section.label)}
                     className={clsx(
-                      "flex items-center justify-between gap-2 rounded-[var(--radius-button)] px-3 py-2 text-left font-mono text-xs",
+                      "flex items-center justify-between gap-2 rounded-[var(--radius-button)] px-3 py-2 text-left font-ui text-body",
                       activeSection === section.label
                         ? "bg-tcld-accent/15 text-tcld-accent"
                         : "text-tcld-fg-muted hover:bg-tcld-bg-highlight hover:text-tcld-fg",
@@ -2432,10 +2497,11 @@ function PreferencesWindowApp() {
       </aside>
       <main className="min-w-0 flex-1 overflow-auto p-6">
         <header className="mb-5">
-          <h1 className="m-0 font-mono text-section-h1 font-semibold text-tcld-fg">{activeSection}</h1>
-          <p className="mt-1 font-mono text-ui text-tcld-fg-muted">
-            Appearance settings are active and persisted. Unimplemented sections
-            remain informational or disabled.
+          <h1 className="m-0 font-ui text-section-h1 font-semibold tracking-[-0.01em] text-tcld-fg">{activeSection}</h1>
+          <p className="mt-1 font-ui text-ui text-tcld-fg-muted">
+            {activeSection === "Appearance"
+              ? "Choose how tcld looks. Changes apply immediately and are saved."
+              : "Settings for this section are not available yet."}
           </p>
         </header>
         {activeSection === "Appearance" ? (
@@ -2451,8 +2517,8 @@ function PreferencesWindowApp() {
                     className={clsx("tcld-pref-card", settings.theme === themeId && "is-active")}
                     onClick={() => updateAppearance({ ...settings, theme: themeId })}
                   >
-                    <span>{THEMES[themeId].label}</span>
-                    <span>{THEMES[themeId].tokens.accent}</span>
+                    <ThemeSwatch tokens={THEMES[themeId].tokens} />
+                    <span className="tcld-pref-card-name">{THEMES[themeId].label}</span>
                   </button>
                 ))}
               </div>
@@ -2465,7 +2531,7 @@ function PreferencesWindowApp() {
                     key={fontId}
                     type="button"
                     data-appearance-type-system={fontId}
-                    className={clsx("tcld-segment-button px-3 py-1.5 font-mono text-xs", settings.typeSystem === fontId && "is-active")}
+                    className={clsx("tcld-segment-button px-3 py-1.5 font-ui text-xs", settings.typeSystem === fontId && "is-active")}
                     onClick={() => updateAppearance({ ...settings, typeSystem: fontId, fontFamily: fontId })}
                   >
                     {FONTS[fontId].label}
@@ -2481,10 +2547,10 @@ function PreferencesWindowApp() {
                     key={density}
                     type="button"
                     data-appearance-density={density}
-                    className={clsx("tcld-segment-button px-3 py-1.5 font-mono text-xs", settings.density === density && "is-active")}
+                    className={clsx("tcld-segment-button px-3 py-1.5 font-ui text-xs", settings.density === density && "is-active")}
                     onClick={() => updateAppearance(setDensity(settings, density))}
                   >
-                    {density}
+                    {density[0].toUpperCase() + density.slice(1)}
                   </button>
                 ))}
               </div>
@@ -2518,7 +2584,7 @@ function PreferencesWindowApp() {
             aria-disabled="true"
           >
             <h2>{activeSection}</h2>
-            <p className="font-mono text-xs leading-6 text-tcld-fg-muted">
+            <p className="font-ui text-xs leading-6 text-tcld-fg-muted">
               This production section is intentionally present for visual parity; controls appear only when the app has an existing supported setting or workflow.
             </p>
           </div>
@@ -2642,14 +2708,14 @@ function RunConfigurationWindowApp() {
   return (
     <div className="flex h-screen flex-col bg-tcld-bg text-tcld-fg" data-design-surface="run-configuration-window" data-parity-state="run-configuration">
       <header className="border-b border-tcld-border-dim bg-tcld-bg-1 px-4 py-3">
-        <h1 className="font-mono text-sm text-tcld-fg">Run Configuration</h1>
+        <h1 className="font-ui text-ui font-semibold text-tcld-fg">Run Configuration</h1>
       </header>
       <div className="grid min-h-0 flex-1 grid-cols-[16rem_minmax(0,1fr)]">
         <aside className="min-h-0 overflow-auto border-r border-tcld-border-dim bg-tcld-bg-1/50 p-2">
           <button
             type="button"
             data-run-config-action="new"
-            className="mb-2 flex w-full items-center gap-2 rounded bg-tcld-bg-2 px-2 py-1 text-left font-mono text-xs text-tcld-fg-dim hover:bg-tcld-bg-highlight hover:text-tcld-fg"
+            className="mb-2 flex w-full items-center gap-2 rounded-[var(--radius-button)] bg-tcld-bg-2 px-2 py-1.5 text-left font-ui text-body text-tcld-fg-dim hover:bg-tcld-bg-highlight hover:text-tcld-fg"
             onClick={createNew}
           >
             <Plus size={13} aria-hidden />
@@ -2661,7 +2727,7 @@ function RunConfigurationWindowApp() {
               type="button"
               data-run-config-profile={profile.id}
               className={clsx(
-                "mb-1 block w-full rounded px-2 py-1 text-left font-mono text-xs",
+                "mb-1 block w-full rounded-[var(--radius-button)] px-2 py-1.5 text-left font-ui text-body",
                 profile.id === draft.id
                   ? "bg-tcld-accent/15 text-tcld-accent"
                   : "text-tcld-fg-dim hover:bg-tcld-bg-highlight hover:text-tcld-fg",
@@ -2669,18 +2735,18 @@ function RunConfigurationWindowApp() {
               onClick={() => selectProfile(profile.id)}
             >
               <div>{profile.name}</div>
-              <div className="truncate text-label text-tcld-fg-muted">{profile.path || "no script selected"}</div>
+              <div className="truncate font-mono text-label text-tcld-fg-muted">{profile.path || "No script selected"}</div>
             </button>
           ))}
         </aside>
         <main className="min-h-0 overflow-auto p-4">
-          <div className="grid max-w-3xl gap-3 font-mono text-xs">
+          <div className="grid max-w-3xl gap-3 font-ui text-body">
             <RunConfigurationField field="name" label="Name" value={draft.name} onChange={(value) => updateDraft("name", value)} />
-            <RunConfigurationField field="path" label="Script Path" value={draft.path} onChange={(value) => updateDraft("path", value)} />
-            <RunConfigurationField field="args" label="Args" value={draft.args} onChange={(value) => updateDraft("args", value)} />
-            <RunConfigurationField field="env" label="Env" value={draft.env} onChange={(value) => updateDraft("env", value)} />
-            <RunConfigurationField field="cwd" label="Cwd" value={draft.cwd} onChange={(value) => updateDraft("cwd", value)} />
-            <RunConfigurationField field="tclshPath" label="Tclsh Path" value={draft.tclshPath} onChange={(value) => updateDraft("tclshPath", value)} />
+            <RunConfigurationField field="path" label="Script path" value={draft.path} onChange={(value) => updateDraft("path", value)} code />
+            <RunConfigurationField field="args" label="Arguments" value={draft.args} onChange={(value) => updateDraft("args", value)} code />
+            <RunConfigurationField field="env" label="Environment" value={draft.env} onChange={(value) => updateDraft("env", value)} code />
+            <RunConfigurationField field="cwd" label="Working directory" value={draft.cwd} onChange={(value) => updateDraft("cwd", value)} code />
+            <RunConfigurationField field="tclshPath" label="tclsh path" value={draft.tclshPath} onChange={(value) => updateDraft("tclshPath", value)} code />
             <div
               className="rounded border border-tcld-border-dim bg-tcld-bg-1 px-3 py-2 text-tcld-fg-dim"
               data-debug-execution-backend="host"
@@ -2700,25 +2766,25 @@ function RunConfigurationWindowApp() {
               </select>
             </label>
             <label className="grid gap-1">
-              <span className="text-tcld-fg-muted">Bytecode Hook Mode</span>
+              <span className="text-tcld-fg-muted">Bytecode hook mode</span>
               <select
                 className="rounded border border-tcld-border-dim bg-tcld-bg-2 px-2 py-1 text-tcld-fg outline-none focus:border-tcld-border-focus"
                 value={draft.bytecodeHooks.mode}
                 onChange={(event) => updateHooks({ mode: event.target.value as RunConfigurationProfile["bytecodeHooks"]["mode"] })}
               >
-                <option value="backend-default">Backend Default</option>
+                <option value="backend-default">Backend default</option>
                 <option value="passthrough">Passthrough</option>
                 <option value="intercept">Intercept</option>
               </select>
             </label>
             <label className="grid gap-1">
-              <span className="text-tcld-fg-muted">Hook Commands</span>
+              <span className="text-tcld-fg-muted">Hook commands</span>
               <select
                 className="rounded border border-tcld-border-dim bg-tcld-bg-2 px-2 py-1 text-tcld-fg outline-none focus:border-tcld-border-focus"
                 value={draft.bytecodeHooks.commandPreset}
                 onChange={(event) => updateHooks({ commandPreset: event.target.value as RunConfigurationProfile["bytecodeHooks"]["commandPreset"] })}
               >
-                <option value="backend-default">Backend Default</option>
+                <option value="backend-default">Backend default</option>
                 <option value="tbcload">tbcload</option>
                 <option value="runtime">runtime</option>
                 <option value="all">all</option>
@@ -2726,7 +2792,7 @@ function RunConfigurationWindowApp() {
               </select>
             </label>
             <label className="grid gap-1">
-              <span className="text-tcld-fg-muted">Custom Hook Commands</span>
+              <span className="text-tcld-fg-muted">Custom hook commands</span>
               <input
                 className="rounded border border-tcld-border-dim bg-tcld-bg-2 px-2 py-1 text-tcld-fg outline-none focus:border-tcld-border-focus"
                 value={draft.bytecodeHooks.customCommands.join(" ")}
@@ -2800,47 +2866,31 @@ function RunConfigurationWindowApp() {
           </div>
         </main>
       </div>
-      <footer className="flex justify-end gap-2 border-t border-tcld-border-dim bg-tcld-bg-1 px-4 py-3">
-        <button data-run-config-action="import" className="rounded bg-tcld-bg-2 px-3 py-1 font-mono text-xs text-tcld-fg-dim hover:bg-tcld-bg-highlight hover:text-tcld-fg" onClick={importFromClipboard}>Import</button>
-        <button data-run-config-action="export" className="rounded bg-tcld-bg-2 px-3 py-1 font-mono text-xs text-tcld-fg-dim hover:bg-tcld-bg-highlight hover:text-tcld-fg" onClick={exportToClipboard}>Export</button>
-        <button data-run-config-action="delete" className="rounded bg-tcld-bg-2 px-3 py-1 font-mono text-xs text-tcld-fg-dim hover:bg-tcld-bg-highlight hover:text-tcld-fg" onClick={deleteProfile}>Delete</button>
-        <button data-run-config-action="cancel" className="rounded bg-tcld-bg-2 px-3 py-1 font-mono text-xs text-tcld-fg-dim hover:bg-tcld-bg-highlight hover:text-tcld-fg" onClick={cancel}>Cancel</button>
-        <button data-run-config-action="save" className="rounded bg-tcld-accent px-3 py-1 font-mono text-xs text-tcld-bg hover:brightness-110" onClick={saveProfile}>Save</button>
+      <footer className="flex items-center gap-2 border-t border-tcld-border-dim bg-tcld-bg-1 px-4 py-3 font-ui text-body">
+        <button data-run-config-action="import" className="rounded-[var(--radius-button)] px-3 py-1.5 text-tcld-fg-dim hover:bg-tcld-bg-highlight hover:text-tcld-fg" onClick={importFromClipboard}>Import</button>
+        <button data-run-config-action="export" className="rounded-[var(--radius-button)] px-3 py-1.5 text-tcld-fg-dim hover:bg-tcld-bg-highlight hover:text-tcld-fg" onClick={exportToClipboard}>Export</button>
+        <button data-run-config-action="delete" className="rounded-[var(--radius-button)] px-3 py-1.5 text-tcld-error hover:bg-tcld-error/10" onClick={deleteProfile}>Delete</button>
+        <span className="flex-1" />
+        <button data-run-config-action="cancel" className="rounded-[var(--radius-button)] border border-tcld-border-dim bg-tcld-bg-2 px-3 py-1.5 text-tcld-fg hover:bg-tcld-bg-highlight" onClick={cancel}>Cancel</button>
+        <button data-run-config-action="save" className="rounded-[var(--radius-button)] bg-tcld-accent px-4 py-1.5 font-semibold text-tcld-bg hover:brightness-110" onClick={saveProfile}>Save</button>
       </footer>
     </div>
   );
 }
 
-function RunConfigurationField({ field, label, value, onChange }: { field: string; label: string; value: string; onChange: (value: string) => void }) {
+function RunConfigurationField({ field, label, value, onChange, code = false }: { field: string; label: string; value: string; onChange: (value: string) => void; code?: boolean }) {
   return (
     <label className="grid gap-1">
       <span className="text-tcld-fg-muted">{label}</span>
       <input
         data-run-config-field={field}
-        className="rounded border border-tcld-border-dim bg-tcld-bg-2 px-2 py-1 text-tcld-fg outline-none focus:border-tcld-border-focus"
+        className={clsx(
+          "rounded-[var(--radius-button)] border border-tcld-border-dim bg-tcld-bg-2 px-2 py-1.5 text-tcld-fg outline-none focus:border-tcld-border-focus",
+          code && "font-mono text-xs",
+        )}
         value={value}
         onChange={(event) => onChange(event.target.value)}
       />
     </label>
-  );
-}
-
-function SkeletonPanel({ rows, className }: { rows: number; className?: string }) {
-  return (
-    <div className={clsx("bg-tcld-bg-2 rounded-[var(--radius-panel)] flex flex-col overflow-hidden border border-tcld-border-dim", className)}>
-      <div className="flex items-center gap-2 px-3 min-h-[var(--panel-header-height)] bg-tcld-bg-1 border-b border-tcld-border-dim">
-        <div className="h-3 w-3 rounded-[var(--radius-badge)] bg-tcld-bg-3" />
-        <div className="h-3 w-20 rounded-[var(--radius-badge)] bg-tcld-bg-3" />
-      </div>
-      <div className="flex-1 px-3 py-2 flex flex-col gap-1.5">
-        {Array.from({ length: rows }).map((_, i) => (
-          <div
-            key={i}
-            className="h-3.5 rounded-[var(--radius-badge)] bg-tcld-bg-3"
-            style={{ width: `${55 + Math.sin(i * 1.7) * 30}%` }}
-          />
-        ))}
-      </div>
-    </div>
   );
 }

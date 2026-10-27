@@ -125,6 +125,58 @@ function parseShortcutPart(part: string): KeyStroke | null {
   };
 }
 
+const SHORTCUT_KEY_LABELS: Record<string, string> = {
+  arrowup: "↑",
+  arrowdown: "↓",
+  arrowleft: "←",
+  arrowright: "→",
+  enter: "↵",
+  escape: "Esc",
+  backspace: "⌫",
+  delete: "Del",
+  tab: "Tab",
+  space: "Space",
+  " ": "Space",
+};
+
+/**
+ * Display label for a registry shortcut string: "Mod+o" reads "⌘O" on macOS
+ * and "Ctrl+O" elsewhere, chords keep their space ("g g"), and bare keys stay
+ * as typed so single-letter bindings don't suggest Shift.
+ */
+export function formatShortcutLabel(
+  shortcut: string,
+  isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform),
+): string {
+  return shortcut
+    .trim()
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => {
+      const stroke = parseShortcutPart(part);
+      if (!stroke) return part;
+      const named = SHORTCUT_KEY_LABELS[stroke.key.toLowerCase()];
+      const hasModifier = stroke.mod || stroke.ctrl || stroke.meta || stroke.alt || stroke.shift;
+      const key = named ?? (hasModifier && stroke.key.length === 1 ? stroke.key.toUpperCase() : stroke.key);
+      const modifiers = isMac
+        ? [
+          stroke.ctrl && "⌃",
+          stroke.alt && "⌥",
+          stroke.shift && "⇧",
+          (stroke.mod || stroke.meta) && "⌘",
+        ]
+        : [
+          (stroke.mod || stroke.ctrl) && "Ctrl",
+          stroke.meta && "Meta",
+          stroke.alt && "Alt",
+          stroke.shift && "Shift",
+        ];
+      const active = modifiers.filter(Boolean) as string[];
+      return isMac ? `${active.join("")}${key}` : [...active, key].join("+");
+    })
+    .join(" ");
+}
+
 function parseShortcut(shortcut: string): ShortcutPattern | null {
   const parts = shortcut
     .trim()

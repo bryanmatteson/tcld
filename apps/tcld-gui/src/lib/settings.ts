@@ -84,8 +84,8 @@ const DEFAULT_DEBUGGER_SETTINGS: DebuggerSettings = {
 
 export const DEFAULT_SETTINGS: Settings = {
   theme: "graphite",
-  typeSystem: "mono-brutalist",
-  fontFamily: "mono-brutalist",
+  typeSystem: "modern-sans",
+  fontFamily: "modern-sans",
   fontSize: 13,
   density: "regular",
   showSparklines: true,
@@ -153,7 +153,7 @@ export function applySettings(settings: Settings, root?: HTMLElement): void {
     target.style.setProperty(prop, value);
   }
 
-  const typeSystem = DESIGN_TYPE_SYSTEMS[settings.typeSystem] ?? DESIGN_TYPE_SYSTEMS["mono-brutalist"];
+  const typeSystem = DESIGN_TYPE_SYSTEMS[settings.typeSystem] ?? DESIGN_TYPE_SYSTEMS[DEFAULT_SETTINGS.typeSystem];
   target.style.setProperty("--ui", typeSystem.ui);
   target.style.setProperty("--mono", typeSystem.mono);
   target.style.setProperty("--font-mono", typeSystem.mono);

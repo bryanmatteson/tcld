@@ -60,7 +60,7 @@ export const TitlebarButton = React.forwardRef<
       className={clsx(
         "relative inline-flex items-center justify-center",
         "rounded-[var(--radius-badge)] border border-transparent",
-        "text-tcld-text-inactive font-mono",
+        "text-tcld-text-inactive font-ui",
         "transition-colors duration-100 ease-out",
         "hover:bg-tcld-bg-3 hover:border-tcld-border-dim hover:text-tcld-fg",
         // text-meta = 11px for compact toolbar buttons; text-code = 12px for

@@ -1,9 +1,14 @@
 "use client";
 
 import clsx from "clsx";
-import { motion, AnimatePresence } from "framer-motion";
-import { useMemo, useEffect, useState } from "react";
-import { commandRegistry, type CommandDef, type CommandContext } from "@/lib/command-registry";
+import { useMemo, useEffect, useState, memo } from "react";
+import { commandRegistry, formatShortcutLabel, type CommandDef, type CommandContext } from "@/lib/command-registry";
+
+import { useModalFocus } from "@/hooks/use-modal-focus";
+import { usePresence } from "@/hooks/use-presence";
+
+/** Matches the CSS exit animation on .tcld-overlay-anim / .tcld-overlay-dialog. */
+const OVERLAY_EXIT_MS = 120;
 
 interface HelpOverlayProps {
   visible: boolean;
@@ -11,7 +16,9 @@ interface HelpOverlayProps {
   onClose: () => void;
 }
 
-export function HelpOverlay({ visible, commandContext, onClose }: HelpOverlayProps) {
+export const HelpOverlay = memo(function HelpOverlay({ visible, commandContext, onClose }: HelpOverlayProps) {
+  const dialogRef = useModalFocus(visible, onClose);
+  const mounted = usePresence(visible, OVERLAY_EXIT_MS);
   const [commands, setCommands] = useState<CommandDef[]>(() => commandRegistry.getForContext(commandContext));
   useEffect(() => {
     return commandRegistry.subscribe(() => setCommands(commandRegistry.getForContext(commandContext)));
@@ -43,7 +50,7 @@ export function HelpOverlay({ visible, commandContext, onClose }: HelpOverlayPro
       title: category,
       items: (byCategory.get(category) ?? [])
         .sort((a, b) => a.title.localeCompare(b.title))
-        .map((command) => [command.shortcut?.[0] ?? "", command.title] as [string, string]),
+        .map((command) => [formatShortcutLabel(command.shortcut?.[0] ?? ""), command.title] as [string, string]),
     }));
 
     // Mouse / drag interactions are not commandRegistry shortcuts — they're
@@ -66,72 +73,67 @@ export function HelpOverlay({ visible, commandContext, onClose }: HelpOverlayPro
   }, [commands]);
 
   return (
-    <AnimatePresence>
-      {visible && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.12 }}
-          className="absolute inset-0 z-50 flex items-center justify-center tcld-overlay-scrim"
-          onClick={onClose}
+    mounted && (
+      <div
+        data-state={visible ? "open" : "closed"}
+        className="absolute inset-0 z-50 flex items-center justify-center tcld-overlay-scrim tcld-overlay-anim"
+        onClick={onClose}
+      >
+        <div
+          data-state={visible ? "open" : "closed"}
+          onClick={(e) => e.stopPropagation()}
+          ref={dialogRef}
+          tabIndex={-1}
+          aria-modal="true"
+          role="dialog"
+          aria-label="Keyboard reference"
+          className={clsx(
+            "w-[720px] max-w-[calc(100vw-32px)] max-h-[calc(100dvh-32px)] overflow-hidden flex flex-col",
+            "tcld-overlay-surface tcld-overlay-dialog",
+          )}
         >
-          <motion.div
-            initial={{ opacity: 0, scale: 0.96 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.96 }}
-            transition={{ duration: 0.15, ease: [0.2, 0, 0, 1] }}
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-label="Keyboard reference"
-            className={clsx(
-              "w-[600px] overflow-hidden",
-              "tcld-overlay-surface",
-            )}
-          >
-            <div className="px-5 py-3.5 border-b border-tcld-border flex items-center">
-              <span className="font-mono text-base font-bold text-tcld-fg tracking-tight">
-                Keyboard Reference
-              </span>
-              <div className="flex-1" />
-              <span className="font-mono text-xs text-tcld-fg-dim">
-                <KeyBadge label="?" /> to close
-              </span>
-            </div>
+          <div className="px-5 py-3.5 border-b border-tcld-border flex items-center">
+            <span className="font-ui text-base font-semibold text-tcld-fg tracking-tight">
+              Keyboard Reference
+            </span>
+            <div className="flex-1" />
+            <button type="button" onClick={onClose} aria-label="Close keyboard reference" className="font-mono text-xs text-tcld-fg-dim rounded px-2 py-1 hover:bg-tcld-bg-highlight">
+              <KeyBadge label="Esc" /> Close
+            </button>
+          </div>
 
-            <div className="grid grid-cols-2 max-h-[430px] overflow-y-auto">
-              {sections.map((section, si) => (
-                <div
-                  key={section.title}
-                  className={clsx(
-                    "px-4.5 py-3.5 border-b border-tcld-border-dim",
-                    si % 2 === 0 ? "border-r border-tcld-border-dim" : "",
-                  )}
-                >
-                  <div className="font-mono text-xs font-semibold text-tcld-fg-muted mb-2.5 pb-1.5 border-b border-tcld-border-dim tracking-tight">
-                    {section.title}
-                  </div>
-
-                  {section.items.map(([key, desc]) => (
-                    <div
-                      key={`${key}:${desc}`}
-                      className="flex items-center h-6.5 gap-2"
-                    >
-                      <KeyBadge label={key} />
-                      <span className="font-mono text-xs text-tcld-fg-muted">
-                        {desc}
-                      </span>
-                    </div>
-                  ))}
+          <div className="grid grid-cols-1 sm:grid-cols-2 min-h-0 max-h-[60vh] overflow-y-auto">
+            {sections.map((section, si) => (
+              <div
+                key={section.title}
+                className={clsx(
+                  "px-4.5 py-3.5 border-b border-tcld-border-dim",
+                  si % 2 === 0 ? "border-r border-tcld-border-dim" : "",
+                )}
+              >
+                <div className="font-ui text-xs font-semibold text-tcld-fg-muted mb-2.5 pb-1.5 border-b border-tcld-border-dim tracking-tight">
+                  {section.title}
                 </div>
-              ))}
-            </div>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
+
+                {section.items.map(([key, desc]) => (
+                  <div
+                    key={`${key}:${desc}`}
+                    className="flex items-start min-h-6.5 py-1 gap-2"
+                  >
+                    <KeyBadge label={key} />
+                    <span className="font-ui text-xs text-tcld-fg-muted">
+                      {desc}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    )
   );
-}
+});
 
 function KeyBadge({ label }: { label: string }) {
   return (
