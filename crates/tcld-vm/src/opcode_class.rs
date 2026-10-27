@@ -23,31 +23,33 @@ pub fn classify(op: Opcode) -> OpcodeClass {
         | StrMatch | StrConcat1 | List | ListIndex | ListLength | BeginCatch4 | EndCatch
         | PushReturnCode | PushResult | PushReturnOptions | ReturnImm | ReturnStk
         | ReturnCodeBranch | Break | Continue | Variable | Upvar | InvokeStk1 | InvokeStk4
-        | ForeachStart4 | ForeachStep4 | ForeachStart | ForeachStep | ForeachEnd | JumpTable
-        | NsCurrent | LoadArrayStk | LoadStk | StoreArrayStk | StoreStk | IncrScalarStk
-        | IncrArray1 | IncrArrayStk | IncrStk | IncrArray1Imm | IncrArrayStkImm | IncrStkImm
-        | Bitor | Bitxor | Bitand | Lshift | Rshift | Bitnot | AppendScalar1 | AppendScalar4
-        | AppendArray1 | AppendArray4 | AppendArrayStk | AppendStk | LappendScalar1
-        | LappendScalar4 | LappendArray1 | LappendArray4 | LappendArrayStk | LappendStk
-        | LappendList | LappendListArray | LappendListArrayStk | LappendListStk
+        | ForeachStart4 | ForeachStep4 | ForeachStart | ForeachStep | ForeachEnd | LmapCollect
+        | JumpTable | NsCurrent | LoadArrayStk | LoadStk | StoreArrayStk | StoreStk
+        | IncrScalarStk | IncrArray1 | IncrArrayStk | IncrStk | IncrArray1Imm | IncrArrayStkImm
+        | IncrStkImm | Bitor | Bitxor | Bitand | Lshift | Rshift | Bitnot | AppendScalar1
+        | AppendScalar4 | AppendArray1 | AppendArray4 | AppendArrayStk | AppendStk
+        | LappendScalar1 | LappendScalar4 | LappendArray1 | LappendArray4 | LappendArrayStk
+        | LappendStk | LappendList | LappendListArray | LappendListArrayStk | LappendListStk
         | ListIndexMulti | ListIndexImm | ListRangeImm | ListIn | ListNotIn | ListConcat
         | LsetList | LsetFlat | ConcatStk | ExistArray | ExistArrayStk | ExistStk | UnsetScalar
         | UnsetArray | UnsetArrayStk | UnsetStk | ArrayExistsStk | ArrayExistsImm
         | ArrayMakeStk | ArrayMakeImm | Syntax | ExpandStart | ExpandStktop | ExpandDrop
-        | InvokeExpanded | InvokeReplace => OpcodeClass::Vm,
+        | InvokeExpanded | InvokeReplace | CallBuiltinFunc1 | CallFunc1 | StrMap | StrFind
+        | StrFindLast | StrRangeImm | StrRange | StrTrim | StrTrimLeft | StrTrimRight
+        | StrUpper | StrLower | StrTitle | StrReplace | StrClass | ClockRead | DictGet
+        | DictSet | DictUnset | DictIncrImm | DictAppend | DictLappend | DictFirst | DictNext
+        | DictDone | DictUpdateStart | DictUpdateEnd | DictExpand | DictRecombineStk
+        | DictRecombineImm | DictExists | DictVerify | DictGetDef | Lreplace4 | Regexp => {
+            OpcodeClass::Vm
+        }
 
         ExprStk | EvalStk => OpcodeClass::HostFrame,
 
-        CallBuiltinFunc1 | CallFunc1 | Regexp | ClockRead | Nsupvar | StrMap | StrFind
-        | StrFindLast | StrRangeImm | StrRange | StrTrim | StrTrimLeft | StrTrimRight
-        | StrUpper | StrLower | StrTitle | StrReplace | StrClass | DictGet | DictSet
-        | DictUnset | DictIncrImm | DictAppend | DictLappend | DictFirst | DictNext | DictDone
-        | DictUpdateStart | DictUpdateEnd | DictExpand | DictRecombineStk | DictRecombineImm
-        | DictExists | DictVerify | DictGetDef | Lreplace4 => OpcodeClass::HostValue,
+        Nsupvar => OpcodeClass::HostValue,
 
         Yield | CoroutineName | Tailcall | YieldToInvoke | TclooSelf | TclooClass | TclooNs
         | TclooIsObject | TclooNext | TclooNextClass | InfoLevelNum | InfoLevelArgs
-        | ResolveCommand | LmapCollect | OriginCommand | ConstImm | ConstStk => OpcodeClass::Trap,
+        | ResolveCommand | OriginCommand | ConstImm | ConstStk => OpcodeClass::Trap,
     }
 }
 
@@ -55,7 +57,6 @@ pub const DELIBERATE_TRAP_WITNESSES: &[Opcode] = &[
     Opcode::Yield,
     Opcode::TclooSelf,
     Opcode::InfoLevelNum,
-    Opcode::LmapCollect,
     Opcode::OriginCommand,
 ];
 
@@ -77,6 +78,7 @@ mod tests {
             Opcode::Done,
             Opcode::InvokeStk1,
             Opcode::ForeachStart4,
+            Opcode::LmapCollect,
             Opcode::JumpTable,
             Opcode::NsCurrent,
             Opcode::InvokeExpanded,
@@ -87,14 +89,33 @@ mod tests {
 
     #[test]
     fn tcl9_tail_opcodes_have_explicit_runtime_dispositions() {
-        for opcode in [Opcode::StrLt, Opcode::StrGt, Opcode::StrLe, Opcode::StrGe] {
+        for opcode in [
+            Opcode::StrLt,
+            Opcode::StrGt,
+            Opcode::StrLe,
+            Opcode::StrGe,
+            Opcode::DictGetDef,
+            Opcode::Lreplace4,
+        ] {
             assert_eq!(classify(opcode), OpcodeClass::Vm, "{opcode:?}");
-        }
-        for opcode in [Opcode::DictGetDef, Opcode::Lreplace4] {
-            assert_eq!(classify(opcode), OpcodeClass::HostValue, "{opcode:?}");
         }
         for opcode in [Opcode::ConstImm, Opcode::ConstStk] {
             assert_eq!(classify(opcode), OpcodeClass::Trap, "{opcode:?}");
+        }
+    }
+
+    #[test]
+    fn only_namespace_upvar_needs_the_host_for_values() {
+        for &opcode in DEFAULT_INSTRUCTION_SET
+            .opcode_table
+            .iter()
+            .chain(TCL_9_INSTRUCTION_SET.opcode_table)
+        {
+            assert_eq!(
+                classify(opcode) == OpcodeClass::HostValue,
+                opcode == Opcode::Nsupvar,
+                "{opcode:?}"
+            );
         }
     }
 
@@ -109,7 +130,7 @@ mod tests {
                 OpcodeClass::Trap => 3,
             }] += 1;
         }
-        assert_eq!(counts, [139, 34, 2, 15]);
+        assert_eq!(counts, [173, 1, 2, 14]);
         assert_eq!(counts.into_iter().sum::<usize>(), 190);
     }
 
@@ -124,7 +145,7 @@ mod tests {
                 OpcodeClass::Trap => 3,
             }] += 1;
         }
-        assert_eq!(counts, [139, 33, 2, 17]);
+        assert_eq!(counts, [172, 1, 2, 16]);
         assert_eq!(counts.into_iter().sum::<usize>(), 191);
     }
 
@@ -141,7 +162,7 @@ mod tests {
         let digest = Sha256::digest(membership.join("\n").as_bytes());
         assert_eq!(
             format!("{digest:x}"),
-            "f7ca3a3c94eacd5a5e6f90629b2eaec369b1cff149a443266540cb50557b5373",
+            "fdbec9f67c2c03eb9a6a784c96d2cb1b121873024fa45fad3bd34c124a22656e",
             "sorted opcode disposition membership changed"
         );
     }
@@ -164,7 +185,7 @@ mod tests {
             );
         }
         let policy = engine.find("OpcodeClass::HostValue if !self.policy.allow_host_opcode");
-        let dispatch = engine.find("let flow = match self.dispatch(&inst)");
+        let dispatch = engine.find(".execution_boundary(inst.pc)");
         assert!(
             policy.is_some() && policy < dispatch,
             "HostValue policy denial must occur before runtime dispatch can mutate state"

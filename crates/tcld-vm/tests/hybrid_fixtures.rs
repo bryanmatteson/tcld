@@ -339,7 +339,6 @@ fn f10_trap_suite() {
         Opcode::Yield,
         Opcode::TclooSelf,
         Opcode::InfoLevelNum,
-        Opcode::LmapCollect,
         Opcode::OriginCommand,
     ] {
         let bc = minimal_bc(vec![tcl86_opcode(opcode)], vec![]);
@@ -478,15 +477,26 @@ fn host_eval_bc(script: &str) -> ByteCode {
 }
 
 #[test]
-fn f11_vm_strict_puts_denied() {
+fn f11_vm_strict_world_host_denied() {
     let mut eng = strict();
-    let bc = puts_bc("should-deny");
+    let bc = command_bc("exec", "should-deny");
     let err = eng.run_tbc(bc).unwrap_err();
     assert!(
         matches!(err, VmError::PolicyDenied { .. }),
         "expected PolicyDenied, got {err:?}"
     );
     assert_eq!(err.exit_code(), 2);
+}
+
+#[test]
+fn f11_vm_strict_puts_writes_its_own_stdout() {
+    let mut eng = strict();
+    eng.begin_output_capture().unwrap();
+    let result = eng.run_tbc(puts_bc("from-vm-strict")).unwrap();
+    assert_eq!(result.as_string().unwrap(), "ok");
+    let (stdout, stderr) = eng.captured_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&stdout), "from-vm-strict\n");
+    assert!(stderr.is_empty());
 }
 
 #[cfg(feature = "debug")]
@@ -633,7 +643,7 @@ fn public_fixture_bodies_execute_through_public_api() {
 
     let coverage = engine.coverage_snapshot();
     assert_eq!(coverage.opcode_total, 190);
-    assert_eq!(coverage.trap_count, 15);
+    assert_eq!(coverage.trap_count, 14);
     assert!(coverage.executed_instruction_total > 0);
 }
 
@@ -979,6 +989,59 @@ fn foreach_new_uses_frame_owned_state_and_cleans_stack() {
 }
 
 #[test]
+fn lmap_collect_uses_foreach_state_and_preserves_the_result_list() {
+    for (input, expected) in [("alpha beta", "alpha beta"), ("", "")] {
+        let mut bytecode = minimal_bc(
+            vec![
+                tcl86_opcode(Opcode::List),
+                0,
+                0,
+                0,
+                0,
+                tcl86_opcode(Opcode::Push1),
+                0,
+                tcl86_opcode(Opcode::ForeachStart),
+                0,
+                0,
+                0,
+                0,
+                tcl86_opcode(Opcode::LoadScalar1),
+                0,
+                tcl86_opcode(Opcode::LmapCollect),
+                tcl86_opcode(Opcode::ForeachStep),
+                tcl86_opcode(Opcode::ForeachEnd),
+                tcl86_opcode(Opcode::Done),
+            ],
+            vec![lit_str(input)],
+        );
+        bytecode.proc_num_locals = 1;
+        bytecode.locals = local_slots(&["item"]);
+        bytecode.auxiliaries.push(AuxData {
+            kind: AuxDataType::NewForeach,
+            value: AuxDataValue::NewForeach(NewForeachInfo {
+                loop_counter: -3,
+                lists: vec![vec![0]],
+            }),
+        });
+        bytecode.info.num_aux_data_items = 1;
+        assert_eq!(result_str(&strict().run_tbc(bytecode).unwrap()), expected);
+    }
+    let invalid = minimal_bc(
+        vec![
+            tcl86_opcode(Opcode::Push1),
+            0,
+            tcl86_opcode(Opcode::LmapCollect),
+            tcl86_opcode(Opcode::Done),
+        ],
+        vec![lit_str("result")],
+    );
+    assert!(matches!(
+        strict().run_tbc(invalid),
+        Err(VmError::InvalidAuxData { .. })
+    ));
+}
+
+#[test]
 fn jump_tables_consume_keys() {
     for (key, expected) in [("alpha", "hit"), ("other", "miss")] {
         let mut bytecode = minimal_bc(
@@ -1107,7 +1170,7 @@ fn foreach_and_jump_tables_reject_invalid_aux_state_and_targets() {
 }
 
 #[test]
-fn host_value_math_and_dict_execute_only_in_hybrid() {
+fn host_setup_is_hybrid_only_while_math_and_dicts_run_natively() {
     let mut setup_engine = hybrid();
     assert_eq!(
         setup_engine
@@ -1184,13 +1247,7 @@ fn host_value_math_and_dict_execute_only_in_hybrid() {
         vec![lit_str("-5")],
     );
     assert_eq!(hybrid().run_tbc(math.clone()).unwrap().as_i64().unwrap(), 5);
-    assert!(matches!(
-        strict().run_tbc(math),
-        Err(VmError::PolicyDenied {
-            action: "host_opcode",
-            ..
-        })
-    ));
+    assert_eq!(strict().run_tbc(math).unwrap().as_i64().unwrap(), 5);
     let dynamic_math = minimal_bc(
         vec![
             tcl86_opcode(Opcode::Push1),
@@ -1203,7 +1260,15 @@ fn host_value_math_and_dict_execute_only_in_hybrid() {
         ],
         vec![lit_str("abs"), lit_str("-6")],
     );
-    assert_eq!(hybrid().run_tbc(dynamic_math).unwrap().as_i64().unwrap(), 6);
+    assert_eq!(
+        hybrid()
+            .run_tbc(dynamic_math.clone())
+            .unwrap()
+            .as_i64()
+            .unwrap(),
+        6
+    );
+    assert_eq!(strict().run_tbc(dynamic_math).unwrap().as_i64().unwrap(), 6);
 
     let dict_get = minimal_bc(
         vec![
@@ -1220,7 +1285,11 @@ fn host_value_math_and_dict_execute_only_in_hybrid() {
         ],
         vec![lit_str("alpha 7"), lit_str("alpha")],
     );
-    assert_eq!(result_str(&hybrid().run_tbc(dict_get).unwrap()), "7");
+    assert_eq!(
+        result_str(&hybrid().run_tbc(dict_get.clone()).unwrap()),
+        "7"
+    );
+    assert_eq!(result_str(&strict().run_tbc(dict_get).unwrap()), "7");
 
     let invalid_dict = minimal_bc(
         vec![
@@ -1237,10 +1306,13 @@ fn host_value_math_and_dict_execute_only_in_hybrid() {
         ],
         vec![lit_str("{"), lit_str("alpha")],
     );
-    assert!(matches!(
-        hybrid().run_tbc(invalid_dict),
-        Err(VmError::TclError { .. })
-    ));
+    for mut engine in [hybrid(), strict()] {
+        assert!(matches!(
+            engine.run_tbc(invalid_dict.clone()),
+            Err(VmError::TclError { message, error_code: Some(code), .. })
+                if message == "unmatched open brace in dict" && code == "TCL VALUE DICTIONARY BRACE"
+        ));
+    }
 }
 
 #[test]
@@ -1292,13 +1364,10 @@ fn tcl9_tail_opcodes_execute_or_trap_at_the_declared_boundary() {
         result_str(&hybrid().run_tbc(dict_get_default.clone()).unwrap()),
         "fallback"
     );
-    assert!(matches!(
-        strict().run_tbc(dict_get_default),
-        Err(VmError::PolicyDenied {
-            action: "host_opcode",
-            ..
-        })
-    ));
+    assert_eq!(
+        result_str(&strict().run_tbc(dict_get_default).unwrap()),
+        "fallback"
+    );
 
     for (flags, args, expected) in [
         (2, vec!["a b", "1", "x"], "a x b"),
@@ -1314,10 +1383,12 @@ fn tcl9_tail_opcodes_execute_or_trap_at_the_declared_boundary() {
         code.extend((args.len() as i32).to_be_bytes());
         code.push(flags);
         code.push(tcl9_opcode(Opcode::Done));
+        let bytecode = tcl9_bc(code, literals);
         assert_eq!(
-            result_str(&hybrid().run_tbc(tcl9_bc(code, literals)).unwrap()),
+            result_str(&hybrid().run_tbc(bytecode.clone()).unwrap()),
             expected
         );
+        assert_eq!(result_str(&strict().run_tbc(bytecode).unwrap()), expected);
     }
     let mut invalid_lreplace = vec![tcl9_opcode(Opcode::Lreplace4)];
     invalid_lreplace.extend(2i32.to_be_bytes());
@@ -2198,6 +2269,15 @@ fn promoted_integer_string_regexp_syntax_and_variable_edges_match_tcl() {
         ],
         vec![lit_str("abc"), lit_str("ABC")],
     );
+    assert_eq!(
+        HybridEngine::new(RuntimeMode::VmStrict)
+            .unwrap()
+            .run_tbc(regexp.clone())
+            .unwrap()
+            .as_i64()
+            .unwrap(),
+        1
+    );
     assert_eq!(hybrid().run_tbc(regexp).unwrap().as_i64().unwrap(), 1);
 
     let unicode_length = minimal_bc(
@@ -2430,7 +2510,7 @@ fn stable_semantic_failure_oracles_are_exact() {
     assert!(matches!(
         hybrid().run_tbc(malformed_list),
         Err(VmError::TclError { message, error_code: Some(code), .. })
-            if message == "unmatched open brace in list" && code == "TCL VALUE LIST"
+            if message == "unmatched open brace in list" && code == "TCL VALUE LIST BRACE"
     ));
 
     let invalid_dict = minimal_bc(
@@ -2458,11 +2538,11 @@ fn stable_semantic_failure_oracles_are_exact() {
         ],
         vec![lit_str("1"), lit_str("-1")],
     );
+    // Tcl 9 sets no errorCode for this error, so scripts see NONE.
     assert!(matches!(
         strict().run_tbc(negative_shift),
-        Err(VmError::TclError { message, error_code: Some(code), .. })
+        Err(VmError::TclError { message, error_code: None, .. })
             if message == "negative shift argument"
-                && code == "ARITH DOMAIN {negative shift argument}"
     ));
 
     let missing_unset = minimal_bc(
@@ -2928,17 +3008,21 @@ fn arith_bc() -> ByteCode {
 }
 
 fn puts_bc(msg: &str) -> ByteCode {
-    // push puts; push msg; invoke 2; pop; push ok; done
+    command_bc("puts", msg)
+}
+
+fn command_bc(command: &str, arg: &str) -> ByteCode {
+    // push command; push arg; invoke 2; pop; push ok; done
     minimal_bc(
         vec![
-            1, 0, // puts
-            1, 1, // msg
+            1, 0, // command
+            1, 1, // arg
             6, 2, // invokeStk1 2
             3, // pop
             1, 2, // ok
             0, // done
         ],
-        vec![lit_str("puts"), lit_str(msg), lit_str("ok")],
+        vec![lit_str(command), lit_str(arg), lit_str("ok")],
     )
 }
 

@@ -26,7 +26,10 @@ fn fresh_interp() -> *mut tcl_sys::Tcl_Interp {
     // Tcl_FindExecutable's contract is once per PROCESS, before other
     // Tcl calls.
     static FIND_EXECUTABLE: std::sync::Once = std::sync::Once::new();
-    FIND_EXECUTABLE.call_once(|| unsafe { tcl_sys::Tcl_FindExecutable(std::ptr::null()) });
+    // Tcl 9 returns the resolved executable name; only the side effect matters.
+    FIND_EXECUTABLE.call_once(|| unsafe {
+        tcl_sys::Tcl_FindExecutable(std::ptr::null());
+    });
     unsafe {
         let interp = Tcl_CreateInterp();
         assert!(!interp.is_null());

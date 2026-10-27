@@ -208,6 +208,15 @@ pub fn highlight_tcl(source: &str) -> Result<Vec<SyntaxToken>> {
 }
 
 pub fn command_spans(source: &str) -> Result<Vec<TclCommandSpan>> {
+    // EOF terminates Tcl commands. Supply the grammar's required terminator
+    // without exposing a synthetic byte in the authored source coordinates.
+    let original = source;
+    let terminated = if source.ends_with('\n') {
+        std::borrow::Cow::Borrowed(source)
+    } else {
+        std::borrow::Cow::Owned(format!("{source}\n"))
+    };
+    let source = terminated.as_ref();
     let tree = parse_tcl(source)?;
     let mut commands = command_spans_from_tree(source, &tree);
 
@@ -225,6 +234,14 @@ pub fn command_spans(source: &str) -> Result<Vec<TclCommandSpan>> {
             if recovered.len() > commands.len() {
                 commands = recovered;
             }
+        }
+    }
+
+    for command in &mut commands {
+        if command.end_byte > original.len() {
+            command.end_byte = original.len();
+            command.end_row = original.bytes().filter(|byte| *byte == b'\n').count();
+            command.end_column = original.rsplit('\n').next().unwrap_or("").len();
         }
     }
 

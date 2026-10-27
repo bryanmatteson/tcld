@@ -3,13 +3,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use num_traits::{Signed, ToPrimitive};
 use tcld_core::bytecode::{AuxDataValue, ByteCode, ExceptionRange, ExceptionType, NewForeachInfo};
 use tcld_core::inst_table::Opcode;
 
 use crate::builtin::{self, VarNameCtx};
 use crate::cmd::{CommandRef, CommandRegistry, FacadeKind};
 use crate::completion::{Completion, ReturnOptions};
+use crate::dict::Dict;
 use crate::error::VmError;
 use crate::load::{LoadedCode, LocalMeta, locals_meta_from_bc};
 use crate::mode::RuntimeMode;
@@ -17,7 +17,7 @@ use crate::opcode_class::{OpcodeClass, classify};
 use crate::policy::ExecPolicy;
 use crate::tbcload;
 use crate::value::{
-    ByteString, VmObj, cmp_values, glob_match, list_to_string, parse_array_name, parse_tcl_int,
+    ByteString, VmObj, glob_match, list_to_string, parse_array_name, parse_tcl_int,
     parse_tcl_number, split_tcl_list,
 };
 use crate::var::{FrameId, LocalSlot, VarLink, VarSlot, VarTable, split_var_name};
@@ -27,6 +27,31 @@ use crate::bridge::{
     BridgeResult, HostBridge, HostFrameInput, HostFrameLocalResult, HostFrameOutput,
     HostFrameStorage,
 };
+
+#[cfg(feature = "debug")]
+mod apply;
+#[cfg(feature = "debug")]
+mod callbacks;
+mod command_callback;
+#[cfg(feature = "debug")]
+mod control;
+#[cfg(feature = "debug")]
+mod coroutines;
+#[cfg(feature = "debug")]
+mod dynamic;
+#[cfg(feature = "debug")]
+mod execution;
+mod introspection;
+#[cfg(feature = "debug")]
+mod lmap;
+#[cfg(feature = "debug")]
+mod suspend;
+#[cfg(feature = "debug")]
+mod switch;
+#[cfg(feature = "debug")]
+pub(crate) mod tailcalls;
+#[cfg(feature = "debug")]
+mod try_cmd;
 
 const MAX_CALL_DEPTH: usize = 1000;
 
@@ -159,13 +184,6 @@ if {![llength [info commands ::tcld::_frame_upvar_orig]]} {
     rename ::yield ::tcld::_frame_yield_orig
     rename ::yieldto ::tcld::_frame_yieldto_orig
 }
-namespace eval ::tcld {
-    proc dict_value {subcommand dictionary args} {
-        set value $dictionary
-        dict $subcommand value {*}$args
-        return $value
-    }
-}
 "#;
 
 /// Wrappers used by the typed `frame_eval_internal` bridge. Request and result
@@ -262,6 +280,10 @@ proc ::tcld::typed_frame_uplevel {args} {
 pub(crate) enum FrameKind {
     Toplevel,
     VmProc,
+    Lambda,
+    Dynamic,
+    Namespace,
+    Source,
 }
 
 struct CatchMark {
@@ -312,7 +334,24 @@ struct CallFrame {
     stack: Vec<VmObj>,
     compiled_locals: Vec<LocalSlot>,
     local_vars: VarTable,
+    scope_parent: Option<FrameId>,
+    script_path: Option<String>,
+    tcl_parent: Option<FrameId>,
+    hidden_scope: bool,
+    /// The words that created this level, which `info level` reports.
+    invocation: Option<VmObj>,
+    /// Context appended only when an error escapes this mapped script body.
+    #[cfg(feature = "debug")]
+    body_error_context: Option<String>,
+    #[cfg(feature = "debug")]
+    lmap: Option<lmap::LmapState>,
+    #[cfg(feature = "debug")]
+    try_state: Option<try_cmd::TryState>,
+    tail_root: bool,
     catch_stack: Vec<CatchMark>,
+    // Stack boundaries at entry to each protected loop body. Non-local
+    // break/continue discard partial command operands and inner catch state.
+    loop_marks: std::collections::BTreeMap<i32, (usize, usize, usize)>,
     aux_states: Vec<AuxRuntimeState>,
     namespace: NamespaceName,
     #[allow(dead_code)]
@@ -355,7 +394,14 @@ pub(crate) struct HybridEngineInner {
     next_frame_id: u32,
     next_aux_state_id: i64,
     registry: CommandRegistry,
+    /// State behind `rand()` and `srand()`.
+    rand: crate::mathfunc::RandState,
+    /// Namespace variables and namespaces, which vm-strict keeps in the VM.
+    world: crate::world::World,
+    /// The stdout and stderr vm-strict writes itself.
+    output: crate::output::Output,
     last_completion: Completion,
+    last_host_write: Option<VmObj>,
     executed_instruction_total: u64,
     executed_by_opcode: std::collections::BTreeMap<String, u64>,
     executed_by_class: std::collections::BTreeMap<String, u64>,
@@ -363,6 +409,8 @@ pub(crate) struct HybridEngineInner {
     first_failure: Option<String>,
     #[cfg(feature = "debug")]
     observations: Vec<OpcodeObservation>,
+    #[cfg(feature = "debug")]
+    observation_limit: Option<usize>,
     /// Compiler-owned procedures loaded for this image but not callable until
     /// their mapped top-level declaration boundary executes.
     #[cfg(feature = "debug")]
@@ -371,12 +419,61 @@ pub(crate) struct HybridEngineInner {
     /// replacement so pre-declaration host state remains truthful.
     #[cfg(feature = "debug")]
     image_stub_commands: std::collections::BTreeSet<String>,
+    #[cfg(feature = "debug")]
+    source_images: std::collections::BTreeMap<crate::load::CodeId, crate::DebugSource>,
+    #[cfg(feature = "debug")]
+    generated_cache: std::collections::BTreeMap<(CodeAddress, String, String), Arc<LoadedCode>>,
+    /// Callback wrappers contain evaluated arguments, which can differ on
+    /// every call. Bodies they invoke retain the original callback site's
+    /// code identity so breakpoints survive those argument changes.
+    #[cfg(feature = "debug")]
+    command_callback_sites: std::collections::BTreeMap<crate::load::CodeId, CodeAddress>,
+    #[cfg(feature = "debug")]
+    events: std::collections::BTreeMap<u64, dynamic::PendingEvent>,
+    #[cfg(feature = "debug")]
+    next_event: u64,
+    #[cfg(feature = "debug")]
+    suspension: Option<suspend::Suspension>,
+    #[cfg(feature = "debug")]
+    coroutines: std::collections::BTreeMap<u64, coroutines::Coroutine>,
+    #[cfg(feature = "debug")]
+    coroutine_boundary: Option<usize>,
+    #[cfg(feature = "debug")]
+    coroutine_yield: Option<coroutines::Handoff>,
+    #[cfg(feature = "debug")]
+    coroutine_identity: (u64, u64),
+    #[cfg(feature = "debug")]
+    coroutine_task: Option<u64>,
+    #[cfg(feature = "debug")]
+    control_groups: std::collections::BTreeMap<u64, control::ControlGroup>,
+    #[cfg(feature = "debug")]
+    coroutine_completions: std::collections::BTreeMap<u32, Completion>,
+    #[cfg(feature = "debug")]
+    tailcalls: std::collections::BTreeMap<u32, tailcalls::Tailcall>,
+    #[cfg(feature = "debug")]
+    host_callbacks: std::collections::BTreeMap<u64, callbacks::HostCallback>,
+    #[cfg(feature = "debug")]
+    trace_scopes: std::collections::BTreeMap<u32, String>,
+    #[cfg(feature = "debug")]
+    traced_commands: Vec<execution::ActiveCommand>,
+    #[cfg(feature = "debug")]
+    hidden_trace_commands: std::collections::BTreeSet<CodeAddress>,
+    #[cfg(feature = "debug")]
+    delivering_execution_trace: bool,
+    #[cfg(feature = "debug")]
+    helper_trace_units: std::collections::BTreeSet<crate::load::CodeId>,
     #[cfg(feature = "host")]
     host: Option<HostBridge>,
     #[cfg(feature = "debug")]
     pub(crate) debug: crate::debug::DebugController,
     #[cfg(feature = "debug")]
     debug_frame_eval_active: bool,
+    #[cfg(feature = "debug")]
+    inspecting: std::cell::Cell<bool>,
+    #[cfg(feature = "debug")]
+    host_callback_depth: u32,
+    #[cfg(feature = "debug")]
+    variable_accesses: Vec<callbacks::VariableAccess>,
 }
 
 impl HybridEngineInner {
@@ -388,7 +485,11 @@ impl HybridEngineInner {
             next_frame_id: 1,
             next_aux_state_id: 1,
             registry: CommandRegistry::new(),
+            rand: Default::default(),
+            world: Default::default(),
+            output: Default::default(),
             last_completion: Completion::ok(VmObj::empty()),
+            last_host_write: None,
             executed_instruction_total: 0,
             executed_by_opcode: Default::default(),
             executed_by_class: Default::default(),
@@ -397,15 +498,63 @@ impl HybridEngineInner {
             #[cfg(feature = "debug")]
             observations: Vec::new(),
             #[cfg(feature = "debug")]
+            observation_limit: None,
+            #[cfg(feature = "debug")]
             pending_image_procs: Default::default(),
             #[cfg(feature = "debug")]
             image_stub_commands: Default::default(),
+            #[cfg(feature = "debug")]
+            source_images: Default::default(),
+            #[cfg(feature = "debug")]
+            generated_cache: Default::default(),
+            #[cfg(feature = "debug")]
+            command_callback_sites: Default::default(),
+            #[cfg(feature = "debug")]
+            events: Default::default(),
+            #[cfg(feature = "debug")]
+            next_event: 1,
+            #[cfg(feature = "debug")]
+            suspension: None,
+            #[cfg(feature = "debug")]
+            coroutines: Default::default(),
+            #[cfg(feature = "debug")]
+            coroutine_boundary: None,
+            #[cfg(feature = "debug")]
+            coroutine_yield: None,
+            #[cfg(feature = "debug")]
+            coroutine_identity: (0, 0),
+            #[cfg(feature = "debug")]
+            coroutine_task: None,
+            #[cfg(feature = "debug")]
+            control_groups: Default::default(),
+            #[cfg(feature = "debug")]
+            coroutine_completions: Default::default(),
+            #[cfg(feature = "debug")]
+            tailcalls: Default::default(),
+            #[cfg(feature = "debug")]
+            host_callbacks: Default::default(),
+            #[cfg(feature = "debug")]
+            trace_scopes: Default::default(),
+            #[cfg(feature = "debug")]
+            traced_commands: Vec::new(),
+            #[cfg(feature = "debug")]
+            hidden_trace_commands: Default::default(),
+            #[cfg(feature = "debug")]
+            delivering_execution_trace: false,
+            #[cfg(feature = "debug")]
+            helper_trace_units: Default::default(),
             #[cfg(feature = "host")]
             host: None,
             #[cfg(feature = "debug")]
             debug: crate::debug::DebugController::default(),
             #[cfg(feature = "debug")]
             debug_frame_eval_active: false,
+            #[cfg(feature = "debug")]
+            inspecting: std::cell::Cell::new(false),
+            #[cfg(feature = "debug")]
+            host_callback_depth: 0,
+            #[cfg(feature = "debug")]
+            variable_accesses: Vec::new(),
         })
     }
 
@@ -446,6 +595,16 @@ impl HybridEngineInner {
 
     pub(crate) fn first_failure(&self) -> Option<&str> {
         self.first_failure.as_deref()
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn set_observation_limit(&mut self, limit: Option<usize>) {
+        self.observation_limit = limit.map(|n| n.max(1));
+        if let Some(limit) = self.observation_limit
+            && self.observations.len() > limit
+        {
+            self.observations.drain(..self.observations.len() - limit);
+        }
     }
 
     #[cfg(feature = "debug")]
@@ -504,6 +663,8 @@ impl HybridEngineInner {
                     host.install_stub_command(name)?;
                 }
                 host.install_stub_command("::tcld::frame_cross")?;
+                #[cfg(feature = "debug")]
+                host.install_stub_command("::tcld::callback")?;
                 self.host = Some(host);
             }
         }
@@ -519,7 +680,13 @@ impl HybridEngineInner {
         Ok(())
     }
 
+    /// Capture stdout and stderr: the host's in hybrid mode, the VM's own in
+    /// vm-strict.
     pub(crate) fn begin_output_capture(&mut self) -> Result<(), VmError> {
+        if self.mode == RuntimeMode::VmStrict {
+            self.output.begin_capture();
+            return Ok(());
+        }
         #[cfg(feature = "host")]
         {
             self.host
@@ -534,13 +701,24 @@ impl HybridEngineInner {
     }
 
     pub(crate) fn captured_output(&self) -> Result<(Vec<u8>, Vec<u8>), VmError> {
+        if self.mode == RuntimeMode::VmStrict {
+            return Ok(self.output.captured());
+        }
         #[cfg(feature = "host")]
         {
-            let (stdout, stderr) = self
-                .host
-                .as_ref()
-                .ok_or_else(|| VmError::HostFrameUnavailable("host is not bootstrapped".into()))?
-                .captured_output();
+            let (stdout, stderr) = if let Some(host) = self.host.as_ref() {
+                host.captured_output()
+            } else {
+                #[cfg(feature = "debug")]
+                {
+                    self.with_suspended_bridge(|h| h.captured_output())
+                        .ok_or_else(|| VmError::HybridUnavailable("no active bridge".into()))?
+                }
+                #[cfg(not(feature = "debug"))]
+                {
+                    return Err(VmError::HybridUnavailable("no host".into()));
+                }
+            };
             Ok((stdout.as_bytes().to_vec(), stderr.as_bytes().to_vec()))
         }
         #[cfg(not(feature = "host"))]
@@ -676,6 +854,11 @@ impl HybridEngineInner {
             }
         }
 
+        let tcl_parent = if self.frames.is_empty() {
+            None
+        } else {
+            Some(self.frames[self.scope_index()].id)
+        };
         let id = FrameId(self.next_frame_id);
         let frame = CallFrame {
             id,
@@ -684,7 +867,20 @@ impl HybridEngineInner {
             stack: Vec::new(),
             compiled_locals,
             local_vars,
+            scope_parent: None,
+            script_path: None,
+            tcl_parent,
+            hidden_scope: false,
+            invocation: None,
+            #[cfg(feature = "debug")]
+            body_error_context: None,
+            #[cfg(feature = "debug")]
+            lmap: None,
+            #[cfg(feature = "debug")]
+            try_state: None,
+            tail_root: false,
             catch_stack: Vec::new(),
+            loop_marks: std::collections::BTreeMap::new(),
             aux_states: Vec::new(),
             namespace,
             kind,
@@ -693,6 +889,41 @@ impl HybridEngineInner {
         };
         self.next_frame_id += 1;
         self.frames.push(frame);
+        #[cfg(feature = "debug")]
+        if matches!(kind, FrameKind::Toplevel | FrameKind::Namespace)
+            && self
+                .source_images
+                .contains_key(&self.frames[self.fi()].code.id)
+        {
+            let names = self.frames[self.fi()]
+                .compiled_locals
+                .iter()
+                .filter(|s| !s.is_temporary())
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>();
+            for name in names {
+                let qualified = self.frames[self.fi()].namespace.qualify(&name);
+                self.install_host_link_named(&name, qualified, None)?;
+            }
+            self.frames.last_mut().unwrap().scope_parent = Some(id);
+        }
+        #[cfg(feature = "debug")]
+        if kind == FrameKind::VmProc
+            && self
+                .source_images
+                .contains_key(&self.frames[self.fi()].code.id)
+        {
+            let names = self.frames[self.fi()]
+                .compiled_locals
+                .iter()
+                .filter(|s| s.name.as_str_lossy().contains("::"))
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>();
+            for name in names {
+                let qualified = self.frames[self.fi()].namespace.qualify(&name);
+                self.install_host_link_named(&name, qualified, None)?;
+            }
+        }
         Ok(id)
     }
 
@@ -712,9 +943,17 @@ impl HybridEngineInner {
         if !self.debug.enabled {
             self.enable_debug(true);
         }
-        // Clear any prior suspended frames.
+        self.cancel_suspension();
         self.frames.clear();
-        match self.run_code_exit(code, kind, proc_qname, arg_values, NamespaceName::root())? {
+        self.push_frame(
+            code,
+            kind,
+            proc_qname,
+            arg_values,
+            NamespaceName::root(),
+            None,
+        )?;
+        match self.resume_suspension()? {
             LoopExit::Paused => {
                 let snap = self
                     .debug
@@ -735,15 +974,21 @@ impl HybridEngineInner {
     }
 
     #[cfg(feature = "debug")]
+    // Debug images hold Rc-backed bytecode; Arc is the VM's sharing handle
+    // here too, not a promise of cross-thread use.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub(crate) fn debug_start_image(
         &mut self,
         image: &tcld_compile::DebugImage,
         stop_on_entry: bool,
     ) -> Result<crate::DebugImageStart, VmError> {
-        use crate::cmd::VmProc;
-        use tcld_compile::DebugCodeUnitKind;
-
-        let mut bindings = Vec::with_capacity(image.units.len());
+        self.cancel_suspension();
+        self.clear_coroutines();
+        self.tailcalls.clear();
+        self.traced_commands.clear();
+        self.hidden_trace_commands.clear();
+        self.helper_trace_units.clear();
+        self.clear_host_callbacks();
         // An image is a closed executable generation. Do not retain procedure
         // registrations from an earlier image/restart.
         #[cfg(feature = "host")]
@@ -755,60 +1000,20 @@ impl HybridEngineInner {
         self.image_stub_commands.clear();
         self.registry = CommandRegistry::new();
         self.pending_image_procs.clear();
-        let mut pending = Vec::new();
-        for unit in &image.units {
-            let DebugCodeUnitKind::Procedure {
-                qname,
-                args_spec,
-                declaration_span,
-            } = &unit.kind
-            else {
-                continue;
-            };
-            let code = LoadedCode::from_bytecode(unit.bytecode.clone())?;
-            bindings.push(crate::DebugImageBinding {
-                logical_unit_id: unit.logical_id.clone(),
-                code_id: code.id,
-            });
-            pending.push((
-                declaration_span.clone(),
-                VmProc {
-                    qname: ByteString::from(qname.as_str()),
-                    args_spec: ByteString::from(args_spec.as_str()),
-                    num_args: code.bytecode.proc_num_args,
-                    num_locals: code.bytecode.proc_num_locals,
-                    code,
-                },
-            ));
-        }
-        let top = LoadedCode::from_bytecode(image.top_level().bytecode.clone())?;
-        bindings.push(crate::DebugImageBinding {
-            logical_unit_id: image.top_level().logical_id.clone(),
-            code_id: top.id,
-        });
-        for (declaration_span, proc) in pending {
-            let declaration = image
-                .top_level()
-                .commands
-                .iter()
-                .find(|map| map.source_span == declaration_span)
-                .ok_or_else(|| {
-                    VmError::Decode(format!(
-                        "procedure {} has no top-level declaration map",
-                        proc.qname.as_str_lossy()
-                    ))
-                })?;
-            let address = CodeAddress {
-                code_id: top.id,
-                pc: declaration.anchor_pc,
-            };
-            if self.pending_image_procs.insert(address, proc).is_some() {
-                return Err(VmError::Decode(format!(
-                    "multiple procedure activations at code {} pc {}",
-                    address.code_id.0, address.pc
-                )));
-            }
-        }
+        self.source_images.clear();
+        self.generated_cache.clear();
+        self.command_callback_sites.clear();
+        self.events.clear();
+        self.next_event = 1;
+        let top = self.register_source_image(Arc::new(image.clone()), None)?;
+        let bindings = self
+            .source_images
+            .values()
+            .map(|source| crate::DebugImageBinding {
+                logical_unit_id: source.image.units[source.unit_index].logical_id.clone(),
+                code_id: source.code_id,
+            })
+            .collect();
         self.enable_debug(stop_on_entry);
         let outcome = self.debug_start_code(top, FrameKind::Toplevel, None, &[])?;
         Ok(crate::DebugImageStart { outcome, bindings })
@@ -816,13 +1021,19 @@ impl HybridEngineInner {
 
     #[cfg(feature = "debug")]
     fn activate_image_proc(&mut self, address: CodeAddress) -> Result<(), VmError> {
-        let Some(proc) = self.pending_image_procs.remove(&address) else {
+        let Some(proc) = self.pending_image_procs.get(&address).cloned() else {
             return Ok(());
         };
         #[cfg(feature = "host")]
-        if let Some(host) = self.host.as_ref() {
+        {
             let qname = proc.qname.as_str_lossy().into_owned();
-            host.install_stub_command(&qname)?;
+            if let Some(host) = self.host.as_ref() {
+                host.install_stub_command(&qname)?;
+            } else if let Some(result) =
+                HostBridge::with_active_bridge(|h| h.install_stub_command(&qname))
+            {
+                result?;
+            }
             self.image_stub_commands.insert(qname);
         }
         self.registry.register_vm_proc(proc);
@@ -841,7 +1052,7 @@ impl HybridEngineInner {
         }
         arm(&mut self.debug);
         self.debug.suspended = false;
-        match self.eval_loop(0, true) {
+        match self.resume_suspension() {
             Ok(LoopExit::Paused) => {
                 let snap = self
                     .debug
@@ -897,19 +1108,14 @@ impl HybridEngineInner {
     ) -> crate::debug::PauseSnapshot {
         let fi = self.frames.len().saturating_sub(1);
         let frame = &self.frames[fi];
-        let mut locals = Vec::new();
-        for slot in &frame.compiled_locals {
-            let name = slot.name.as_str_lossy().into_owned();
-            let val = slot
-                .value
-                .as_ref()
-                .map(|v| v.as_string().unwrap_or_else(|_| format!("{v:?}")))
-                .unwrap_or_else(|| "<undefined>".into());
-            locals.push((name, val));
-        }
+        let locals = self.ui_frame_locals(0);
         let frame_kind = match frame.kind {
             FrameKind::Toplevel => "toplevel",
             FrameKind::VmProc => "proc",
+            FrameKind::Lambda => "lambda",
+            FrameKind::Dynamic => "generated",
+            FrameKind::Namespace => "namespace",
+            FrameKind::Source => "source",
         };
         let address = CodeAddress {
             code_id: frame.code.id,
@@ -1026,6 +1232,10 @@ impl HybridEngineInner {
                     kind_label: match f.kind {
                         FrameKind::Toplevel => "toplevel".into(),
                         FrameKind::VmProc => "proc".into(),
+                        FrameKind::Lambda => "lambda".into(),
+                        FrameKind::Dynamic => "generated".into(),
+                        FrameKind::Namespace => "namespace".into(),
+                        FrameKind::Source => "source".into(),
                     },
                     proc_qname: f.proc_qname.as_ref().map(|s| s.as_str_lossy().into_owned()),
                     namespace: f.namespace.as_bytes().as_str_lossy().into_owned(),
@@ -1038,22 +1248,96 @@ impl HybridEngineInner {
     }
 
     #[cfg(feature = "debug")]
+    fn ui_link_value(&self, link: &VarLink, depth: usize) -> Option<VmObj> {
+        if depth > MAX_CALL_DEPTH {
+            return None;
+        }
+        match link {
+            VarLink::HostVar { name1, name2 } => self.host_get(name1, name2.as_ref()).ok(),
+            VarLink::Vm {
+                target_frame,
+                target_name,
+                part2,
+            } => {
+                let frame = self.frames.iter().find(|f| f.id == *target_frame)?;
+                if let Some(slot) = frame
+                    .compiled_locals
+                    .iter()
+                    .find(|s| s.is_named(target_name))
+                {
+                    if let Some(link) = &slot.link {
+                        return self.ui_link_value(link, depth + 1);
+                    }
+                    if part2.is_none() && slot.value.is_some() {
+                        return slot.value.clone();
+                    }
+                }
+                match frame.local_vars.get_slot(target_name)? {
+                    VarSlot::Scalar(v) if part2.is_none() => Some(v.clone()),
+                    VarSlot::Array(items) => part2.as_ref().and_then(|key| items.get(key).cloned()),
+                    VarSlot::Link(link) => self.ui_link_value(link, depth + 1),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "debug")]
     pub(crate) fn ui_frame_locals(&self, level: usize) -> Vec<(String, String)> {
         let Some(frame) = self.frames.iter().rev().nth(level) else {
             return Vec::new();
         };
-        frame
-            .compiled_locals
-            .iter()
-            .map(|slot| {
-                let value = slot
-                    .value
+        let frame = frame
+            .scope_parent
+            .and_then(|id| self.frames.iter().find(|f| f.id == id))
+            .unwrap_or(frame);
+        let previous_inspecting = self.inspecting.replace(true);
+        let mut values = std::collections::BTreeMap::new();
+        for slot in frame.compiled_locals.iter().filter(|s| !s.is_temporary()) {
+            values.insert(
+                slot.name.as_str_lossy().into_owned(),
+                slot.link
                     .as_ref()
-                    .map(|value| value.as_string().unwrap_or_else(|_| format!("{value:?}")))
-                    .unwrap_or_else(|| "<undefined>".into());
-                (slot.name.as_str_lossy().into_owned(), value)
-            })
-            .collect()
+                    .and_then(|link| self.ui_link_value(link, 0))
+                    .or_else(|| slot.value.clone())
+                    .map(|v| v.as_string().unwrap_or_else(|_| format!("{v:?}")))
+                    .unwrap_or_else(|| "<undefined>".into()),
+            );
+        }
+        for (name, slot) in frame.local_vars.iter_slots() {
+            match slot {
+                VarSlot::Scalar(value) => {
+                    values.insert(
+                        name.as_str_lossy().into_owned(),
+                        value.as_string().unwrap_or_else(|_| format!("{value:?}")),
+                    );
+                }
+                VarSlot::Array(items) => {
+                    let mut entries = items
+                        .iter()
+                        .map(|(k, v)| {
+                            format!("{}={}", k.as_str_lossy(), v.as_string().unwrap_or_default())
+                        })
+                        .collect::<Vec<_>>();
+                    entries.sort();
+                    values.insert(
+                        name.as_str_lossy().into_owned(),
+                        format!("array: {}", entries.join(", ")),
+                    );
+                }
+                VarSlot::Link(link) => {
+                    if let Some(value) = self.ui_link_value(link, 0) {
+                        values.insert(
+                            name.as_str_lossy().into_owned(),
+                            value.as_string().unwrap_or_default(),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.inspecting.set(previous_inspecting);
+        values.into_iter().collect()
     }
 
     #[cfg(feature = "debug")]
@@ -1116,7 +1400,11 @@ impl HybridEngineInner {
     ) -> Result<(), VmError> {
         let num_args = code.bytecode.proc_num_args as usize;
         if num_args == 0 {
-            return Ok(());
+            return if arg_values.is_empty() {
+                Ok(())
+            } else {
+                Err(self.wrong_args(code, meta))
+            };
         }
 
         let has_args = meta
@@ -1126,9 +1414,6 @@ impl HybridEngineInner {
 
         if has_args {
             let fixed = num_args - 1;
-            if arg_values.len() < fixed {
-                return Err(self.wrong_args(code, meta));
-            }
             for i in 0..fixed {
                 if i < arg_values.len() {
                     locals[i].value = Some(arg_values[i].clone());
@@ -1158,16 +1443,26 @@ impl HybridEngineInner {
         Ok(())
     }
 
+    /// Tcl's usage message, with optional parameters as `?name?` and a final
+    /// `args` as `?arg ...?`. The invoking site replaces the leading `proc`
+    /// with the command word the caller used, as Tcl reports it.
     fn wrong_args(&self, code: &LoadedCode, meta: &[LocalMeta]) -> VmError {
-        let names: Vec<String> = meta
-            .iter()
-            .take(code.bytecode.proc_num_args as usize)
-            .map(|m| m.name.as_str_lossy().into_owned())
-            .collect();
+        let num_args = code.bytecode.proc_num_args as usize;
+        let mut usage = vec!["proc".to_string()];
+        for (index, m) in meta.iter().take(num_args).enumerate() {
+            let name = m.name.as_str_lossy();
+            usage.push(if index + 1 == num_args && name == "args" {
+                "?arg ...?".to_string()
+            } else if m.default_value.is_some() {
+                format!("?{name}?")
+            } else {
+                name.into_owned()
+            });
+        }
         VmError::TclError {
-            message: format!("wrong # args: should be \"proc {}\"", names.join(" ")),
+            message: format!("wrong # args: should be \"{}\"", usage.join(" ")),
             error_info: None,
-            error_code: None,
+            error_code: Some("TCL WRONGARGS".into()),
         }
     }
 
@@ -1177,6 +1472,14 @@ impl HybridEngineInner {
         allow_debug_pause: bool,
     ) -> Result<LoopExit, VmError> {
         loop {
+            #[cfg(feature = "debug")]
+            if self.coroutine_boundary == Some(boundary_depth) && self.coroutine_yield.is_some() {
+                return Ok(LoopExit::Paused);
+            }
+            #[cfg(feature = "debug")]
+            if self.suspension.as_ref().is_some_and(|s| s.cancelling) {
+                return Err(VmError::Internal("debug session cancelled".into()));
+            }
             let frame_len = self.frames.len();
             if frame_len <= boundary_depth {
                 return Err(VmError::Internal(
@@ -1213,7 +1516,9 @@ impl HybridEngineInner {
                     self.debug.last_pause = Some(snap);
                     self.debug.suspended = true;
                     self.debug.clear_entry_arm();
-                    return Ok(LoopExit::Paused);
+                    if !self.pause_suspension()? {
+                        return Ok(LoopExit::Paused);
+                    }
                 }
             }
             #[cfg(not(feature = "debug"))]
@@ -1238,13 +1543,21 @@ impl HybridEngineInner {
                 .entry(format!("{opcode_class:?}"))
                 .or_default() += 1;
             #[cfg(feature = "debug")]
-            self.observations.push(OpcodeObservation {
-                code_id: code.id,
-                pc: inst.pc,
-                opcode: inst.opcode,
-                class: opcode_class,
-                frame_id: self.frames[fi].id,
-            });
+            {
+                if let Some(limit) = self.observation_limit
+                    && self.observations.len() >= limit
+                {
+                    let discard = (limit / 2).max(1);
+                    self.observations.drain(..discard);
+                }
+                self.observations.push(OpcodeObservation {
+                    code_id: code.id,
+                    pc: inst.pc,
+                    opcode: inst.opcode,
+                    class: opcode_class,
+                    frame_id: self.frames[fi].id,
+                });
+            }
             match opcode_class {
                 OpcodeClass::Trap => {
                     return Err(VmError::UnimplementedOpcode {
@@ -1267,7 +1580,36 @@ impl HybridEngineInner {
                 _ => {}
             }
 
-            let flow = match self.dispatch(&inst) {
+            if self.frames[fi]
+                .code
+                .bytecode
+                .exceptions
+                .iter()
+                .any(|range| {
+                    range.kind == ExceptionType::Loop && range.code_range.start == inst.pc as i32
+                })
+            {
+                let frame = &mut self.frames[fi];
+                frame.loop_marks.insert(
+                    inst.pc as i32,
+                    (
+                        frame.stack.len(),
+                        frame.aux_states.len(),
+                        frame.catch_stack.len(),
+                    ),
+                );
+            }
+            self.last_host_write = None;
+            #[cfg(feature = "debug")]
+            let dispatched = self
+                .execution_boundary(inst.pc)
+                .and_then(|flow| match flow {
+                    Some(flow) => Ok(flow),
+                    None => self.dispatch(&inst),
+                });
+            #[cfg(not(feature = "debug"))]
+            let dispatched = self.dispatch(&inst);
+            let flow = match dispatched {
                 Ok(flow) => flow,
                 Err(VmError::TclError {
                     message,
@@ -1280,6 +1622,17 @@ impl HybridEngineInner {
                 )),
                 Err(error) => return Err(error),
             };
+            if matches!(flow, Flow::Continue) {
+                let op = format!("{:?}", inst.opcode).to_ascii_lowercase();
+                if ["store", "incr", "append", "lappend"]
+                    .iter()
+                    .any(|p| op.starts_with(p))
+                    && let Some(value) = self.last_host_write.take()
+                    && let Some(top) = self.frames[fi].stack.last_mut()
+                {
+                    *top = value;
+                }
+            }
             match flow {
                 Flow::Continue => {}
                 Flow::JumpPc(pc) => {
@@ -1313,10 +1666,64 @@ impl HybridEngineInner {
         result: VmObj,
         boundary_depth: usize,
     ) -> Result<Option<LoopExit>, VmError> {
+        #[cfg(feature = "debug")]
+        let mut result = result;
+        #[cfg(feature = "debug")]
+        {
+            let completion =
+                self.unwind_execution_commands(None, Completion::ok(result.clone()))?;
+            if completion.code != 0 {
+                return self.route_completion(
+                    completion,
+                    self.frames[self.fi()].code.instructions
+                        [self.frames[self.fi()].pc_index.saturating_sub(1)]
+                    .pc,
+                    boundary_depth,
+                );
+            }
+            if self.frames[self.fi()].try_state.is_some() {
+                return self.route_completion(
+                    Completion::ok(result),
+                    self.frames[self.fi()].code.instructions
+                        [self.frames[self.fi()].pc_index.saturating_sub(1)]
+                    .pc,
+                    boundary_depth,
+                );
+            }
+            if self.frames[self.fi()].lmap.is_some() {
+                match self.resume_lmap(Completion::ok(result))? {
+                    None => return Ok(None),
+                    Some(completion) if completion.code == 0 => result = completion.result,
+                    Some(completion) => {
+                        return self.route_completion(
+                            completion,
+                            self.frames[self.fi()].code.instructions
+                                [self.frames[self.fi()].pc_index.saturating_sub(1)]
+                            .pc,
+                            boundary_depth,
+                        );
+                    }
+                }
+            }
+            self.cleanup_trace_scope();
+        }
         let finished = self
             .frames
             .pop()
             .ok_or_else(|| VmError::Internal("frame completion with empty stack".into()))?;
+        #[cfg(feature = "debug")]
+        if let Some(tail) = self.tailcalls.remove(&finished.id.0) {
+            return self.perform_tailcall(tail, finished, result, boundary_depth);
+        }
+        self.complete_popped_frame(finished, result, boundary_depth)
+    }
+
+    fn complete_popped_frame(
+        &mut self,
+        finished: CallFrame,
+        result: VmObj,
+        boundary_depth: usize,
+    ) -> Result<Option<LoopExit>, VmError> {
         if let Some(continuation) = finished.continuation {
             let caller = self
                 .frames
@@ -1346,6 +1753,7 @@ impl HybridEngineInner {
         mut producing_pc: u32,
         boundary_depth: usize,
     ) -> Result<Option<LoopExit>, VmError> {
+        let origin_frame = self.frames[self.fi()].id;
         loop {
             let fi = self.fi();
             let catch_candidate = self.frames[fi].catch_stack.last().and_then(|mark| {
@@ -1379,6 +1787,13 @@ impl HybridEngineInner {
             if catch_is_closest
                 && let Some((stack_depth, aux_state_depth, catch_range)) = catch_candidate
             {
+                #[cfg(feature = "debug")]
+                {
+                    completion = self.unwind_execution_commands(
+                        Some(catch_range.catch_offset as u32),
+                        completion,
+                    )?;
+                }
                 self.last_completion = completion;
                 self.frames[fi].stack.truncate(stack_depth);
                 self.frames[fi].aux_states.truncate(aux_state_depth);
@@ -1397,14 +1812,76 @@ impl HybridEngineInner {
                     range.continue_offset
                 };
                 if target >= 0 {
+                    #[cfg(feature = "debug")]
+                    {
+                        completion =
+                            self.unwind_execution_commands(Some(target as u32), completion)?;
+                        if completion.code != 3 && completion.code != 4 {
+                            continue;
+                        }
+                    }
+                    if let Some((stack, aux, catch)) = self.frames[fi]
+                        .loop_marks
+                        .get(&range.code_range.start)
+                        .copied()
+                    {
+                        self.frames[fi].stack.truncate(stack);
+                        self.frames[fi].aux_states.truncate(aux);
+                        self.frames[fi].catch_stack.truncate(catch);
+                    }
+                    self.consume_loop_completion(&completion)?;
                     self.frames[fi].pc_index = self.frames[fi].code.index_for_pc(target as u32)?;
                     return Ok(None);
                 }
             }
 
-            if completion.code == 2 && completion.options.level > 0 {
-                completion.options.level -= 1;
-                completion.options.raw = None;
+            #[cfg(feature = "debug")]
+            {
+                completion = self.unwind_execution_commands(None, completion)?;
+            }
+            #[cfg(feature = "debug")]
+            if self.frames[fi].try_state.is_some() {
+                match self.resume_try(completion, producing_pc)? {
+                    None => return Ok(None),
+                    Some(finished) => completion = finished,
+                }
+            }
+            #[cfg(feature = "debug")]
+            if self.frames[fi].lmap.is_some() && matches!(completion.code, 0 | 3 | 4) {
+                match self.resume_lmap(completion)? {
+                    None => return Ok(None),
+                    Some(finished) => completion = finished,
+                }
+            }
+            // Raw loop control cannot cross a procedure boundary. Do this
+            // before consuming return levels: `return -code break` is allowed
+            // to produce a break in the caller, just as in Tcl.
+            if matches!(self.frames[fi].kind, FrameKind::VmProc | FrameKind::Lambda)
+                && matches!(completion.code, 3 | 4)
+            {
+                completion.reject_loop_control()?;
+            }
+            #[cfg(feature = "debug")]
+            if self.frames[fi].kind == FrameKind::Lambda {
+                self.lambda_error_context(&mut completion, producing_pc)?;
+            }
+            #[cfg(feature = "debug")]
+            if completion.code == 1
+                && let Some(context) = &self.frames[fi].body_error_context
+            {
+                completion.append_error_context(&format!(
+                    "\n    ({context} line {})",
+                    self.mapped_error_line(producing_pc),
+                ))?;
+            }
+            if !matches!(
+                self.frames[fi].kind,
+                FrameKind::Dynamic | FrameKind::Namespace
+            ) && (!self.frames[fi].hidden_scope || self.frames[fi].id == origin_frame)
+                && completion.code == 2
+                && completion.options.level > 0
+            {
+                completion.options.consume_return_level()?;
                 if completion.options.level == 0 {
                     completion.code = completion.options.code;
                 } else if self.frames.len() == boundary_depth + 1 {
@@ -1412,10 +1889,25 @@ impl HybridEngineInner {
                 }
             }
 
+            #[cfg(feature = "debug")]
+            self.cleanup_trace_scope();
             let finished = self
                 .frames
                 .pop()
                 .ok_or_else(|| VmError::Internal("completion with empty frame stack".into()))?;
+            #[cfg(feature = "debug")]
+            if let Some(tail) = self.tailcalls.remove(&finished.id.0) {
+                if completion.code == 0 {
+                    return self.perform_tailcall(
+                        tail,
+                        finished,
+                        completion.result,
+                        boundary_depth,
+                    );
+                }
+                // A pending native tail is preempted by an error/non-OK return.
+                drop(tail);
+            }
             if let Some(continuation) = finished.continuation {
                 let caller = self
                     .frames
@@ -1429,6 +1921,7 @@ impl HybridEngineInner {
                 caller.pc_index = continuation.resume_pc_index;
                 caller.stack.truncate(continuation.caller_stack_depth);
                 if completion.code == 0 {
+                    self.last_completion = completion.clone();
                     caller.stack.push(completion.result);
                     return Ok(None);
                 }
@@ -1677,59 +2170,19 @@ impl HybridEngineInner {
             | Opcode::UnsetArrayStk
             | Opcode::UnsetStk => self.variable_state_opcode(inst),
             Opcode::TryCvtToNumeric => {
-                let fi = self.fi();
-                let st = &mut self.frames[fi].stack;
-                if st.is_empty() {
-                    return Err(VmError::StackUnderflow {
-                        pc,
-                        op: "tryCvtToNumeric".into(),
-                    });
-                }
-                let top = st.last_mut().unwrap();
-                if let Some(n) = top.try_as_number() {
-                    if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
-                        *top = VmObj::Int(n as i64);
-                    } else {
-                        *top = VmObj::from_str(&n.to_string());
-                    }
-                }
-                // leave as-is if not numeric (Tcl may error later)
+                let value = self.pop(pc, "tryCvtToNumeric")?;
+                self.push(crate::number::try_numeric(value)?);
                 Ok(Flow::Continue)
             }
             Opcode::TryCvtToBoolean => {
-                let v = self.tos(pc, "tryCvtToBoolean")?.clone();
-                let b = v.is_true()?;
-                // stack_effect +1 per table — push boolean result? Table says stack_effect 1.
-                // Looking at inst table: tryCvtToBoolean stack_effect 1 — may convert in place AND
-                // push? Safer: replace TOS with 0/1.
-                let _ = self.pop(pc, "tryCvtToBoolean")?;
-                self.push(VmObj::Int(if b { 1 } else { 0 }));
-                // That was net 0. Table says +1 — push without pop:
-                // Actually re-read: argc 1 stack_effect 1 — might push conversion status.
-                // For fixtures we don't hit this; keep net 0 as converted value.
+                // Keeps the value and pushes whether it is a boolean literal.
+                let literal = crate::number::is_boolean_literal(self.tos(pc, "tryCvtToBoolean")?);
+                self.push(VmObj::Int(i64::from(literal)));
                 Ok(Flow::Continue)
             }
             Opcode::NumType => {
-                // numericType: leave type code on stack in place (0=non, 1=int, 2=double)
-                let fi = self.fi();
-                let st = &mut self.frames[fi].stack;
-                if st.is_empty() {
-                    return Err(VmError::StackUnderflow {
-                        pc,
-                        op: "numType".into(),
-                    });
-                }
-                let code = match st.last().unwrap() {
-                    VmObj::Int(_) => 1,
-                    other => {
-                        if other.try_as_number().is_some() {
-                            2
-                        } else {
-                            0
-                        }
-                    }
-                };
-                *st.last_mut().unwrap() = VmObj::Int(code);
+                let value = self.pop(pc, "numType")?;
+                self.push(VmObj::Int(crate::number::type_code(&value)));
                 Ok(Flow::Continue)
             }
             Opcode::Add
@@ -1737,92 +2190,46 @@ impl HybridEngineInner {
             | Opcode::Mult
             | Opcode::Div
             | Opcode::Mod
-            | Opcode::Expon => self.binop_num(op, pc),
-            Opcode::Bitor | Opcode::Bitxor | Opcode::Bitand | Opcode::Lshift | Opcode::Rshift => {
-                let right = self.pop(pc, "integer binary operation")?.as_bigint()?;
-                let left = self.pop(pc, "integer binary operation")?.as_bigint()?;
-                let value = match op {
-                    Opcode::Bitor => left | right,
-                    Opcode::Bitxor => left ^ right,
-                    Opcode::Bitand => left & right,
-                    Opcode::Lshift | Opcode::Rshift => {
-                        if right.is_negative() {
-                            return Err(VmError::TclError {
-                                message: "negative shift argument".into(),
-                                error_info: None,
-                                error_code: Some("ARITH DOMAIN {negative shift argument}".into()),
-                            });
-                        }
-                        let shift = right.to_usize().ok_or_else(|| VmError::TclError {
-                            message: "integer value too large to represent".into(),
-                            error_info: None,
-                            error_code: Some("ARITH IOVERFLOW".into()),
-                        })?;
-                        if op == Opcode::Lshift {
-                            left << shift
-                        } else {
-                            left >> shift
-                        }
-                    }
-                    _ => unreachable!(),
-                };
-                self.push(VmObj::from_bigint(value));
-                Ok(Flow::Continue)
-            }
+            | Opcode::Expon
+            | Opcode::Bitor
+            | Opcode::Bitxor
+            | Opcode::Bitand
+            | Opcode::Lshift
+            | Opcode::Rshift => self.binop_num(op, pc),
             Opcode::Bitnot => {
-                let value = self.pop(pc, "bitnot")?.as_bigint()?;
-                self.push(VmObj::from_bigint(!value));
+                let value = self.pop(pc, "bitnot")?;
+                self.push(crate::number::bit_not(&value)?);
                 Ok(Flow::Continue)
             }
             Opcode::Uplus => {
-                let v = self.pop(pc, "uplus")?;
-                let n = v.as_i64().or_else(|_| {
-                    v.try_as_number()
-                        .map(|f| f as i64)
-                        .ok_or_else(|| VmError::TclError {
-                            message: "can't use non-numeric string as operand of \"+\"".into(),
-                            error_info: None,
-                            error_code: None,
-                        })
-                })?;
-                self.push(VmObj::Int(n));
+                let value = self.pop(pc, "uplus")?;
+                self.push(crate::number::plus(&value)?);
                 Ok(Flow::Continue)
             }
             Opcode::Uminus => {
-                let v = self.pop(pc, "uminus")?;
-                if let Some(n) = v.try_as_number() {
-                    if n.fract() == 0.0 {
-                        self.push(VmObj::Int(-(n as i64)));
-                    } else {
-                        self.push(VmObj::from_str(&(-n).to_string()));
-                    }
-                    Ok(Flow::Continue)
-                } else {
-                    Err(VmError::TclError {
-                        message: "can't use non-numeric string as operand of \"-\"".into(),
-                        error_info: None,
-                        error_code: None,
-                    })
-                }
+                let value = self.pop(pc, "uminus")?;
+                self.push(crate::number::negate(&value)?);
+                Ok(Flow::Continue)
             }
             Opcode::Eq | Opcode::Neq | Opcode::Lt | Opcode::Gt | Opcode::Le | Opcode::Ge => {
                 self.binop_cmp(op, pc)
             }
             Opcode::Not => {
-                let v = self.pop(pc, "not")?;
-                self.push(VmObj::Int(if v.is_true()? { 0 } else { 1 }));
+                let value = self.pop(pc, "not")?;
+                self.push(crate::number::logical_not(&value)?);
                 Ok(Flow::Continue)
             }
-            Opcode::Land => {
-                let b = self.pop(pc, "land")?;
-                let a = self.pop(pc, "land")?;
-                self.push(VmObj::Int(if a.is_true()? && b.is_true()? { 1 } else { 0 }));
-                Ok(Flow::Continue)
-            }
-            Opcode::Lor => {
-                let b = self.pop(pc, "lor")?;
-                let a = self.pop(pc, "lor")?;
-                self.push(VmObj::Int(if a.is_true()? || b.is_true()? { 1 } else { 0 }));
+            Opcode::Land | Opcode::Lor => {
+                let right = self.pop(pc, "logical operator")?;
+                let left = self.pop(pc, "logical operator")?;
+                let symbol = if op == Opcode::Land { "&&" } else { "||" };
+                let truth = |value: &VmObj, side: &str| {
+                    crate::number::boolean(value)
+                        .map_err(|_| crate::number::operand_error(value, side, symbol))
+                };
+                let (a, b) = (truth(&left, "left ")?, truth(&right, "right ")?);
+                let result = if op == Opcode::Land { a && b } else { a || b };
+                self.push(VmObj::Int(i64::from(result)));
                 Ok(Flow::Continue)
             }
             Opcode::StrEq => {
@@ -1867,19 +2274,9 @@ impl HybridEngineInner {
                 Ok(Flow::Continue)
             }
             Opcode::StrIndex => {
-                let idx = self.pop(pc, "strindex")?.as_i64()?;
-                let s = self.pop(pc, "strindex")?.as_string()?;
-                let chars: Vec<char> = s.chars().collect();
-                let ch = if idx < 0 {
-                    chars
-                        .get(chars.len().wrapping_sub((-idx) as usize))
-                        .copied()
-                } else {
-                    chars.get(idx as usize).copied()
-                };
-                self.push(VmObj::from_str(
-                    &ch.map(|c| c.to_string()).unwrap_or_default(),
-                ));
+                let position = self.pop(pc, "strindex")?;
+                let string = self.pop(pc, "strindex")?;
+                self.push(crate::strings::index_char(&string, &position)?);
                 Ok(Flow::Continue)
             }
             Opcode::StrMatch => {
@@ -1942,22 +2339,13 @@ impl HybridEngineInner {
                     });
                 }
                 let parts: Vec<VmObj> = st.split_off(st.len() - n);
-                // Keep as string-rep list for host round-trip friendliness
-                let s = list_to_string(&parts)?;
-                self.push(VmObj::from_str(&s));
+                self.push(VmObj::List(parts));
                 Ok(Flow::Continue)
             }
             Opcode::ListIndex => {
-                let idx_obj = self.pop(pc, "listIndex")?;
-                let list_obj = self.pop(pc, "listIndex")?;
-                let list = list_obj.as_list_vec()?;
-                let idx = idx_obj.as_i64()?;
-                let item = if idx < 0 {
-                    list.get(list.len().wrapping_sub((-idx) as usize))
-                } else {
-                    list.get(idx as usize)
-                };
-                self.push(item.cloned().unwrap_or_else(VmObj::empty));
+                let index = self.pop(pc, "listIndex")?;
+                let list = self.pop(pc, "listIndex")?;
+                self.push(crate::lists::index_list(&list, &index)?);
                 Ok(Flow::Continue)
             }
             Opcode::ListLength => {
@@ -2000,6 +2388,7 @@ impl HybridEngineInner {
             Opcode::ForeachStart => self.foreach_start_new(inst),
             Opcode::ForeachStep => self.foreach_step_new(inst),
             Opcode::ForeachEnd => self.foreach_end_new(inst),
+            Opcode::LmapCollect => self.lmap_collect(inst),
             Opcode::JumpTable => self.jump_table(inst),
             Opcode::BeginCatch4 => {
                 let range_index = *inst.operands.first().unwrap_or(&0) as usize;
@@ -2020,6 +2409,10 @@ impl HybridEngineInner {
                     stack_depth: depth,
                     aux_state_depth,
                 });
+                #[cfg(feature = "debug")]
+                if self.source_images.contains_key(&self.frames[fi].code.id) {
+                    self.last_completion = Completion::ok(VmObj::empty());
+                }
                 Ok(Flow::Continue)
             }
             Opcode::EndCatch => {
@@ -2028,6 +2421,10 @@ impl HybridEngineInner {
                     .catch_stack
                     .pop()
                     .ok_or(VmError::InvalidCatchState)?;
+                #[cfg(feature = "debug")]
+                if self.source_images.contains_key(&self.frames[fi].code.id) {
+                    self.last_completion = Completion::ok(VmObj::empty());
+                }
                 Ok(Flow::Continue)
             }
             Opcode::PushReturnCode => {
@@ -2056,8 +2453,22 @@ impl HybridEngineInner {
                 let mut options = ReturnOptions::from_vm_obj(raw_options)?;
                 options.code = code;
                 options.level = level as u32;
+                // The code and level operands override the option dictionary.
+                // Preserve its other fields when reporting complete options.
+                #[cfg(feature = "debug")]
+                if self
+                    .source_images
+                    .contains_key(&self.frames[self.fi()].code.id)
+                {
+                    options.sync_raw_code_level()?;
+                }
                 let routed = options.routed_code();
                 if routed == 0 {
+                    self.last_completion = Completion {
+                        code: routed,
+                        result: result.clone(),
+                        options,
+                    };
                     self.push(result);
                     Ok(Flow::Continue)
                 } else {
@@ -2071,9 +2482,14 @@ impl HybridEngineInner {
             Opcode::ReturnStk => {
                 let result = self.pop(pc, "returnStk result")?;
                 let raw_options = self.pop(pc, "returnStk options")?;
-                let options = ReturnOptions::from_vm_obj(raw_options)?;
+                let options = ReturnOptions::from_return_options(raw_options)?;
                 let routed = options.routed_code();
                 if routed == 0 {
+                    self.last_completion = Completion {
+                        code: routed,
+                        result: result.clone(),
+                        options,
+                    };
                     self.push(result);
                     Ok(Flow::Continue)
                 } else {
@@ -2171,11 +2587,8 @@ impl HybridEngineInner {
                     InvokeOutcome::FramePushed => Ok(Flow::Continue),
                 }
             }
-            Opcode::CallBuiltinFunc1
-            | Opcode::CallFunc1
-            | Opcode::Regexp
-            | Opcode::ClockRead
-            | Opcode::StrMap
+            Opcode::CallBuiltinFunc1 | Opcode::CallFunc1 => self.math_function_opcode(inst),
+            Opcode::StrMap
             | Opcode::StrFind
             | Opcode::StrFindLast
             | Opcode::StrRangeImm
@@ -2187,9 +2600,10 @@ impl HybridEngineInner {
             | Opcode::StrLower
             | Opcode::StrTitle
             | Opcode::StrReplace
-            | Opcode::StrClass
-            | Opcode::DictGetDef
-            | Opcode::Lreplace4 => self.host_value_opcode(inst),
+            | Opcode::StrClass => self.string_opcode(inst),
+            Opcode::Regexp => self.regexp_opcode(inst),
+            Opcode::ClockRead => self.clock_read_opcode(inst),
+            Opcode::Lreplace4 => self.lreplace_opcode(inst),
             Opcode::DictGet
             | Opcode::DictSet
             | Opcode::DictUnset
@@ -2205,6 +2619,7 @@ impl HybridEngineInner {
             | Opcode::DictRecombineStk
             | Opcode::DictRecombineImm
             | Opcode::DictExists
+            | Opcode::DictGetDef
             | Opcode::DictVerify => self.dict_opcode(inst),
             other if classify(other) == OpcodeClass::Trap => Err(VmError::UnimplementedOpcode {
                 opcode: format!("{other:?}"),
@@ -2309,23 +2724,6 @@ impl HybridEngineInner {
         }
     }
 
-    fn invoke_host_value_words(&mut self, words: &[VmObj]) -> Result<Flow, VmError> {
-        let name = words
-            .first()
-            .ok_or_else(|| VmError::Internal("empty host value invocation".into()))?
-            .ensure_bytes()?;
-        match self.invoke_world_host(words, &name)? {
-            InvokeOutcome::Value(value) => {
-                self.push(value);
-                Ok(Flow::Continue)
-            }
-            InvokeOutcome::Raise(completion) => Ok(Flow::Raise(completion)),
-            InvokeOutcome::FramePushed => Err(VmError::Internal(
-                "typed host value operation pushed a VM frame".into(),
-            )),
-        }
-    }
-
     fn host_value_result(&mut self, words: &[VmObj]) -> Result<Result<VmObj, Completion>, VmError> {
         let name = words
             .first()
@@ -2343,12 +2741,49 @@ impl HybridEngineInner {
     fn host_frame_opcode(&mut self, inst: &crate::load::DecodedInst) -> Result<Flow, VmError> {
         let pc = inst.pc as u64;
         let body = self.pop(pc, "host frame body")?;
+        #[cfg(feature = "debug")]
+        if self
+            .source_images
+            .contains_key(&self.frames[self.fi()].code.id)
+        {
+            let site = CodeAddress {
+                code_id: self.frames[self.fi()].code.id,
+                pc: inst.pc,
+            };
+            let words = [
+                VmObj::from_str(if inst.opcode == Opcode::ExprStk {
+                    "expr"
+                } else {
+                    "eval"
+                }),
+                body,
+            ];
+            return match self
+                .invoke_generated(&words, site)?
+                .expect("generated eval dispatch")
+            {
+                InvokeOutcome::Value(value) => {
+                    self.push(value);
+                    Ok(Flow::Continue)
+                }
+                InvokeOutcome::Raise(completion) => Ok(Flow::Raise(completion)),
+                InvokeOutcome::FramePushed => Ok(Flow::Continue),
+            };
+        }
         self.host_frame_eval(body, inst.opcode == Opcode::ExprStk)
     }
 
+    #[cfg(not(feature = "host"))]
+    fn host_frame_eval(&mut self, _body: VmObj, _expression: bool) -> Result<Flow, VmError> {
+        Err(VmError::HybridUnavailable(
+            "host frame evaluation requires the host feature".into(),
+        ))
+    }
+
+    #[cfg(feature = "host")]
     fn host_frame_eval(&mut self, body: VmObj, expression: bool) -> Result<Flow, VmError> {
         use crate::var::VarSlot;
-        let fi = self.fi();
+        let fi = self.scope_index();
         let namespace = self.frames[fi].namespace.as_bytes().clone();
         let mut seen = std::collections::HashSet::new();
         let mut rows = Vec::new();
@@ -2389,7 +2824,7 @@ impl HybridEngineInner {
                     name,
                     storage: HostFrameStorage::Array(pairs),
                 });
-            } else if let Ok(value) = self.load_lvt(index) {
+            } else if let Ok(value) = self.var_get(&name, None) {
                 rows.push(HostFrameInput {
                     name,
                     storage: HostFrameStorage::Scalar(value.ensure_bytes()?),
@@ -2526,11 +2961,29 @@ impl HybridEngineInner {
         name: &ByteString,
         map: std::collections::HashMap<ByteString, VmObj>,
     ) -> Result<(), VmError> {
-        let fi = self.fi();
+        let fi = self.scope_index();
+        #[cfg(feature = "debug")]
+        if matches!(
+            self.frames[fi].kind,
+            FrameKind::Toplevel | FrameKind::Namespace
+        ) && self.source_images.contains_key(&self.frames[fi].code.id)
+            && !self.frames[fi]
+                .compiled_locals
+                .iter()
+                .any(|s| s.is_named(name) && s.link.is_some())
+            && !matches!(
+                self.frames[fi].local_vars.get_slot(name),
+                Some(VarSlot::Link(_))
+            )
+        {
+            let qualified = self.frames[fi].namespace.qualify(name);
+            self.install_host_link_named(name, qualified, None)?;
+        }
+
         let link = self.frames[fi]
             .compiled_locals
             .iter()
-            .find(|slot| slot.name == *name)
+            .find(|slot| slot.is_named(name))
             .and_then(|slot| slot.link.clone())
             .or_else(|| match self.frames[fi].local_vars.get_slot(name) {
                 Some(VarSlot::Link(link)) => Some(link.clone()),
@@ -2545,7 +2998,7 @@ impl HybridEngineInner {
         if let Some(slot) = self.frames[fi]
             .compiled_locals
             .iter_mut()
-            .find(|slot| slot.name == *name)
+            .find(|slot| slot.is_named(name))
         {
             slot.value = None;
         }
@@ -2571,7 +3024,7 @@ impl HybridEngineInner {
                 let nested = self.frames[frame_index]
                     .compiled_locals
                     .iter()
-                    .find(|slot| slot.name == *target_name)
+                    .find(|slot| slot.is_named(target_name))
                     .and_then(|slot| slot.link.clone())
                     .or_else(
                         || match self.frames[frame_index].local_vars.get_slot(target_name) {
@@ -2588,7 +3041,7 @@ impl HybridEngineInner {
                 if let Some(slot) = self.frames[frame_index]
                     .compiled_locals
                     .iter_mut()
-                    .find(|slot| slot.name == *target_name)
+                    .find(|slot| slot.is_named(target_name))
                 {
                     slot.value = None;
                 }
@@ -2611,6 +3064,10 @@ impl HybridEngineInner {
                 error_info: None,
                 error_code: Some("TCL LOOKUP VARNAME".into()),
             }),
+            VarLink::HostVar { name1, name2: None } if self.mode == RuntimeMode::VmStrict => {
+                self.world.replace_array(name1, map);
+                Ok(())
+            }
             VarLink::HostVar { name1, name2: None } => {
                 match self.host_value_result(&[
                     VmObj::from_str("unset"),
@@ -2670,132 +3127,107 @@ impl HybridEngineInner {
         Ok(Flow::Continue)
     }
 
-    fn dict_host(
-        &mut self,
-        subcommand: &str,
-        mut args: Vec<VmObj>,
-    ) -> Result<Result<VmObj, Completion>, VmError> {
-        let mut words = vec![VmObj::from_str("dict"), VmObj::from_str(subcommand)];
-        words.append(&mut args);
-        self.host_value_result(&words)
+    fn operand_count(inst: &crate::load::DecodedInst, index: usize) -> Result<usize, VmError> {
+        usize::try_from(*inst.operands.get(index).unwrap_or(&-1)).map_err(|_| {
+            VmError::InvalidOpcodeOperand {
+                opcode: format!("{:?}", inst.opcode),
+                detail: format!("operand {index} is not a count"),
+            }
+        })
     }
 
-    fn dict_mutate(
-        &mut self,
-        subcommand: &str,
-        mut args: Vec<VmObj>,
-    ) -> Result<Result<VmObj, Completion>, VmError> {
-        if args.is_empty() {
-            return Err(VmError::Internal(
-                "dictionary mutation missing value".into(),
-            ));
+    /// A variable's value, or `None` when it is unset.
+    fn load_lvt_optional(&mut self, index: usize) -> Result<Option<VmObj>, VmError> {
+        match self.load_lvt(index) {
+            Ok(value) => Ok(Some(value)),
+            Err(error) if is_missing_tcl_value(&error) => Ok(None),
+            Err(error) => Err(error),
         }
-        let dictionary = args.remove(0);
-        let mut words = vec![
-            VmObj::from_str("::tcld::dict_value"),
-            VmObj::from_str(subcommand),
-            dictionary,
-        ];
-        words.append(&mut args);
-        self.host_value_result(&words)
     }
 
+    /// The dictionary instructions (`tclExecute.c`) on native values.
     fn dict_opcode(&mut self, inst: &crate::load::DecodedInst) -> Result<Flow, VmError> {
         let pc = inst.pc as u64;
-        match inst.opcode {
-            Opcode::DictGet | Opcode::DictExists => {
-                let keys = *inst.operands.first().unwrap_or(&0) as usize;
-                let args = self.take_stack_words(keys + 1, pc, "dict path")?;
-                match self.dict_host(
-                    if inst.opcode == Opcode::DictGet {
-                        "get"
-                    } else {
-                        "exists"
-                    },
-                    args,
-                )? {
-                    Ok(value) => {
-                        self.push(value);
-                        Ok(Flow::Continue)
+        let value = match inst.opcode {
+            Opcode::DictGet | Opcode::DictExists | Opcode::DictGetDef => {
+                let keys = Self::operand_count(inst, 0)?;
+                if keys == 0 {
+                    return Err(VmError::InvalidOpcodeOperand {
+                        opcode: format!("{:?}", inst.opcode),
+                        detail: "zero dictionary path length".into(),
+                    });
+                }
+                let has_default = inst.opcode == Opcode::DictGetDef;
+                let mut args =
+                    self.take_stack_words(keys + 1 + usize::from(has_default), pc, "dict path")?;
+                let default = if has_default { args.pop() } else { None };
+                let dict = args.remove(0);
+                let (key, path) = args.split_last().unwrap();
+                match inst.opcode {
+                    Opcode::DictExists => {
+                        // Any failure, a malformed value included, means absent.
+                        let found = Dict::trace_existing(&dict, path)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|leaf| leaf.get(key).is_ok_and(|value| value.is_some()));
+                        VmObj::Int(i64::from(found))
                     }
-                    Err(completion) => Ok(Flow::Raise(completion)),
+                    Opcode::DictGet => match Dict::trace(&dict, path)?.get(key)? {
+                        Some(value) => value.clone(),
+                        None => return Err(crate::dict::unknown_key(key)?),
+                    },
+                    _ => {
+                        let found = match Dict::trace_existing(&dict, path)? {
+                            Some(leaf) => leaf.get(key)?.cloned(),
+                            None => None,
+                        };
+                        found.or(default).unwrap_or_else(VmObj::empty)
+                    }
                 }
             }
             Opcode::DictVerify => {
-                let dict = self.pop(pc, "dictVerify")?;
-                match self.dict_host("size", vec![dict])? {
-                    Ok(_) => Ok(Flow::Continue),
-                    Err(completion) => Ok(Flow::Raise(completion)),
-                }
+                Dict::from_value(&self.pop(pc, "dictVerify")?)?;
+                return Ok(Flow::Continue);
             }
             Opcode::DictSet
             | Opcode::DictUnset
             | Opcode::DictIncrImm
             | Opcode::DictAppend
             | Opcode::DictLappend => {
-                let index = match inst.opcode {
-                    Opcode::DictSet | Opcode::DictUnset => {
-                        *inst.operands.get(1).unwrap_or(&0) as usize
-                    }
-                    Opcode::DictIncrImm => *inst.operands.get(1).unwrap_or(&0) as usize,
-                    _ => *inst.operands.first().unwrap_or(&0) as usize,
-                };
-                let dict = match self.load_lvt(index) {
-                    Ok(value) => value,
-                    Err(error) if is_missing_tcl_value(&error) => VmObj::empty(),
-                    Err(error) => return Err(error),
-                };
-                let (subcommand, mut tail) = match inst.opcode {
-                    Opcode::DictSet => {
-                        let keys = *inst.operands.first().unwrap_or(&0) as usize;
-                        ("set", self.take_stack_words(keys + 1, pc, "dictSet")?)
-                    }
+                let (index, operand_words) = match inst.opcode {
+                    Opcode::DictSet => (
+                        Self::operand_count(inst, 1)?,
+                        Self::operand_count(inst, 0)? + 1,
+                    ),
                     Opcode::DictUnset => {
-                        let keys = *inst.operands.first().unwrap_or(&0) as usize;
-                        ("unset", self.take_stack_words(keys, pc, "dictUnset")?)
+                        (Self::operand_count(inst, 1)?, Self::operand_count(inst, 0)?)
                     }
-                    Opcode::DictIncrImm => {
-                        let key = self.pop(pc, "dictIncrImm")?;
-                        (
-                            "incr",
-                            vec![
-                                key,
-                                VmObj::from_int(*inst.operands.first().unwrap_or(&0) as i64),
-                            ],
-                        )
-                    }
-                    Opcode::DictAppend => ("append", self.take_stack_words(2, pc, "dictAppend")?),
-                    Opcode::DictLappend => {
-                        ("lappend", self.take_stack_words(2, pc, "dictLappend")?)
-                    }
-                    _ => unreachable!(),
+                    Opcode::DictIncrImm => (Self::operand_count(inst, 1)?, 1),
+                    _ => (Self::operand_count(inst, 0)?, 2),
                 };
-                let mut args = vec![dict];
-                args.append(&mut tail);
-                match self.dict_mutate(subcommand, args)? {
-                    Ok(value) => {
-                        self.store_lvt(index, value.clone())?;
-                        self.push(value);
-                        Ok(Flow::Continue)
+                let mut operands = self.take_stack_words(operand_words, pc, "dict update")?;
+                let current = self.load_lvt_optional(index)?;
+                let mut dict = Dict::from_optional(current.as_ref())?;
+                match inst.opcode {
+                    Opcode::DictSet => {
+                        let value = operands.pop().unwrap();
+                        dict.put_path(&operands, value)?;
                     }
-                    Err(completion) => Ok(Flow::Raise(completion)),
+                    Opcode::DictUnset => dict.remove_path(&operands)?,
+                    Opcode::DictIncrImm => dict.incr(
+                        &operands[0],
+                        i64::from(*inst.operands.first().unwrap_or(&0)),
+                    )?,
+                    Opcode::DictAppend => dict.append(&operands[0], &operands[1])?,
+                    _ => dict.lappend(&operands[0], &operands[1])?,
                 }
+                let value = dict.into_value();
+                self.store_lvt(index, value.clone())?;
+                value
             }
             Opcode::DictFirst => {
-                let index = *inst.operands.first().unwrap_or(&0) as usize;
-                let dict = self.pop(pc, "dictFirst")?;
-                let keys = match self.dict_host("keys", vec![dict.clone()])? {
-                    Ok(value) => value.as_list_vec()?,
-                    Err(completion) => return Ok(Flow::Raise(completion)),
-                };
-                let mut entries = Vec::with_capacity(keys.len());
-                for key in keys {
-                    let value = match self.dict_host("get", vec![dict.clone(), key.clone()])? {
-                        Ok(value) => value,
-                        Err(completion) => return Ok(Flow::Raise(completion)),
-                    };
-                    entries.push((key, value));
-                }
+                let index = Self::operand_count(inst, 0)?;
+                let dict = Dict::from_value(&self.pop(pc, "dictFirst")?)?;
                 let fi = self.fi();
                 self.frames[fi].aux_states.retain(
                     |state| !matches!(state, AuxRuntimeState::DictIter(iter) if iter.lvt == index),
@@ -2804,14 +3236,14 @@ impl HybridEngineInner {
                     .aux_states
                     .push(AuxRuntimeState::DictIter(DictIterState {
                         lvt: index,
-                        entries,
+                        entries: dict.into_entries(),
                         next: 0,
                     }));
-                self.dict_iter_push(index)
+                return self.dict_iter_push(index);
             }
-            Opcode::DictNext => self.dict_iter_push(*inst.operands.first().unwrap_or(&0) as usize),
+            Opcode::DictNext => return self.dict_iter_push(Self::operand_count(inst, 0)?),
             Opcode::DictDone => {
-                let index = *inst.operands.first().unwrap_or(&0) as usize;
+                let index = Self::operand_count(inst, 0)?;
                 let fi = self.fi();
                 let before = self.frames[fi].aux_states.len();
                 self.frames[fi].aux_states.retain(
@@ -2823,13 +3255,31 @@ impl HybridEngineInner {
                         detail: format!("iterator LVT {index} is not active"),
                     });
                 }
-                Ok(Flow::Continue)
+                return Ok(Flow::Continue);
             }
-            Opcode::DictUpdateStart | Opcode::DictUpdateEnd => self.dict_update_opcode(inst),
-            Opcode::DictExpand => self.dict_expand_opcode(inst),
-            Opcode::DictRecombineStk | Opcode::DictRecombineImm => self.dict_recombine_opcode(inst),
+            Opcode::DictUpdateStart | Opcode::DictUpdateEnd => {
+                return self.dict_update_opcode(inst);
+            }
+            Opcode::DictExpand => {
+                // `TclDictWithInit`: one variable per key of the dictionary
+                // at the path; the keys come back for the write-back.
+                let path = self.pop(pc, "dictExpand path")?.as_list_vec()?;
+                let dict = Dict::trace(&self.pop(pc, "dictExpand dict")?, &path)?;
+                let keys = dict.keys();
+                for (key, value) in dict.into_entries() {
+                    let name = key.ensure_bytes()?;
+                    let (name1, name2) = split_var_name(&name);
+                    self.var_set(&name1, name2.as_ref(), value)?;
+                }
+                VmObj::List(keys)
+            }
+            Opcode::DictRecombineStk | Opcode::DictRecombineImm => {
+                return self.dict_recombine_opcode(inst);
+            }
             _ => unreachable!(),
-        }
+        };
+        self.push(value);
+        Ok(Flow::Continue)
     }
 
     fn dict_iter_push(&mut self, index: usize) -> Result<Flow, VmError> {
@@ -2861,9 +3311,11 @@ impl HybridEngineInner {
         Ok(Flow::Continue)
     }
 
+    /// `dict update`: copy the named keys into local variables, and later
+    /// write the variables back (an unset variable removes its key).
     fn dict_update_opcode(&mut self, inst: &crate::load::DecodedInst) -> Result<Flow, VmError> {
         let pc = inst.pc as u64;
-        let dict_index = *inst.operands.first().unwrap_or(&0) as usize;
+        let dict_index = Self::operand_count(inst, 0)?;
         let aux_index = *inst.operands.get(1).unwrap_or(&-1);
         let aux_index = usize::try_from(aux_index).map_err(|_| VmError::InvalidAuxData {
             opcode: format!("{:?}", inst.opcode),
@@ -2891,8 +3343,7 @@ impl HybridEngineInner {
                 });
             }
         };
-        let key_object = self.tos(pc, "dictUpdate keys")?.clone();
-        let keys = key_object.as_list_vec()?;
+        let keys = self.tos(pc, "dictUpdate keys")?.as_list_vec()?;
         if keys.len() != indices.len() {
             return Err(VmError::InvalidAuxData {
                 opcode: format!("{:?}", inst.opcode),
@@ -2906,104 +3357,48 @@ impl HybridEngineInner {
                 detail: format!("dictionary LVT {dict_index} out of bounds"),
             });
         }
-        for raw_index in &indices {
-            let index = usize::try_from(*raw_index).map_err(|_| VmError::InvalidAuxData {
-                opcode: format!("{:?}", inst.opcode),
-                detail: format!("negative LVT {raw_index}"),
-            })?;
-            if index >= local_count {
-                return Err(VmError::InvalidAuxData {
-                    opcode: format!("{:?}", inst.opcode),
-                    detail: format!("LVT {index} out of bounds"),
-                });
-            }
-        }
+        let locals = indices
+            .iter()
+            .map(|raw| {
+                usize::try_from(*raw)
+                    .ok()
+                    .filter(|index| *index < local_count)
+                    .ok_or_else(|| VmError::InvalidAuxData {
+                        opcode: format!("{:?}", inst.opcode),
+                        detail: format!("LVT {raw} out of bounds"),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         if inst.opcode == Opcode::DictUpdateStart {
-            let dict = self.load_lvt(dict_index)?;
-            for (key, raw_index) in keys.iter().zip(indices) {
-                let index = usize::try_from(raw_index).map_err(|_| VmError::InvalidAuxData {
-                    opcode: "DictUpdateStart".into(),
-                    detail: format!("negative LVT {raw_index}"),
-                })?;
-                let exists = match self.dict_host("exists", vec![dict.clone(), key.clone()])? {
-                    Ok(value) => value.is_true()?,
-                    Err(completion) => return Ok(Flow::Raise(completion)),
-                };
-                if exists {
-                    let value = match self.dict_host("get", vec![dict.clone(), key.clone()])? {
-                        Ok(value) => value,
-                        Err(completion) => return Ok(Flow::Raise(completion)),
-                    };
-                    self.store_lvt(index, value)?;
-                } else {
-                    let fi = self.fi();
-                    if let Some(slot) = self.frames[fi].compiled_locals.get_mut(index) {
-                        slot.value = None;
+            let dict = Dict::from_value(&self.load_lvt(dict_index)?)?;
+            for (key, index) in keys.iter().zip(locals) {
+                match dict.get(key)? {
+                    Some(value) => self.store_lvt(index, value.clone())?,
+                    None => {
+                        let name = self.frames[self.fi()].compiled_locals[index].name.clone();
+                        let _ = self.var_unset(&name, None);
                     }
                 }
             }
-            Ok(Flow::Continue)
-        } else {
-            let _ = self.pop(pc, "dictUpdateEnd keys")?;
-            let mut dict = match self.load_lvt(dict_index) {
-                Ok(value) => value,
-                Err(error) if is_missing_tcl_value(&error) => return Ok(Flow::Continue),
-                Err(error) => return Err(error),
-            };
-            for (key, raw_index) in keys.iter().zip(indices) {
-                let index = usize::try_from(raw_index).map_err(|_| VmError::InvalidAuxData {
-                    opcode: "DictUpdateEnd".into(),
-                    detail: format!("negative LVT {raw_index}"),
-                })?;
-                let (command, args) = match self.load_lvt(index) {
-                    Ok(value) => ("set", vec![dict.clone(), key.clone(), value]),
-                    Err(error) if is_missing_tcl_value(&error) => {
-                        ("unset", vec![dict.clone(), key.clone()])
-                    }
-                    Err(error) => return Err(error),
-                };
-                dict = match self.dict_mutate(command, args)? {
-                    Ok(value) => value,
-                    Err(completion) => return Ok(Flow::Raise(completion)),
-                };
-            }
-            self.store_lvt(dict_index, dict)?;
-            Ok(Flow::Continue)
+            return Ok(Flow::Continue);
         }
-    }
-
-    fn dict_expand_opcode(&mut self, inst: &crate::load::DecodedInst) -> Result<Flow, VmError> {
-        let pc = inst.pc as u64;
-        let path = self.pop(pc, "dictExpand path")?.as_list_vec()?;
-        let dict = self.pop(pc, "dictExpand dict")?;
-        let subdict = if path.is_empty() {
-            dict
-        } else {
-            let mut args = vec![dict];
-            args.extend(path.clone());
-            match self.dict_host("get", args)? {
-                Ok(value) => value,
-                Err(completion) => return Ok(Flow::Raise(completion)),
-            }
+        self.pop(pc, "dictUpdateEnd keys")?;
+        let Some(current) = self.load_lvt_optional(dict_index)? else {
+            return Ok(Flow::Continue);
         };
-        let keys = match self.dict_host("keys", vec![subdict.clone()])? {
-            Ok(value) => value.as_list_vec()?,
-            Err(completion) => return Ok(Flow::Raise(completion)),
-        };
-        for key in &keys {
-            match self.dict_host("get", vec![subdict.clone(), key.clone()])? {
-                Ok(value) => {
-                    let name = key.ensure_bytes()?;
-                    let (name1, name2) = split_var_name(&name);
-                    self.var_set(&name1, name2.as_ref(), value)?;
-                }
-                Err(completion) => return Ok(Flow::Raise(completion)),
+        let mut dict = Dict::from_value(&current)?;
+        for (key, index) in keys.into_iter().zip(locals) {
+            match self.load_lvt_optional(index)? {
+                Some(value) => dict.put(key, value)?,
+                None => dict.remove(&key)?,
             }
         }
-        self.push(VmObj::List(keys));
+        self.store_lvt(dict_index, dict.into_value())?;
         Ok(Flow::Continue)
     }
 
+    /// `TclDictWithFinish`: write the key variables back into the
+    /// dictionary at the path, unless the variable or the path is gone.
     fn dict_recombine_opcode(&mut self, inst: &crate::load::DecodedInst) -> Result<Flow, VmError> {
         let pc = inst.pc as u64;
         let field_keys = self.pop(pc, "dictRecombine keys")?.as_list_vec()?;
@@ -3013,7 +3408,7 @@ impl HybridEngineInner {
             let (name1, name2) = split_var_name(&name);
             VariableTarget::Named(name1, name2)
         } else {
-            let index = *inst.operands.first().unwrap_or(&0) as usize;
+            let index = Self::operand_count(inst, 0)?;
             if index >= self.frames[self.fi()].compiled_locals.len() {
                 return Err(VmError::InvalidOpcodeOperand {
                     opcode: "DictRecombineImm".into(),
@@ -3022,55 +3417,36 @@ impl HybridEngineInner {
             }
             VariableTarget::Lvt(index)
         };
-        let outer = match self.target_get(&target) {
+        let outer_value = match self.target_get(&target) {
             Ok(value) => value,
             Err(error) if is_missing_tcl_value(&error) => return Ok(Flow::Continue),
             Err(error) => return Err(error),
         };
-        let mut subdict = if path.is_empty() {
+        let mut outer = Dict::from_value(&outer_value)?;
+        let mut leaf = if path.is_empty() {
             outer.clone()
         } else {
-            let mut exists_args = vec![outer.clone()];
-            exists_args.extend(path.clone());
-            let exists = match self.dict_host("exists", exists_args)? {
-                Ok(value) => value.is_true()?,
-                Err(completion) => return Ok(Flow::Raise(completion)),
-            };
-            if !exists {
-                return Ok(Flow::Continue);
-            }
-            let mut get_args = vec![outer.clone()];
-            get_args.extend(path.clone());
-            match self.dict_host("get", get_args)? {
-                Ok(value) => value,
-                Err(completion) => return Ok(Flow::Raise(completion)),
+            match Dict::trace_existing(&outer_value, &path)? {
+                Some(leaf) => leaf,
+                None => return Ok(Flow::Continue),
             }
         };
         for key in field_keys {
             let name = key.ensure_bytes()?;
             let (name1, name2) = split_var_name(&name);
-            let (command, args) = match self.var_get(&name1, name2.as_ref()) {
-                Ok(value) => ("set", vec![subdict, key, value]),
-                Err(error) if is_missing_tcl_value(&error) => ("unset", vec![subdict, key]),
+            match self.var_get(&name1, name2.as_ref()) {
+                Ok(value) => leaf.put(key, value)?,
+                Err(error) if is_missing_tcl_value(&error) => leaf.remove(&key)?,
                 Err(error) => return Err(error),
-            };
-            subdict = match self.dict_mutate(command, args)? {
-                Ok(value) => value,
-                Err(completion) => return Ok(Flow::Raise(completion)),
-            };
+            }
         }
         let updated = if path.is_empty() {
-            subdict
+            leaf
         } else {
-            let mut args = vec![outer];
-            args.extend(path);
-            args.push(subdict);
-            match self.dict_mutate("set", args)? {
-                Ok(value) => value,
-                Err(completion) => return Ok(Flow::Raise(completion)),
-            }
+            outer.put_path(&path, leaf.into_value())?;
+            outer
         };
-        self.target_set(&target, updated)?;
+        self.target_set(&target, updated.into_value())?;
         Ok(Flow::Continue)
     }
 
@@ -3083,260 +3459,180 @@ impl HybridEngineInner {
         Ok(self.frames[fi].stack.split_off(split))
     }
 
-    fn host_value_opcode(&mut self, inst: &crate::load::DecodedInst) -> Result<Flow, VmError> {
+    /// `name(args...)` in an expression. A procedure the program defines in
+    /// `::tcl::mathfunc` wins, as in Tcl; otherwise the built-ins run natively
+    /// and any other name is invoked as the command Tcl would call.
+    fn math_function_opcode(&mut self, inst: &crate::load::DecodedInst) -> Result<Flow, VmError> {
         let pc = inst.pc as u64;
-        let words = match inst.opcode {
-            Opcode::CallBuiltinFunc1 => {
-                let index = *inst.operands.first().unwrap_or(&-1);
-                let function = tcld_core::inst_table::BuiltInMathFunction::from_operand(index)
-                    .ok_or_else(|| VmError::InvalidOpcodeOperand {
-                        opcode: "CallBuiltinFunc1".into(),
-                        detail: format!("builtin {index}"),
-                    })?;
-                let name = function.name();
-                let argc = function.argc() as usize;
-                let mut args = self.take_stack_words(argc, pc, "callBuiltinFunc1")?;
-                let mut words = vec![VmObj::from_str(&format!("::tcl::mathfunc::{name}"))];
-                words.append(&mut args);
-                words
+        let (name, args) = if inst.opcode == Opcode::CallBuiltinFunc1 {
+            let index = *inst.operands.first().unwrap_or(&-1);
+            let function = tcld_core::inst_table::BuiltInMathFunction::from_operand(index)
+                .ok_or_else(|| VmError::InvalidOpcodeOperand {
+                    opcode: "CallBuiltinFunc1".into(),
+                    detail: format!("builtin {index}"),
+                })?;
+            let args = self.take_stack_words(function.argc() as usize, pc, "callBuiltinFunc1")?;
+            (function.name().to_string(), args)
+        } else {
+            let argc = *inst.operands.first().unwrap_or(&0) as usize;
+            let mut args = self.take_stack_words(argc, pc, "callFunc1")?;
+            if args.is_empty() {
+                return Err(VmError::InvalidOpcodeOperand {
+                    opcode: "CallFunc1".into(),
+                    detail: "zero argc".into(),
+                });
             }
-            Opcode::CallFunc1 => {
-                let argc = *inst.operands.first().unwrap_or(&0) as usize;
-                let mut args = self.take_stack_words(argc, pc, "callFunc1")?;
-                if args.is_empty() {
-                    return Err(VmError::InvalidOpcodeOperand {
-                        opcode: "CallFunc1".into(),
-                        detail: "zero argc".into(),
-                    });
-                }
-                let function = args.remove(0).ensure_bytes()?;
-                let mut command = b"::tcl::mathfunc::".to_vec();
-                command.extend_from_slice(function.as_bytes());
-                let mut words = vec![VmObj::from_bytes(command)];
-                words.append(&mut args);
-                words
+            let name = args.remove(0).as_string()?;
+            (name, args)
+        };
+        let command = ByteString::from(format!("::tcl::mathfunc::{name}"));
+        let namespace = self.frames[self.fi()].namespace.as_bytes().clone();
+        let overridden = matches!(
+            self.registry.resolve(&command, &namespace, self.mode),
+            CommandRef::VmProc(_)
+        );
+        if !overridden && let Some(result) = crate::mathfunc::call(&name, &args, &mut self.rand) {
+            self.push(result?);
+            return Ok(Flow::Continue);
+        }
+        let mut words = vec![VmObj::Bytes(command)];
+        words.extend(args);
+        let call_site = CodeAddress {
+            code_id: self.frames[self.fi()].code.id,
+            pc: inst.pc,
+        };
+        match self.dispatch_invoke(&words, call_site)? {
+            InvokeOutcome::Value(result) => {
+                self.push(result);
+                Ok(Flow::Continue)
             }
-            Opcode::Regexp => {
-                let mut args = self.take_stack_words(2, pc, "regexp")?;
-                let flags = *inst.operands.first().unwrap_or(&0);
-                let mut words = vec![VmObj::from_str("regexp")];
-                if flags & 0o10 != 0 {
-                    words.push(VmObj::from_str("-nocase"));
-                }
-                if flags & 0o40 != 0 {
-                    words.push(VmObj::from_str("-expanded"));
-                }
-                if flags & 0o300 == 0o300 {
-                    words.push(VmObj::from_str("-line"));
-                } else {
-                    if flags & 0o100 != 0 {
-                        words.push(VmObj::from_str("-linestop"));
-                    }
-                    if flags & 0o200 != 0 {
-                        words.push(VmObj::from_str("-lineanchor"));
-                    }
-                }
-                if flags & 0o4 != 0 {
-                    let pattern = args[0].ensure_bytes()?;
-                    let mut literal = b"***=".to_vec();
-                    literal.extend_from_slice(pattern.as_bytes());
-                    args[0] = VmObj::from_bytes(literal);
-                }
-                words.extend(args);
-                words
-            }
-            Opcode::ClockRead => {
-                let selector = *inst.operands.first().unwrap_or(&-1);
-                match selector {
-                    0 => vec![VmObj::from_str("clock"), VmObj::from_str("clicks")],
-                    1 => vec![VmObj::from_str("clock"), VmObj::from_str("microseconds")],
-                    2 => vec![VmObj::from_str("clock"), VmObj::from_str("milliseconds")],
-                    3 => vec![VmObj::from_str("clock"), VmObj::from_str("seconds")],
-                    4 => vec![
-                        VmObj::from_str("clock"),
-                        VmObj::from_str("clicks"),
-                        VmObj::from_str("-microseconds"),
-                    ],
-                    _ => {
-                        return Err(VmError::InvalidOpcodeOperand {
-                            opcode: "ClockRead".into(),
-                            detail: format!("selector {selector}"),
-                        });
-                    }
-                }
-            }
+            InvokeOutcome::Raise(completion) => Ok(Flow::Raise(completion)),
+            InvokeOutcome::FramePushed => Ok(Flow::Continue),
+        }
+    }
+
+    /// The `str*` instructions, computed natively (`crate::strings`).
+    fn string_opcode(&mut self, inst: &crate::load::DecodedInst) -> Result<Flow, VmError> {
+        use crate::strings::{self, Case};
+        let pc = inst.pc as u64;
+        let operand = |index: usize, default: i32| *inst.operands.get(index).unwrap_or(&default);
+        let value = match inst.opcode {
             Opcode::StrMap => {
                 let args = self.take_stack_words(3, pc, "strMap")?;
-                vec![
-                    VmObj::from_str("string"),
-                    VmObj::from_str("map"),
-                    VmObj::List(vec![args[0].clone(), args[1].clone()]),
-                    args[2].clone(),
-                ]
+                strings::map(&args[0], &args[1], &args[2])?
             }
             Opcode::StrFind | Opcode::StrFindLast => {
                 let args = self.take_stack_words(2, pc, "strFind")?;
-                vec![
-                    VmObj::from_str("string"),
-                    VmObj::from_str(if inst.opcode == Opcode::StrFind {
-                        "first"
-                    } else {
-                        "last"
-                    }),
-                    args[0].clone(),
-                    args[1].clone(),
-                ]
+                strings::find(&args[0], &args[1], inst.opcode == Opcode::StrFindLast)?
             }
             Opcode::StrRangeImm => {
                 let string = self.pop(pc, "strRangeImm")?;
-                vec![
-                    VmObj::from_str("string"),
-                    VmObj::from_str("range"),
-                    string,
-                    VmObj::from_str(&encoded_index_string(*inst.operands.first().unwrap_or(&0))),
-                    VmObj::from_str(&encoded_index_string(*inst.operands.get(1).unwrap_or(&-1))),
-                ]
+                strings::range_immediate(&string, operand(0, 0), operand(1, -1))?
             }
             Opcode::StrRange => {
                 let args = self.take_stack_words(3, pc, "strRange")?;
-                vec![
-                    VmObj::from_str("string"),
-                    VmObj::from_str("range"),
-                    args[0].clone(),
-                    args[1].clone(),
-                    args[2].clone(),
-                ]
+                strings::range(&args[0], &args[1], &args[2])?
             }
             Opcode::StrTrim | Opcode::StrTrimLeft | Opcode::StrTrimRight => {
                 let args = self.take_stack_words(2, pc, "strTrim")?;
-                let sub = match inst.opcode {
-                    Opcode::StrTrim => "trim",
-                    Opcode::StrTrimLeft => "trimleft",
-                    _ => "trimright",
-                };
-                vec![
-                    VmObj::from_str("string"),
-                    VmObj::from_str(sub),
-                    args[0].clone(),
-                    args[1].clone(),
-                ]
+                let left = inst.opcode != Opcode::StrTrimRight;
+                let right = inst.opcode != Opcode::StrTrimLeft;
+                strings::trim(&args[0], &args[1], left, right)?
             }
             Opcode::StrUpper | Opcode::StrLower | Opcode::StrTitle => {
                 let string = self.pop(pc, "string case")?;
-                let sub = match inst.opcode {
-                    Opcode::StrUpper => "toupper",
-                    Opcode::StrLower => "tolower",
-                    _ => "totitle",
+                let case = match inst.opcode {
+                    Opcode::StrUpper => Case::Upper,
+                    Opcode::StrLower => Case::Lower,
+                    _ => Case::Title,
                 };
-                vec![VmObj::from_str("string"), VmObj::from_str(sub), string]
+                strings::convert_case(&string, case)?
             }
             Opcode::StrReplace => {
                 let args = self.take_stack_words(4, pc, "strReplace")?;
-                vec![
-                    VmObj::from_str("string"),
-                    VmObj::from_str("replace"),
-                    args[0].clone(),
-                    args[1].clone(),
-                    args[2].clone(),
-                    args[3].clone(),
-                ]
+                strings::replace(&args[0], &args[1], &args[2], &args[3])?
             }
             Opcode::StrClass => {
-                let index = *inst.operands.first().unwrap_or(&-1);
-                let class = tcld_core::inst_table::TCL_STRING_CLASS_TABLE
-                    .get(usize::try_from(index).unwrap_or(usize::MAX))
-                    .ok_or_else(|| VmError::InvalidOpcodeOperand {
-                        opcode: "StrClass".into(),
-                        detail: format!("class {index}"),
-                    })?;
                 let string = self.pop(pc, "strClass")?;
-                vec![
-                    VmObj::from_str("string"),
-                    VmObj::from_str("is"),
-                    VmObj::from_str(class),
-                    string,
-                ]
-            }
-            Opcode::DictGet | Opcode::DictExists | Opcode::DictGetDef => {
-                let count =
-                    usize::try_from(*inst.operands.first().unwrap_or(&-1)).map_err(|_| {
-                        VmError::InvalidOpcodeOperand {
-                            opcode: format!("{:?}", inst.opcode),
-                            detail: "negative dictionary path length".into(),
-                        }
-                    })?;
-                if count == 0 {
-                    return Err(VmError::InvalidOpcodeOperand {
-                        opcode: format!("{:?}", inst.opcode),
-                        detail: "zero dictionary path length".into(),
-                    });
-                }
-                let extra = if inst.opcode == Opcode::DictGetDef {
-                    2
-                } else {
-                    1
-                };
-                let mut args = self.take_stack_words(count + extra, pc, "dict path")?;
-                let subcommand = match inst.opcode {
-                    Opcode::DictGet => "get",
-                    Opcode::DictExists => "exists",
-                    Opcode::DictGetDef => "getwithdefault",
-                    _ => unreachable!(),
-                };
-                let mut words = vec![VmObj::from_str("dict"), VmObj::from_str(subcommand)];
-                words.append(&mut args);
-                words
-            }
-            Opcode::Lreplace4 => {
-                let count =
-                    usize::try_from(*inst.operands.first().unwrap_or(&-1)).map_err(|_| {
-                        VmError::InvalidOpcodeOperand {
-                            opcode: "Lreplace4".into(),
-                            detail: "negative argument count".into(),
-                        }
-                    })?;
-                let (command, minimum) = match inst.operands.get(1).copied() {
-                    Some(1) => ("lreplace", 3),
-                    Some(2) => ("linsert", 2),
-                    Some(flags) => {
-                        return Err(VmError::InvalidOpcodeOperand {
-                            opcode: "Lreplace4".into(),
-                            detail: format!("unsupported flags {flags}"),
-                        });
-                    }
-                    None => {
-                        return Err(VmError::InvalidOpcodeOperand {
-                            opcode: "Lreplace4".into(),
-                            detail: "missing flags".into(),
-                        });
-                    }
-                };
-                if count < minimum {
-                    return Err(VmError::InvalidOpcodeOperand {
-                        opcode: "Lreplace4".into(),
-                        detail: format!("{command} requires at least {minimum} stack arguments"),
-                    });
-                }
-                let mut args = self.take_stack_words(count, pc, "lreplace4")?;
-                let mut words = vec![VmObj::from_str(command)];
-                words.append(&mut args);
-                words
-            }
-            Opcode::DictVerify => {
-                let dict = self.pop(pc, "dictVerify")?;
-                let flow = self.invoke_host_value_words(&[
-                    VmObj::from_str("dict"),
-                    VmObj::from_str("size"),
-                    dict,
-                ])?;
-                if matches!(flow, Flow::Continue) {
-                    let _ = self.pop(pc, "dictVerify result")?;
-                }
-                return Ok(flow);
+                strings::in_class(operand(0, -1), &string)?
             }
             _ => unreachable!(),
         };
-        self.invoke_host_value_words(&words)
+        self.push(value);
+        Ok(Flow::Continue)
+    }
+
+    /// `INST_CLOCK_READ`: clicks, microseconds, milliseconds or seconds of
+    /// the wall clock. Clicks count microseconds.
+    fn clock_read_opcode(&mut self, inst: &crate::load::DecodedInst) -> Result<Flow, VmError> {
+        let selector = *inst.operands.first().unwrap_or(&-1);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let micros = i64::try_from(now.as_micros()).unwrap_or(i64::MAX);
+        let value = match selector {
+            0 | 1 | 4 => micros,
+            2 => micros / 1000,
+            3 => i64::try_from(now.as_secs()).unwrap_or(i64::MAX),
+            _ => {
+                return Err(VmError::InvalidOpcodeOperand {
+                    opcode: "ClockRead".into(),
+                    detail: format!("selector {selector}"),
+                });
+            }
+        };
+        self.push(VmObj::Int(value));
+        Ok(Flow::Continue)
+    }
+
+    /// Tcl 9's `INST_LREPLACE4` for `lreplace` and `linsert`: positions
+    /// outside the list clamp to it, so nothing is out of range.
+    fn lreplace_opcode(&mut self, inst: &crate::load::DecodedInst) -> Result<Flow, VmError> {
+        const END_IS_LAST: i32 = 1;
+        const SINGLE_INDEX: i32 = 2;
+        let pc = inst.pc as u64;
+        let count = Self::operand_count(inst, 0)?;
+        let flags = *inst.operands.get(1).unwrap_or(&0);
+        let indices = if flags & SINGLE_INDEX != 0 { 1 } else { 2 };
+        if count < 1 + indices {
+            return Err(VmError::InvalidOpcodeOperand {
+                opcode: "Lreplace4".into(),
+                detail: format!("{count} stack arguments"),
+            });
+        }
+        let mut args = self.take_stack_words(count, pc, "lreplace4")?;
+        let replacements = args.split_off(1 + indices);
+        let mut items = args[0].as_list_vec()?;
+        let length = items.len() as i64;
+        let end = length - i64::from(flags & END_IS_LAST != 0);
+        let first = crate::strings::index(&args[1], end)?.clamp(0, length);
+        let delete = match indices {
+            2 => {
+                let last = crate::strings::index(&args[2], end)?;
+                if last < 0 {
+                    0
+                } else {
+                    (last.min(length) - first + 1).clamp(0, length - first)
+                }
+            }
+            _ => 0,
+        };
+        let first = first as usize;
+        items.splice(first..first + delete as usize, replacements);
+        self.push(VmObj::List(items));
+        Ok(Flow::Continue)
+    }
+
+    /// `INST_REGEXP`: whether the string matches the pattern, compiled
+    /// with the instruction's flags.
+    fn regexp_opcode(&mut self, inst: &crate::load::DecodedInst) -> Result<Flow, VmError> {
+        let pc = inst.pc as u64;
+        let args = self.take_stack_words(2, pc, "regexp")?;
+        let flags = *inst.operands.first().unwrap_or(&0);
+        let re = crate::regexp_command::compiled(&args[0].as_string()?, flags)?;
+        let matched = crate::regexp_command::matches(&re, &args[1].as_string()?)?;
+        self.push(VmObj::Int(i64::from(matched)));
+        Ok(Flow::Continue)
     }
 
     fn target_get(&mut self, target: &VariableTarget) -> Result<VmObj, VmError> {
@@ -3622,14 +3918,7 @@ impl HybridEngineInner {
                 }
                 let split = self.frames[fi].stack.len() - count;
                 let values = self.frames[fi].stack.split_off(split);
-                let mut current = values[0].clone();
-                for index in &values[1..] {
-                    let list = current.as_list_vec()?;
-                    current = parse_list_index(index, list.len())?
-                        .and_then(|i| list.get(i).cloned())
-                        .unwrap_or_else(VmObj::empty);
-                }
-                self.push(current);
+                self.push(crate::lists::index_flat(&values[0], &values[1..])?);
             }
             Opcode::ListIn | Opcode::ListNotIn => {
                 let list = self.pop(pc, "list membership")?.as_list_vec()?;
@@ -3663,11 +3952,7 @@ impl HybridEngineInner {
                 }
                 let split = self.frames[fi].stack.len() - count;
                 let values = self.frames[fi].stack.split_off(split);
-                let mut result = Vec::new();
-                for value in values {
-                    result.extend(value.as_list_vec()?);
-                }
-                self.push(VmObj::List(result));
+                self.push(crate::lists::concat(&values)?);
             }
             Opcode::LsetList | Opcode::LsetFlat => {
                 let (list, indices, replacement) = if inst.opcode == Opcode::LsetList {
@@ -3911,6 +4196,49 @@ impl HybridEngineInner {
         self.validated_jump(inst, target)
     }
 
+    /// Handling break/continue changes the routed code, while retaining Tcl's
+    /// custom return options. A plain loop command leaves earlier options intact.
+    fn consume_loop_completion(&mut self, completion: &Completion) -> Result<(), VmError> {
+        if completion.options.raw.is_some() {
+            self.last_completion = completion.clone();
+        }
+        self.last_completion.code = 0;
+        self.last_completion.options.code = 0;
+        self.last_completion.options.level = 0;
+        if self.last_completion.options.raw.is_some() {
+            self.last_completion.options.sync_raw_code_level()?;
+        }
+        Ok(())
+    }
+
+    fn lmap_collect(&mut self, inst: &crate::load::DecodedInst) -> Result<Flow, VmError> {
+        let result = self.pop(inst.pc as u64, "lmapCollect")?;
+        let fi = self.fi();
+        let frame = &mut self.frames[fi];
+        let invalid = || VmError::InvalidAuxData {
+            opcode: "LmapCollect".into(),
+            detail: "expected foreach state above an lmap collecting list".into(),
+        };
+        let Some(AuxRuntimeState::NewForeach(state)) = frame.aux_states.last() else {
+            return Err(invalid());
+        };
+        if frame.stack.len() != state.stack_base + state.info.lists.len() + 2
+            || frame.stack.last().and_then(|value| value.as_i64().ok()) != Some(state.id)
+        {
+            return Err(invalid());
+        }
+        let index = state.stack_base.checked_sub(1).ok_or_else(invalid)?;
+        match &mut frame.stack[index] {
+            VmObj::List(collected) => collected.push(result),
+            value => {
+                let mut collected = value.as_list_vec()?;
+                collected.push(result);
+                *value = VmObj::List(collected);
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
     fn foreach_end_new(&mut self, _inst: &crate::load::DecodedInst) -> Result<Flow, VmError> {
         let state_id = self
             .frames
@@ -4030,76 +4358,40 @@ impl HybridEngineInner {
     }
 
     fn binop_num(&mut self, op: Opcode, pc: u64) -> Result<Flow, VmError> {
+        use crate::number::BinaryOp;
         let b = self.pop(pc, "binop")?;
         let a = self.pop(pc, "binop")?;
-        let na = a.try_as_number().ok_or_else(|| VmError::TclError {
-            message: format!(
-                "can't use non-numeric string as operand of \"{}\"",
-                op_sym(op)
-            ),
-            error_info: None,
-            error_code: None,
-        })?;
-        let nb = b.try_as_number().ok_or_else(|| VmError::TclError {
-            message: format!(
-                "can't use non-numeric string as operand of \"{}\"",
-                op_sym(op)
-            ),
-            error_info: None,
-            error_code: None,
-        })?;
-        let r = match op {
-            Opcode::Add => na + nb,
-            Opcode::Sub => na - nb,
-            Opcode::Mult => na * nb,
-            Opcode::Div => {
-                if nb == 0.0 {
-                    return Err(VmError::TclError {
-                        message: "divide by zero".into(),
-                        error_info: None,
-                        error_code: Some("ARITH DIVZERO {divide by zero}".into()),
-                    });
-                }
-                na / nb
-            }
-            Opcode::Mod => {
-                let ia = na as i64;
-                let ib = nb as i64;
-                if ib == 0 {
-                    return Err(VmError::TclError {
-                        message: "divide by zero".into(),
-                        error_info: None,
-                        error_code: Some("ARITH DIVZERO {divide by zero}".into()),
-                    });
-                }
-                self.push(VmObj::Int(ia % ib));
-                return Ok(Flow::Continue);
-            }
-            Opcode::Expon => na.powf(nb),
-            _ => unreachable!(),
+        let op = match op {
+            Opcode::Add => BinaryOp::Add,
+            Opcode::Sub => BinaryOp::Sub,
+            Opcode::Mult => BinaryOp::Mul,
+            Opcode::Div => BinaryOp::Div,
+            Opcode::Mod => BinaryOp::Mod,
+            Opcode::Expon => BinaryOp::Pow,
+            Opcode::Lshift => BinaryOp::Shl,
+            Opcode::Rshift => BinaryOp::Shr,
+            Opcode::Bitand => BinaryOp::And,
+            Opcode::Bitor => BinaryOp::Or,
+            _ => BinaryOp::Xor,
         };
-        if r.fract() == 0.0 && r >= i64::MIN as f64 && r <= i64::MAX as f64 {
-            self.push(VmObj::Int(r as i64));
-        } else {
-            self.push(VmObj::from_str(&r.to_string()));
-        }
+        self.push(crate::number::binary(op, &a, &b)?);
         Ok(Flow::Continue)
     }
 
     fn binop_cmp(&mut self, op: Opcode, pc: u64) -> Result<Flow, VmError> {
+        use crate::number::Comparison;
         let b = self.pop(pc, "cmp")?;
         let a = self.pop(pc, "cmp")?;
-        let ord = cmp_values(&a, &b)?;
-        let t = match op {
-            Opcode::Eq => ord == std::cmp::Ordering::Equal,
-            Opcode::Neq => ord != std::cmp::Ordering::Equal,
-            Opcode::Lt => ord == std::cmp::Ordering::Less,
-            Opcode::Gt => ord == std::cmp::Ordering::Greater,
-            Opcode::Le => ord != std::cmp::Ordering::Greater,
-            Opcode::Ge => ord != std::cmp::Ordering::Less,
-            _ => false,
+        let comparison = match op {
+            Opcode::Eq => Comparison::Eq,
+            Opcode::Neq => Comparison::Ne,
+            Opcode::Lt => Comparison::Lt,
+            Opcode::Gt => Comparison::Gt,
+            Opcode::Le => Comparison::Le,
+            _ => Comparison::Ge,
         };
-        self.push(VmObj::Int(if t { 1 } else { 0 }));
+        let holds = crate::number::compare(comparison, &a, &b)?;
+        self.push(VmObj::Int(i64::from(holds)));
         Ok(Flow::Continue)
     }
 
@@ -4108,6 +4400,37 @@ impl HybridEngineInner {
         words: &[VmObj],
         call_site: CodeAddress,
     ) -> Result<InvokeOutcome, VmError> {
+        #[cfg(feature = "debug")]
+        let source = self.source_images.contains_key(&call_site.code_id);
+        #[cfg(not(feature = "debug"))]
+        let source = false;
+        if (source || self.mode == RuntimeMode::VmStrict)
+            && !matches!(
+                self.registry.resolve(
+                    &words[0].ensure_bytes()?,
+                    self.frames[self.fi()].namespace.as_bytes(),
+                    self.mode
+                ),
+                CommandRef::VmProc(_)
+            )
+            && let Some(outcome) = self.invoke_native(words, call_site)?
+        {
+            return Ok(outcome);
+        }
+        #[cfg(feature = "debug")]
+        if self.source_images.contains_key(&call_site.code_id)
+            && !matches!(
+                self.registry.resolve(
+                    &words[0].ensure_bytes()?,
+                    self.frames[self.fi()].namespace.as_bytes(),
+                    self.mode
+                ),
+                CommandRef::VmProc(_)
+            )
+            && let Some(outcome) = self.invoke_generated(words, call_site)?
+        {
+            return Ok(outcome);
+        }
         let cmd = words[0].ensure_bytes()?;
         let namespace = self.frames[self.fi()].namespace.clone();
         let resolved = self.registry.resolve(&cmd, namespace.as_bytes(), self.mode);
@@ -4120,18 +4443,17 @@ impl HybridEngineInner {
                 )?;
                 #[cfg(feature = "host")]
                 {
-                    // Option B: install host stub for newly registered proc
-                    if let Some(host) = self.host.as_mut()
-                        && words.len() >= 2
-                    {
+                    if words.len() >= 2 {
                         let name = words[1].ensure_bytes()?;
                         let qualified = namespace.qualify(&name);
-                        let q = std::str::from_utf8(qualified.as_bytes()).map_err(|_| {
-                            VmError::HostFrameMarshalUnsupported(
-                                "procedure command name is not UTF-8".into(),
-                            )
-                        })?;
-                        host.install_stub_command(q)?;
+                        let q = qualified.as_str_lossy().into_owned();
+                        if let Some(host) = self.host.as_mut() {
+                            host.install_stub_command(&q)?;
+                        } else if let Some(result) =
+                            self.inspection_bridge(|h| h.install_stub_command(&q))
+                        {
+                            result?;
+                        }
                     }
                 }
                 Ok(InvokeOutcome::Value(VmObj::empty()))
@@ -4149,7 +4471,25 @@ impl HybridEngineInner {
                     &words[1..],
                     NamespaceName::from_proc_qname(&proc.qname),
                     call_site,
-                )?;
+                )
+                .map_err(|error| match error {
+                    VmError::TclError {
+                        message,
+                        error_info,
+                        error_code,
+                    } => VmError::TclError {
+                        message: message.replacen(
+                            "should be \"proc",
+                            &format!("should be \"{}", words[0].as_string().unwrap_or_default()),
+                            1,
+                        ),
+                        error_info,
+                        error_code,
+                    },
+                    other => other,
+                })?;
+                let frame = self.frames.last_mut().unwrap();
+                frame.invocation = Some(VmObj::List(words.to_vec()));
                 Ok(InvokeOutcome::FramePushed)
             }
             CommandRef::VarNameBuiltin { name } => {
@@ -4157,15 +4497,11 @@ impl HybridEngineInner {
                 let v = builtin::run_var_name_builtin(name.as_bytes(), &words[1..], &mut ctx)?;
                 Ok(InvokeOutcome::Value(v))
             }
+            CommandRef::ValueBuiltin { name } => Ok(InvokeOutcome::Value(
+                builtin::run_value_builtin(name.as_bytes(), &words[0], &words[1..])?,
+            )),
             CommandRef::WorldHost { name } => self.invoke_world_host_command(words, &name),
-            CommandRef::Denied { name } => Err(VmError::PolicyDenied {
-                action: "world_host",
-                detail: format!(
-                    "command `{}` denied in {}",
-                    name.as_str_lossy(),
-                    self.mode.as_str()
-                ),
-            }),
+            CommandRef::Denied { name } => Err(denied_command(&name, self.mode)),
         }
     }
 
@@ -4374,7 +4710,8 @@ impl HybridEngineInner {
         {
             // Nested WorldHost during Option B re-entry: host lives on ACTIVE_BRIDGE.
             if self.host.is_none() {
-                let br = HostBridge::with_active_bridge(|host| host.invoke_objv(words))
+                let br = self
+                    .inspection_bridge(|host| host.invoke_objv(words))
                     .ok_or_else(|| {
                         VmError::HybridUnavailable(
                             "nested host invoke without active bridge".into(),
@@ -4420,12 +4757,13 @@ impl HybridEngineInner {
         inputs: Vec<HostFrameInput>,
     ) -> Result<HostFrameOutput, VmError> {
         if self.host.is_none() {
-            return HostBridge::with_active_bridge(|host| {
-                host.invoke_frame(&namespace, frame_id, expression, body, inputs)
-            })
-            .ok_or_else(|| {
-                VmError::HybridUnavailable("nested host frame without active bridge".into())
-            })?;
+            return self
+                .inspection_bridge(|host| {
+                    host.invoke_frame(&namespace, frame_id, expression, body, inputs)
+                })
+                .ok_or_else(|| {
+                    VmError::HybridUnavailable("nested host frame without active bridge".into())
+                })?;
         }
 
         let mut host = self
@@ -4448,10 +4786,43 @@ impl HybridEngineInner {
     #[cfg(feature = "host")]
     fn dispatch_stub_reenter(&mut self, words: &[VmObj]) -> Result<BridgeResult, VmError> {
         #[cfg(feature = "debug")]
+        if words
+            .first()
+            .is_some_and(|w| w.as_string().ok().as_deref() == Some("::tcld::control_variable"))
+        {
+            return self.control_variable(words);
+        }
+        #[cfg(feature = "debug")]
+        if words
+            .first()
+            .is_some_and(|w| w.as_string().ok().as_deref() == Some("::tcld::control_enter"))
+        {
+            return self.validate_control(words);
+        }
+        #[cfg(feature = "debug")]
+        if words
+            .first()
+            .is_some_and(|w| w.as_string().ok().as_deref() == Some("::tcld::control_cleanup"))
+        {
+            return self.finish_control(words);
+        }
+        #[cfg(feature = "debug")]
+        if words
+            .first()
+            .is_some_and(|w| w.as_string().ok().as_deref() == Some("::tcld::coroutine_body"))
+        {
+            return self.resume_coroutine(words);
+        }
+        #[cfg(feature = "debug")]
         if self.debug_frame_eval_active
+            && self.host_callback_depth == 0
             && !words.first().is_some_and(|word| {
-                word.ensure_bytes()
-                    .is_ok_and(|name| name.as_bytes() == b"::tcld::frame_cross")
+                word.ensure_bytes().is_ok_and(|name| {
+                    matches!(
+                        name.as_bytes(),
+                        b"::tcld::frame_cross" | b"::tcld::callback"
+                    )
+                })
             })
         {
             return Err(VmError::HostFrameSuspensionUnsupported);
@@ -4464,6 +4835,10 @@ impl HybridEngineInner {
 
         let outcome = (|| -> Result<InvokeOutcome, VmError> {
             let cmd = words[0].ensure_bytes()?;
+            #[cfg(feature = "debug")]
+            if cmd.as_bytes() == b"::tcld::callback" {
+                return self.invoke_host_callback(words);
+            }
             if cmd.as_bytes() == b"::tcld::frame_cross" {
                 return self.handle_frame_cross(words);
             }
@@ -4517,15 +4892,11 @@ impl HybridEngineInner {
                     let v = builtin::run_var_name_builtin(name.as_bytes(), &words[1..], &mut ctx)?;
                     Ok(InvokeOutcome::Value(v))
                 }
+                CommandRef::ValueBuiltin { name } => Ok(InvokeOutcome::Value(
+                    builtin::run_value_builtin(name.as_bytes(), &words[0], &words[1..])?,
+                )),
                 CommandRef::WorldHost { name } => self.invoke_world_host_command(words, &name),
-                CommandRef::Denied { name } => Err(VmError::PolicyDenied {
-                    action: "world_host",
-                    detail: format!(
-                        "command `{}` denied in {}",
-                        name.as_str_lossy(),
-                        self.mode.as_str()
-                    ),
-                }),
+                CommandRef::Denied { name } => Err(denied_command(&name, self.mode)),
             }
         })();
 
@@ -4600,7 +4971,7 @@ impl HybridEngineInner {
                 if let Some(slot) = self.frames[fi]
                     .compiled_locals
                     .iter_mut()
-                    .find(|slot| slot.name == local)
+                    .find(|slot| slot.is_named(&local))
                 {
                     slot.value = None;
                     slot.link = Some(link.clone());
@@ -4664,7 +5035,7 @@ impl HybridEngineInner {
                     if let Some(nested) = self.frames[frame_index]
                         .compiled_locals
                         .iter()
-                        .find(|slot| slot.name == *target_name)
+                        .find(|slot| slot.is_named(target_name))
                         .and_then(|slot| slot.link.clone())
                         .or_else(|| {
                             match self.frames[frame_index].local_vars.get_slot(target_name) {
@@ -4680,6 +5051,9 @@ impl HybridEngineInner {
             }
             VarLink::HostVar { name1, name2 } => match self.follow_link_get(link) {
                 Ok(value) => Ok(("scalar", value)),
+                Err(_) if name2.is_none() && self.mode == RuntimeMode::VmStrict => {
+                    Ok(("array", self.world.array_get(name1)))
+                }
                 Err(_) if name2.is_none() => {
                     let result = self.host_value_result(&[
                         VmObj::from_str("array"),
@@ -4707,7 +5081,11 @@ impl HybridEngineInner {
     ) -> Result<InvokeOutcome, VmError> {
         let boundary_depth = self.frames.len();
         self.push_frame(code, kind, proc_qname, args, namespace, None)?;
-        let outcome = self.eval_loop(boundary_depth, false);
+        #[cfg(feature = "debug")]
+        let allow_pause = self.callbacks_can_pause();
+        #[cfg(not(feature = "debug"))]
+        let allow_pause = false;
+        let outcome = self.eval_loop(boundary_depth, allow_pause);
         if outcome.is_err() {
             self.frames.truncate(boundary_depth);
         }
@@ -4723,6 +5101,12 @@ impl HybridEngineInner {
 
     #[cfg(feature = "host")]
     fn map_bridge_result(&mut self, br: BridgeResult) -> Result<InvokeOutcome, VmError> {
+        #[cfg(feature = "debug")]
+        if let Some(frame) = self.frames.last()
+            && let Some(completion) = self.coroutine_completions.remove(&frame.id.0)
+        {
+            return Ok(InvokeOutcome::Raise(completion));
+        }
         let parsed_options = br
             .return_options
             .clone()
@@ -4735,7 +5119,13 @@ impl HybridEngineInner {
                 // boundary surfaces as ERROR/UNEXPECTED_RESULT_CODE.
                 let msg = br.result.as_string().unwrap_or_default();
                 let ec = br.error_code.as_deref().unwrap_or("");
-                if ec.contains("UNEXPECTED_RESULT_CODE 2") || msg.contains("bad code: 2") {
+                if ec
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .windows(2)
+                    .any(|w| w == ["UNEXPECTED_RESULT_CODE", "2"])
+                    || msg.ends_with("bad code: 2")
+                {
                     return Err(VmError::CrossRuntimeReturnLevel);
                 }
                 Ok(InvokeOutcome::Raise(Completion {
@@ -4775,6 +5165,13 @@ impl HybridEngineInner {
         self.frames.len() - 1
     }
 
+    fn scope_index(&self) -> usize {
+        self.frames[self.fi()]
+            .scope_parent
+            .and_then(|id| self.frames.iter().position(|frame| frame.id == id))
+            .unwrap_or_else(|| self.fi())
+    }
+
     fn push(&mut self, v: VmObj) {
         let fi = self.fi();
         self.frames[fi].stack.push(v);
@@ -4796,33 +5193,77 @@ impl HybridEngineInner {
             .ok_or_else(|| VmError::StackUnderflow { pc, op: op.into() })
     }
 
+    fn tcl_scope_chain(&self) -> Vec<usize> {
+        let mut chain = Vec::new();
+        let mut current = Some(self.scope_index());
+        while let Some(index) = current {
+            let frame = &self.frames[index];
+            if !frame.hidden_scope && !matches!(frame.kind, FrameKind::Dynamic | FrameKind::Source)
+            {
+                chain.push(index);
+            }
+            current = frame
+                .tcl_parent
+                .and_then(|id| self.frames.iter().position(|f| f.id == id));
+        }
+        chain.reverse();
+        chain
+    }
+
     fn resolve_vm_level(
         &self,
         level: &ByteString,
         crossing_is_upvar: bool,
     ) -> Result<usize, VmError> {
         let text = level.as_str_lossy();
+        let scopes = self.tcl_scope_chain();
         if let Some(absolute) = text.strip_prefix('#') {
             let index = absolute.parse::<usize>().map_err(|_| bad_level(level))?;
-            return self
-                .frames
-                .get(index)
-                .map(|_| index)
-                .ok_or_else(|| bad_level(level));
+            return scopes.get(index).copied().ok_or_else(|| bad_level(level));
         }
         let relative = text.parse::<usize>().map_err(|_| bad_level(level))?;
-        let current = self.frames.len().saturating_sub(1);
-        current.checked_sub(relative).ok_or({
-            if crossing_is_upvar {
-                VmError::CrossRuntimeUpvar
-            } else {
-                VmError::CrossRuntimeUplevel
-            }
-        })
+        let current = scopes.len().saturating_sub(1);
+        current
+            .checked_sub(relative)
+            .and_then(|index| scopes.get(index).copied())
+            .ok_or({
+                if crossing_is_upvar {
+                    VmError::CrossRuntimeUpvar
+                } else {
+                    VmError::CrossRuntimeUplevel
+                }
+            })
+    }
+
+    /// Whether a compiled local resolves by name in the scope its frame joins
+    /// (a source script's top level) rather than in its own slot. Compiler
+    /// temporaries always stay in their slots.
+    fn lvt_by_name(&self, fi: usize, idx: usize) -> bool {
+        self.frames[fi].scope_parent.is_some()
+            && !self.frames[fi]
+                .compiled_locals
+                .get(idx)
+                .is_some_and(|slot| slot.is_temporary())
     }
 
     fn load_lvt(&mut self, idx: usize) -> Result<VmObj, VmError> {
         let fi = self.fi();
+        #[cfg(feature = "debug")]
+        let _access = self.frames[fi]
+            .compiled_locals
+            .get(idx)
+            .map(|s| s.name.clone())
+            .map(|name| self.variable_access(name, None));
+        if self.lvt_by_name(fi, idx) {
+            let name = self.frames[fi]
+                .compiled_locals
+                .get(idx)
+                .ok_or_else(|| VmError::Internal(format!("LVT index {idx} OOB")))?
+                .name
+                .clone();
+            return self.var_get(&name, None);
+        }
+
         let slot = self.frames[fi]
             .compiled_locals
             .get(idx)
@@ -4842,6 +5283,22 @@ impl HybridEngineInner {
 
     fn store_lvt(&mut self, idx: usize, value: VmObj) -> Result<(), VmError> {
         let fi = self.fi();
+        #[cfg(feature = "debug")]
+        let _access = self.frames[fi]
+            .compiled_locals
+            .get(idx)
+            .map(|s| s.name.clone())
+            .map(|name| self.variable_access(name, None));
+        if self.lvt_by_name(fi, idx) {
+            let name = self.frames[fi]
+                .compiled_locals
+                .get(idx)
+                .ok_or_else(|| VmError::Internal(format!("LVT index {idx} OOB")))?
+                .name
+                .clone();
+            return self.var_set(&name, None, value);
+        }
+
         let link = self.frames[fi]
             .compiled_locals
             .get(idx)
@@ -4851,17 +5308,44 @@ impl HybridEngineInner {
         }
         let slot = self.frames[fi]
             .compiled_locals
-            .get_mut(idx)
+            .get(idx)
             .ok_or_else(|| VmError::Internal(format!("LVT index {idx} OOB")))?;
+        if !slot.is_temporary()
+            && matches!(
+                self.frames[fi].local_vars.get_slot(&slot.name),
+                Some(VarSlot::Array(_))
+            )
+        {
+            return Err(variable_is_array(&slot.name));
+        }
+        let slot = &mut self.frames[fi].compiled_locals[idx];
         slot.value = Some(value.clone());
-        // Mirror into name table
-        let name = slot.name.clone();
-        self.frames[fi].local_vars.store_scalar(name, value);
+        // Mirror into name table; a temporary has no name to look up.
+        if !slot.is_temporary() {
+            let name = slot.name.clone();
+            self.frames[fi].local_vars.store_scalar(name, value);
+        }
         Ok(())
     }
 
     fn load_lvt_array(&mut self, idx: usize, key: &ByteString) -> Result<VmObj, VmError> {
         let fi = self.fi();
+        #[cfg(feature = "debug")]
+        let _access = self.frames[fi]
+            .compiled_locals
+            .get(idx)
+            .map(|s| s.name.clone())
+            .map(|name| self.variable_access(name, Some(key.clone())));
+        if self.lvt_by_name(fi, idx) {
+            let name = self.frames[fi]
+                .compiled_locals
+                .get(idx)
+                .ok_or_else(|| VmError::Internal(format!("LVT index {idx} OOB")))?
+                .name
+                .clone();
+            return self.var_get(&name, Some(key));
+        }
+
         let (link, name) = {
             let slot = self.frames[fi]
                 .compiled_locals
@@ -4912,6 +5396,22 @@ impl HybridEngineInner {
         value: VmObj,
     ) -> Result<(), VmError> {
         let fi = self.fi();
+        #[cfg(feature = "debug")]
+        let _access = self.frames[fi]
+            .compiled_locals
+            .get(idx)
+            .map(|s| s.name.clone())
+            .map(|name| self.variable_access(name, Some(key.clone())));
+        if self.lvt_by_name(fi, idx) {
+            let name = self.frames[fi]
+                .compiled_locals
+                .get(idx)
+                .ok_or_else(|| VmError::Internal(format!("LVT index {idx} OOB")))?
+                .name
+                .clone();
+            return self.var_set(&name, Some(key), value);
+        }
+
         let slot = self.frames[fi]
             .compiled_locals
             .get(idx)
@@ -4985,6 +5485,22 @@ impl HybridEngineInner {
                     .iter()
                     .position(|f| f.id == *target_frame)
                     .ok_or(VmError::CrossRuntimeUpvar)?;
+                if let Some(nested) = self.frames[fi]
+                    .compiled_locals
+                    .iter()
+                    .find(|s| s.is_named(target_name))
+                    .and_then(|s| s.link.clone())
+                    .or_else(|| match self.frames[fi].local_vars.get_slot(target_name) {
+                        Some(VarSlot::Link(l)) => Some(l.clone()),
+                        _ => None,
+                    })
+                {
+                    let nested = part2
+                        .as_ref()
+                        .map(|p| link_element(&nested, p.clone()))
+                        .unwrap_or(nested);
+                    return self.follow_link_get(&nested);
+                }
                 // Read from that frame's local_vars / LVT by name
                 if let Some(n2) = part2 {
                     match self.frames[fi].local_vars.get_slot(target_name) {
@@ -5002,7 +5518,7 @@ impl HybridEngineInner {
                     if let Some(slot) = self.frames[fi]
                         .compiled_locals
                         .iter()
-                        .find(|s| s.name == *target_name)
+                        .find(|s| s.is_named(target_name))
                         && let Some(v) = &slot.value
                     {
                         return Ok(v.clone());
@@ -5026,6 +5542,22 @@ impl HybridEngineInner {
                     .iter()
                     .position(|f| f.id == *target_frame)
                     .ok_or(VmError::CrossRuntimeUpvar)?;
+                if let Some(nested) = self.frames[fi]
+                    .compiled_locals
+                    .iter()
+                    .find(|s| s.is_named(target_name))
+                    .and_then(|s| s.link.clone())
+                    .or_else(|| match self.frames[fi].local_vars.get_slot(target_name) {
+                        Some(VarSlot::Link(l)) => Some(l.clone()),
+                        _ => None,
+                    })
+                {
+                    let nested = part2
+                        .as_ref()
+                        .map(|p| link_element(&nested, p.clone()))
+                        .unwrap_or(nested);
+                    return self.follow_link_set(&nested, value);
+                }
                 if let Some(n2) = part2 {
                     self.frames[fi].local_vars.store_array_elem(
                         target_name.clone(),
@@ -5037,7 +5569,7 @@ impl HybridEngineInner {
                     if let Some(slot) = self.frames[fi]
                         .compiled_locals
                         .iter_mut()
-                        .find(|s| s.name == *target_name)
+                        .find(|s| s.is_named(target_name))
                     {
                         slot.value = Some(value.clone());
                     }
@@ -5063,6 +5595,24 @@ impl HybridEngineInner {
                     .iter()
                     .position(|frame| frame.id == *target_frame)
                     .ok_or(VmError::CrossRuntimeUpvar)?;
+                if let Some(nested) = self.frames[frame_index]
+                    .compiled_locals
+                    .iter()
+                    .find(|s| s.is_named(target_name))
+                    .and_then(|s| s.link.clone())
+                    .or_else(
+                        || match self.frames[frame_index].local_vars.get_slot(target_name) {
+                            Some(VarSlot::Link(l)) => Some(l.clone()),
+                            _ => None,
+                        },
+                    )
+                {
+                    let nested = part2
+                        .as_ref()
+                        .map(|p| link_element(&nested, p.clone()))
+                        .unwrap_or(nested);
+                    return self.follow_link_unset(&nested);
+                }
                 if let Some(key) = part2 {
                     let removed = match self.frames[frame_index]
                         .local_vars
@@ -5082,7 +5632,7 @@ impl HybridEngineInner {
                     if let Some(slot) = self.frames[frame_index]
                         .compiled_locals
                         .iter_mut()
-                        .find(|slot| slot.name == *target_name)
+                        .find(|slot| slot.is_named(target_name))
                     {
                         existed |= slot.value.is_some() || slot.link.is_some();
                         slot.value = None;
@@ -5097,19 +5647,62 @@ impl HybridEngineInner {
         }
     }
 
+    /// Code compiled from source, which resolves variables as Tcl 9 does:
+    /// an unqualified name never falls back from a namespace to the global
+    /// namespace. Legacy bytecode keeps that fallback.
+    fn is_source_scope(&self, scope: usize) -> bool {
+        #[cfg(feature = "debug")]
+        {
+            self.source_images.contains_key(&self.frames[scope].code.id)
+        }
+        #[cfg(not(feature = "debug"))]
+        {
+            let _ = scope;
+            false
+        }
+    }
+
+    /// A procedure or lambda compiled from source: like Tcl, it sees only its
+    /// own variables and those it links. Other scopes, and legacy bytecode
+    /// procedures, also fall back to namespace and global variables.
+    fn is_source_procedure_scope(&self, scope: usize) -> bool {
+        #[cfg(feature = "debug")]
+        {
+            matches!(
+                self.frames[scope].kind,
+                FrameKind::VmProc | FrameKind::Lambda
+            ) && self.source_images.contains_key(&self.frames[scope].code.id)
+        }
+        #[cfg(not(feature = "debug"))]
+        {
+            let _ = scope;
+            false
+        }
+    }
+
     fn var_get(
         &mut self,
         name1: &ByteString,
         name2: Option<&ByteString>,
     ) -> Result<VmObj, VmError> {
-        let fi = self.fi();
+        #[cfg(feature = "debug")]
+        let _access = self.variable_access(name1.clone(), name2.cloned());
+        let fi = self.scope_index();
+        #[cfg(feature = "debug")]
+        if self.source_images.contains_key(&self.frames[fi].code.id)
+            && name1.as_str_lossy().contains("::")
+        {
+            let qualified = self.frames[fi].namespace.qualify(name1);
+            return self.host_get(&qualified, name2);
+        }
+
         // LVT by name
         if name2.is_none()
             && let Some((idx, slot)) = self.frames[fi]
                 .compiled_locals
                 .iter()
                 .enumerate()
-                .find(|(_, s)| s.name == *name1)
+                .find(|(_, s)| s.is_named(name1))
         {
             let _ = idx;
             if let Some(link) = slot.link.clone() {
@@ -5164,21 +5757,25 @@ impl HybridEngineInner {
                 crate::var::VarSlot::Undefined => {}
             }
         }
-        if self.mode == RuntimeMode::Hybrid {
+        if !self.is_source_procedure_scope(fi) {
             let namespace = self.frames[fi].namespace.clone();
             let qualified = namespace.qualify(name1);
             if let Ok(value) = self.host_get(&qualified, name2) {
                 return Ok(value);
             }
-            if namespace.as_bytes().as_bytes() != b"::" {
+            if namespace.as_bytes().as_bytes() != b"::" && !self.is_source_scope(fi) {
                 let global = NamespaceName::root().qualify(name1);
                 if let Ok(value) = self.host_get(&global, name2) {
                     return Ok(value);
                 }
             }
         }
+        let name = match name2 {
+            Some(element) => format!("{}({})", name1.as_str_lossy(), element.as_str_lossy()),
+            None => name1.as_str_lossy().into_owned(),
+        };
         Err(VmError::TclError {
-            message: format!("can't read \"{}\": no such variable", name1.as_str_lossy()),
+            message: format!("can't read \"{name}\": no such variable"),
             error_info: None,
             error_code: None,
         })
@@ -5190,17 +5787,55 @@ impl HybridEngineInner {
         name2: Option<&ByteString>,
         value: VmObj,
     ) -> Result<(), VmError> {
-        let fi = self.fi();
+        #[cfg(feature = "debug")]
+        let _access = self.variable_access(name1.clone(), name2.cloned());
+        let fi = self.scope_index();
+        #[cfg(feature = "debug")]
+        if self.source_images.contains_key(&self.frames[fi].code.id)
+            && name1.as_str_lossy().contains("::")
+        {
+            let qualified = self.frames[fi].namespace.qualify(name1);
+            self.install_host_link_named(name1, qualified.clone(), None)?;
+            return self.host_set(&qualified, name2, value);
+        }
+
+        #[cfg(feature = "debug")]
+        if matches!(
+            self.frames[fi].kind,
+            FrameKind::Toplevel | FrameKind::Namespace
+        ) && self.source_images.contains_key(&self.frames[fi].code.id)
+        {
+            let qualified = self.frames[fi].namespace.qualify(name1);
+            if !self.frames[fi]
+                .compiled_locals
+                .iter()
+                .any(|s| s.is_named(name1) && s.link.is_some())
+                && !matches!(
+                    self.frames[fi].local_vars.get_slot(name1),
+                    Some(VarSlot::Link(_))
+                )
+            {
+                self.install_host_link_named(name1, qualified, None)?;
+            }
+        }
+        let local_array = name2.is_none()
+            && matches!(
+                self.frames[fi].local_vars.get_slot(name1),
+                Some(VarSlot::Array(_))
+            );
         if let Some(slot) = self.frames[fi]
             .compiled_locals
             .iter_mut()
-            .find(|s| s.name == *name1)
+            .find(|s| s.is_named(name1))
         {
             if let Some(link) = slot.link.clone() {
                 let link = name2
                     .map(|key| link_element(&link, key.clone()))
                     .unwrap_or(link);
                 return self.follow_link_set(&link, value);
+            }
+            if local_array {
+                return Err(variable_is_array(name1));
             }
             if name2.is_none() {
                 slot.value = Some(value.clone());
@@ -5224,20 +5859,21 @@ impl HybridEngineInner {
                     map.insert(k.clone(), value);
                 }
                 Some(crate::var::VarSlot::Scalar(_)) => {
-                    return Err(VmError::TclError {
-                        message: format!(
+                    return Err(crate::args::tcl_error(
+                        format!(
                             "can't set \"{}({})\": variable isn't array",
                             name1.as_str_lossy(),
                             k.as_str_lossy()
                         ),
-                        error_info: None,
-                        error_code: None,
-                    });
+                        &["TCL", "LOOKUP", "VARNAME", &name1.as_str_lossy()],
+                    ));
                 }
                 _ => self.frames[fi]
                     .local_vars
                     .store_array_elem(name1.clone(), k.clone(), value),
             }
+        } else if local_array {
+            return Err(variable_is_array(name1));
         } else {
             self.frames[fi]
                 .local_vars
@@ -5247,11 +5883,21 @@ impl HybridEngineInner {
     }
 
     fn var_unset(&mut self, name1: &ByteString, name2: Option<&ByteString>) -> Result<(), VmError> {
-        let fi = self.fi();
+        #[cfg(feature = "debug")]
+        let _access = self.variable_access(name1.clone(), name2.cloned());
+        let fi = self.scope_index();
+        #[cfg(feature = "debug")]
+        if self.source_images.contains_key(&self.frames[fi].code.id)
+            && name1.as_str_lossy().contains("::")
+        {
+            let qualified = self.frames[fi].namespace.qualify(name1);
+            return self.host_unset(&qualified, name2);
+        }
+
         let link = self.frames[fi]
             .compiled_locals
             .iter()
-            .find(|slot| slot.name == *name1)
+            .find(|slot| slot.is_named(name1))
             .and_then(|slot| slot.link.clone())
             .or_else(|| match self.frames[fi].local_vars.get_slot(name1) {
                 Some(crate::var::VarSlot::Link(link)) => Some(link.clone()),
@@ -5291,7 +5937,7 @@ impl HybridEngineInner {
         if let Some(slot) = self.frames[fi]
             .compiled_locals
             .iter_mut()
-            .find(|s| s.name == *name1)
+            .find(|s| s.is_named(name1))
         {
             existed |= slot.value.is_some() || slot.link.is_some();
             slot.value = None;
@@ -5300,13 +5946,13 @@ impl HybridEngineInner {
         if existed {
             return Ok(());
         }
-        if self.mode == RuntimeMode::Hybrid {
+        if !self.is_source_procedure_scope(fi) {
             let namespace = self.frames[fi].namespace.clone();
             let qualified = namespace.qualify(name1);
             if self.host_unset(&qualified, None).is_ok() {
                 return Ok(());
             }
-            if namespace.as_bytes().as_bytes() != b"::" {
+            if namespace.as_bytes().as_bytes() != b"::" && !self.is_source_scope(fi) {
                 let global = NamespaceName::root().qualify(name1);
                 if self.host_unset(&global, None).is_ok() {
                     return Ok(());
@@ -5318,11 +5964,29 @@ impl HybridEngineInner {
 
     fn make_array(&mut self, name: &ByteString) -> Result<(), VmError> {
         use crate::var::VarSlot;
-        let fi = self.fi();
+        let fi = self.scope_index();
+        #[cfg(feature = "debug")]
+        if matches!(
+            self.frames[fi].kind,
+            FrameKind::Toplevel | FrameKind::Namespace
+        ) && self.source_images.contains_key(&self.frames[fi].code.id)
+            && !self.frames[fi]
+                .compiled_locals
+                .iter()
+                .any(|s| s.is_named(name) && s.link.is_some())
+            && !matches!(
+                self.frames[fi].local_vars.get_slot(name),
+                Some(VarSlot::Link(_))
+            )
+        {
+            let qualified = self.frames[fi].namespace.qualify(name);
+            self.install_host_link_named(name, qualified, None)?;
+        }
+
         let link = self.frames[fi]
             .compiled_locals
             .iter()
-            .find(|slot| slot.name == *name)
+            .find(|slot| slot.is_named(name))
             .and_then(|slot| slot.link.clone())
             .or_else(|| match self.frames[fi].local_vars.get_slot(name) {
                 Some(VarSlot::Link(link)) => Some(link.clone()),
@@ -5334,7 +5998,7 @@ impl HybridEngineInner {
         let compiled_value = self.frames[fi]
             .compiled_locals
             .iter()
-            .find(|slot| slot.name == *name)
+            .find(|slot| slot.is_named(name))
             .and_then(|slot| slot.value.as_ref())
             .is_some();
         match self.frames[fi].local_vars.get_slot(name) {
@@ -5367,7 +6031,7 @@ impl HybridEngineInner {
         if let Some(slot) = self.frames[fi]
             .compiled_locals
             .iter_mut()
-            .find(|slot| slot.name == *name)
+            .find(|slot| slot.is_named(name))
         {
             slot.value = None;
         }
@@ -5376,11 +6040,11 @@ impl HybridEngineInner {
 
     fn array_exists_named(&mut self, name: &ByteString) -> Result<bool, VmError> {
         use crate::var::VarSlot;
-        let fi = self.fi();
+        let fi = self.scope_index();
         let link = self.frames[fi]
             .compiled_locals
             .iter()
-            .find(|slot| slot.name == *name)
+            .find(|slot| slot.is_named(name))
             .and_then(|slot| slot.link.clone())
             .or_else(|| match self.frames[fi].local_vars.get_slot(name) {
                 Some(VarSlot::Link(link)) => Some(link.clone()),
@@ -5394,9 +6058,21 @@ impl HybridEngineInner {
             Some(_) => return Ok(false),
             None => {}
         }
+        if self.is_source_procedure_scope(fi) {
+            return Ok(false);
+        }
+        let namespace = self.frames[fi].namespace.clone();
+        let mut candidates = vec![namespace.qualify(name)];
+        if !self.is_source_scope(fi) {
+            candidates.push(NamespaceName::root().qualify(name));
+        }
+        if self.mode == RuntimeMode::VmStrict {
+            return Ok(candidates
+                .iter()
+                .any(|qualified| self.world.array_exists(qualified)));
+        }
         if self.mode == RuntimeMode::Hybrid {
-            let namespace = self.frames[fi].namespace.clone();
-            for qualified in [namespace.qualify(name), NamespaceName::root().qualify(name)] {
+            for qualified in candidates {
                 match self.host_value_result(&[
                     VmObj::from_str("array"),
                     VmObj::from_str("exists"),
@@ -5414,6 +6090,9 @@ impl HybridEngineInner {
     fn array_exists_link(&mut self, link: &VarLink) -> Result<bool, VmError> {
         use crate::var::VarSlot;
         match link {
+            VarLink::HostVar { name1, name2: None } if self.mode == RuntimeMode::VmStrict => {
+                Ok(self.world.array_exists(name1))
+            }
             VarLink::HostVar { name1, name2: None } => match self.host_value_result(&[
                 VmObj::from_str("array"),
                 VmObj::from_str("exists"),
@@ -5450,6 +6129,24 @@ impl HybridEngineInner {
                 error_info: None,
                 error_code: Some("TCL WRITE VARNAME".into()),
             }),
+            VarLink::HostVar { name1, name2: None } if self.mode == RuntimeMode::VmStrict => {
+                if self.world.array_exists(name1) {
+                    return Ok(());
+                }
+                if self.world.get(name1, None).is_ok() {
+                    return Err(VmError::TclError {
+                        message: format!(
+                            "can't array set \"{}\": variable isn't array",
+                            name1.as_str_lossy()
+                        ),
+                        error_info: None,
+                        error_code: Some("TCL WRITE VARNAME".into()),
+                    });
+                }
+                self.world
+                    .replace_array(name1, std::collections::HashMap::new());
+                Ok(())
+            }
             VarLink::HostVar { name1, name2: None } => {
                 let exists = self.host_value_result(&[
                     VmObj::from_str("array"),
@@ -5515,33 +6212,117 @@ impl HybridEngineInner {
         }
     }
 
-    fn host_get(
-        &mut self,
-        name1: &ByteString,
-        name2: Option<&ByteString>,
-    ) -> Result<VmObj, VmError> {
+    #[cfg(feature = "host")]
+    fn inspection_bridge<R>(&self, f: impl FnOnce(&mut HostBridge) -> R) -> Option<R> {
+        #[cfg(feature = "debug")]
+        {
+            self.with_suspended_bridge(f)
+        }
+        #[cfg(not(feature = "debug"))]
+        {
+            HostBridge::with_active_bridge(f)
+        }
+    }
+
+    fn host_get(&self, name1: &ByteString, name2: Option<&ByteString>) -> Result<VmObj, VmError> {
+        if self.mode == RuntimeMode::VmStrict {
+            return self
+                .world
+                .get(name1, name2)
+                .map_err(|error| self.variable_error(name1, error));
+        }
         #[cfg(feature = "host")]
         {
-            let n2 = name2.map(|b| b.as_bytes());
-            let value = if let Some(host) = self.host.as_ref() {
-                host.get_var_bytes(name1.as_bytes(), n2)
+            let name = if let Some(part) = name2 {
+                format!("{}({})", name1.as_str_lossy(), part.as_str_lossy())
             } else {
-                HostBridge::with_active_bridge(|host| host.get_var_bytes(name1.as_bytes(), n2))
-                    .flatten()
+                name1.as_str_lossy().into_owned()
             };
-            value
-                .map(VmObj::from_bytes)
-                .ok_or_else(|| VmError::TclError {
-                    message: format!("can't read \"{}\": no such variable", name1.as_str_lossy()),
-                    error_info: None,
-                    error_code: None,
-                })
+            let invoke = |host: &mut HostBridge| {
+                host.invoke_objv(&[VmObj::from_str("set"), VmObj::from_str(&name)])
+            };
+            let result = if let Some(host) = self.host.as_ref() {
+                // Outside execution there is no VM dispatcher; retain the
+                // ordinary bridge read for bootstrap and raw bytecode callers.
+                return host
+                    .get_var_bytes(name1.as_bytes(), name2.map(|b| b.as_bytes()))
+                    .map(VmObj::from_bytes)
+                    .ok_or_else(|| VmError::TclError {
+                        message: format!("can't read \"{name}\": no such variable"),
+                        error_info: None,
+                        error_code: None,
+                    });
+            } else {
+                self.inspection_bridge(invoke)
+                    .ok_or_else(|| VmError::HybridUnavailable("no active host".into()))??
+            };
+            if result.code == 0 {
+                Ok(result.result)
+            } else {
+                Err(self.variable_error(
+                    name1,
+                    VmError::TclError {
+                        message: result.result.as_string()?,
+                        error_info: result.error_info,
+                        error_code: result.error_code,
+                    },
+                ))
+            }
         }
         #[cfg(not(feature = "host"))]
         {
             let _ = (name1, name2);
             Err(VmError::HybridUnavailable("no host".into()))
         }
+    }
+    /// Name a variable in an error message as the program wrote it, not by
+    /// the qualified name its link resolved to.
+    fn variable_error(&self, actual: &ByteString, error: VmError) -> VmError {
+        #[cfg(feature = "debug")]
+        if let VmError::TclError {
+            message,
+            error_info,
+            error_code,
+        } = error
+        {
+            let fi = self.scope_index();
+            let local = self.frames[fi].compiled_locals.iter().find(|s| matches!(&s.link, Some(VarLink::HostVar {name1,..}) if name1 == actual)).map(|s| &s.name)
+                .or_else(|| self.frames[fi].local_vars.iter_slots().find(|(_,s)| matches!(s, VarSlot::Link(VarLink::HostVar {name1,..}) if name1 == actual)).map(|(n,_)| n));
+            if let Some(local) = local {
+                let error_code = error_code.map(|code| {
+                    use crate::list_codec::TclListCodec;
+                    if let Ok(mut words) = TclListCodec::parse(code.as_bytes())
+                        && words.len() == 4
+                        && words[0] == b"TCL"
+                        && words[1] == b"LOOKUP"
+                        && words[2] == b"VARNAME"
+                        && words[3] == actual.as_bytes()
+                    {
+                        words[3] = local.as_bytes().to_vec();
+                        String::from_utf8_lossy(&TclListCodec::format(
+                            words.iter().map(Vec::as_slice),
+                        ))
+                        .into_owned()
+                    } else {
+                        code
+                    }
+                });
+                return VmError::TclError {
+                    message: message.replace(
+                        actual.as_str_lossy().as_ref(),
+                        local.as_str_lossy().as_ref(),
+                    ),
+                    error_info,
+                    error_code,
+                };
+            }
+            return VmError::TclError {
+                message,
+                error_info,
+                error_code,
+            };
+        }
+        error
     }
 
     fn host_set(
@@ -5550,18 +6331,28 @@ impl HybridEngineInner {
         name2: Option<&ByteString>,
         value: VmObj,
     ) -> Result<(), VmError> {
+        if self.mode == RuntimeMode::VmStrict {
+            self.last_host_write = None;
+            return self
+                .world
+                .set(name1, name2, value)
+                .map_err(|error| self.variable_error(name1, error));
+        }
         #[cfg(feature = "host")]
         {
             let bytes = value.ensure_bytes()?;
             let n2 = name2.map(|b| b.as_bytes());
-            if let Some(host) = self.host.as_ref() {
-                host.set_var_bytes(name1.as_bytes(), n2, bytes.as_bytes())
+            let result = if let Some(host) = self.host.as_ref() {
+                host.set_var_result_bytes(name1.as_bytes(), n2, bytes.as_bytes())
             } else {
-                HostBridge::with_active_bridge(|host| {
-                    host.set_var_bytes(name1.as_bytes(), n2, bytes.as_bytes())
+                self.inspection_bridge(|host| {
+                    host.set_var_result_bytes(name1.as_bytes(), n2, bytes.as_bytes())
                 })
                 .ok_or_else(|| VmError::HybridUnavailable("no active host".into()))?
-            }
+            };
+            let result = result.map_err(|e| self.variable_error(name1, e))?;
+            self.last_host_write = Some(result);
+            Ok(())
         }
         #[cfg(not(feature = "host"))]
         {
@@ -5575,6 +6366,12 @@ impl HybridEngineInner {
         name1: &ByteString,
         name2: Option<&ByteString>,
     ) -> Result<(), VmError> {
+        if self.mode == RuntimeMode::VmStrict {
+            return self
+                .world
+                .unset(name1, name2)
+                .map_err(|error| self.variable_error(name1, error));
+        }
         let name = if let Some(name2) = name2 {
             let mut bytes = name1.as_bytes().to_vec();
             bytes.push(b'(');
@@ -5596,12 +6393,12 @@ impl HybridEngineInner {
         name1: ByteString,
         name2: Option<ByteString>,
     ) -> Result<(), VmError> {
-        let fi = self.fi();
+        let fi = self.scope_index();
         // Prefer LVT slot with same name
         if let Some(slot) = self.frames[fi]
             .compiled_locals
             .iter_mut()
-            .find(|s| s.name == *local_name)
+            .find(|s| s.is_named(local_name))
         {
             slot.value = None;
             slot.link = Some(VarLink::HostVar {
@@ -5637,6 +6434,17 @@ impl VarNameCtx for EngineVarCtx<'_> {
         value: VmObj,
     ) -> Result<(), VmError> {
         self.engine.var_set(name1, name2, value)
+    }
+
+    fn set_var_value(
+        &mut self,
+        name1: &ByteString,
+        name2: Option<&ByteString>,
+        value: VmObj,
+    ) -> Result<VmObj, VmError> {
+        self.engine.last_host_write = None;
+        self.engine.var_set(name1, name2, value.clone())?;
+        Ok(self.engine.last_host_write.take().unwrap_or(value))
     }
 
     fn unset_var(&mut self, name1: &ByteString, name2: Option<&ByteString>) -> Result<(), VmError> {
@@ -5742,23 +6550,6 @@ fn source_offset_for_pc(bytecode: &tcld_core::ByteCode, pc: u32) -> Option<usize
         .and_then(|(_, source)| usize::try_from(source.start).ok())
 }
 
-fn encoded_index_string(encoded: i32) -> String {
-    const TCL_INDEX_END: i32 = -2;
-    const TCL_INDEX_AFTER: i32 = i32::MAX;
-    match encoded {
-        TCL_INDEX_AFTER => "end+1".into(),
-        value if value <= TCL_INDEX_END => {
-            let delta = value - TCL_INDEX_END;
-            if delta == 0 {
-                "end".into()
-            } else {
-                format!("end{delta}")
-            }
-        }
-        value => value.to_string(),
-    }
-}
-
 fn no_such_unset(name1: &ByteString, name2: Option<&ByteString>) -> VmError {
     let name = name2
         .map(|key| format!("{}({})", name1.as_str_lossy(), key.as_str_lossy()))
@@ -5767,6 +6558,44 @@ fn no_such_unset(name1: &ByteString, name2: Option<&ByteString>) -> VmError {
         message: format!("can't unset \"{name}\": no such variable"),
         error_info: None,
         error_code: Some("TCL LOOKUP VARNAME".into()),
+    }
+}
+
+/// Tcl's error for a scalar write to an array variable (`TclPtrSetVarIdx`
+/// reports every failed write as `TCL WRITE VARNAME`).
+fn variable_is_array(name: &ByteString) -> VmError {
+    VmError::TclError {
+        message: format!("can't set \"{}\": variable is array", name.as_str_lossy()),
+        error_info: None,
+        error_code: Some("TCL WRITE VARNAME".into()),
+    }
+}
+
+/// A command vm-strict cannot run: a Tcl host command is a policy denial;
+/// any other name is simply not a command, as in Tcl.
+fn denied_command(name: &ByteString, mode: RuntimeMode) -> VmError {
+    if tcld_compile::is_tcl_builtin_command(&name.as_str_lossy()) {
+        return VmError::PolicyDenied {
+            action: "world_host",
+            detail: format!(
+                "command `{}` denied in {}",
+                name.as_str_lossy(),
+                mode.as_str()
+            ),
+        };
+    }
+    VmError::TclError {
+        message: format!("invalid command name \"{}\"", name.as_str_lossy()),
+        error_info: None,
+        error_code: Some(
+            String::from_utf8_lossy(&crate::list_codec::TclListCodec::format([
+                b"TCL".as_slice(),
+                b"LOOKUP",
+                b"COMMAND",
+                name.as_bytes(),
+            ]))
+            .into_owned(),
+        ),
     }
 }
 
@@ -5870,18 +6699,6 @@ fn completion_to_error(completion: Completion) -> VmError {
                 .error_code
                 .and_then(|value| value.as_string().ok()),
         }
-    }
-}
-
-fn op_sym(op: Opcode) -> &'static str {
-    match op {
-        Opcode::Add => "+",
-        Opcode::Sub => "-",
-        Opcode::Mult => "*",
-        Opcode::Div => "/",
-        Opcode::Mod => "%",
-        Opcode::Expon => "**",
-        _ => "?",
     }
 }
 

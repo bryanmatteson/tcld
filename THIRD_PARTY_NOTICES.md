@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-Tcld is licensed under Apache-2.0. The following compatibility fixtures retain
+Tcld is licensed under Apache-2.0. The following third-party material retains
 their original permissive terms:
 
 - `apps/tcld/tests/fixtures/` contains TclPro compiler fixtures from Ajuba
@@ -14,3 +14,29 @@ their original permissive terms:
 `testing/fixtures/public/public_complex_fixture.tcl` is original Tcld material
 licensed under Apache-2.0. Its bytecode was generated with the open-source Tcl
 compiler. The compiler itself is not distributed here.
+
+The native regular-expression implementation in `crates/tcld-vm/src/regex/`
+is a Rust port of Henry Spencer's engine as shipped in Tcl 9.0.2. Original
+copyright notices and redistribution terms are retained in the corresponding
+source files. Tcl-specific locale tables and command integration in
+`crates/tcld-vm/src/regexp_command.rs` retain their original notices; Tcl's
+complete terms are reproduced in `crates/tcld-vm/src/regex/license.terms`.
+The port replaces C pointers and interpreter-owned objects with Rust arenas,
+indices, and VM values, and omits Tcl's internal diagnostic switches.
+
+The command comparison merge sort in `crates/tcld-vm/src/lsort.rs` is ported
+from Tcl 9.0.2's `generic/tclCmdIL.c`. Its source header retains the original
+copyright notices, under the same Tcl terms in
+`crates/tcld-vm/src/regex/license.terms`.
+
+Native `switch` matching and argument handling in
+`crates/tcld-vm/src/engine/switch.rs` are ported from Tcl 9.0.2's
+`generic/tclCmdMZ.c`, retaining its copyright notices under the same Tcl terms.
+
+Native `lmap` iteration and argument handling in
+`crates/tcld-vm/src/engine/lmap.rs` are ported from Tcl 9.0.2's
+`generic/tclCmdAH.c`, retaining its copyright notices under the same Tcl terms.
+
+Native `try` parsing, handler selection and completion handling in
+`crates/tcld-vm/src/engine/try_cmd.rs` are ported from Tcl 9.0.2's
+`generic/tclCmdMZ.c`, retaining its copyright notices under the same Tcl terms.

@@ -12,7 +12,7 @@ default = ["host", "debug"]
 # Link/use embedded Tcl via tcld-interp for WorldHost invokes (hybrid mode).
 host = ["dep:tcld-interp", "dep:tcl-sys"]
 # Model B pause hooks and debug surfaces used by apps/tcld hybrid debug.
-debug = []
+debug = ["dep:corosensei"]
 
 [dependencies]
 tcld-core.workspace = true
@@ -30,3 +30,9 @@ static_assertions.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+
+[build-dependencies]
+cc.workspace = true
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+corosensei = {version = "0.3.4", optional = true}

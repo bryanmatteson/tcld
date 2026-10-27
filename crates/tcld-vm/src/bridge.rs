@@ -5,6 +5,7 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tcl_sys::{
@@ -26,30 +27,27 @@ const OUTPUT_CAPTURE_SHIM: &str = r#"
 namespace eval ::tcld {}
 if {![llength [info commands ::tcld::_capture_puts_orig]]} {
     rename ::puts ::tcld::_capture_puts_orig
+    # Tcl 9's `puts ?-nonewline? ?channel? string`: stdout and stderr are
+    # captured, and any other channel is written as usual.
     proc ::puts {args} {
-        set original $args
-        set nonewline 0
-        if {[llength $args] && [lindex $args 0] eq "-nonewline"} {
-            set nonewline 1
-            set args [lrange $args 1 end]
-        }
-        if {[llength $args] == 1} {
-            set channel stdout
-            set text [lindex $args 0]
-        } elseif {[llength $args] == 2} {
-            set channel [lindex $args 0]
-            set text [lindex $args 1]
-        } else {
-            return [::tcld::_capture_puts_orig {*}$original]
+        set nonewline [expr {[llength $args] > 1 && [lindex $args 0] eq "-nonewline"}]
+        set rest [lrange $args $nonewline end]
+        switch [llength $rest] {
+            1 {set channel stdout}
+            2 {set channel [lindex $rest 0]}
+            default {
+                return -code error -errorcode {TCL WRONGARGS} "wrong # args: should be\
+                    \"[lindex [info level 0] 0] ?-nonewline? ?channel? string\""
+            }
         }
         if {$channel ni {stdout stderr}} {
-            return [::tcld::_capture_puts_orig {*}$original]
+            return [::tcld::_capture_puts_orig {*}$args]
         }
-        append ::tcld::capture_$channel $text
+        append ::tcld::capture_$channel [lindex $rest end]
         if {!$nonewline} {
             append ::tcld::capture_$channel "\n"
         }
-        return {}
+        return
     }
 }
 set ::tcld::capture_stdout {}
@@ -108,11 +106,12 @@ struct FrameEvalContext {
 
 thread_local! {
     static ACTIVE_BRIDGE: RefCell<Option<*mut HostBridge>> = const { RefCell::new(None) };
-    static STUB_DISPATCH: RefCell<Option<StubDispatchFn>> = const { RefCell::new(None) };
+    static STUB_DISPATCH: RefCell<Option<SharedStubDispatch>> = const { RefCell::new(None) };
     static ACTIVE_FRAME_EVALS: RefCell<Vec<*mut FrameEvalContext>> = const { RefCell::new(Vec::new()) };
 }
 
-type StubDispatchFn = Box<dyn FnMut(&[VmObj]) -> Result<BridgeResult, VmError>>;
+type StubDispatchFn = Box<dyn Fn(&[VmObj]) -> Result<BridgeResult, VmError>>;
+type SharedStubDispatch = Rc<dyn Fn(&[VmObj]) -> Result<BridgeResult, VmError>>;
 
 /// Opaque client data for CreateObjCommand stubs.
 struct StubClient {
@@ -144,6 +143,10 @@ impl HostBridge {
     }
 
     pub fn install_frame_commands(&self) -> Result<(), VmError> {
+        #[cfg(feature = "debug")]
+        unsafe {
+            tcld_coroutine_install(self.interp.raw());
+        }
         self.install_raw_command(
             "::tcld::frame_eval_internal",
             Some(frame_eval_internal_obj_cmd),
@@ -369,6 +372,22 @@ impl HostBridge {
             })
     }
 
+    pub fn set_var_result_bytes(
+        &self,
+        name1: &[u8],
+        name2: Option<&[u8]>,
+        value: &[u8],
+    ) -> Result<VmObj, VmError> {
+        self.interp
+            .set_var_result_bytes(name1, name2, value)
+            .map(VmObj::from_bytes)
+            .map_err(|e| VmError::TclError {
+                message: e.message,
+                error_info: e.error_info,
+                error_code: e.error_code,
+            })
+    }
+
     pub fn begin_output_capture(&self) -> Result<(), VmError> {
         self.eval_script(OUTPUT_CAPTURE_SHIM).map(|_| ())
     }
@@ -496,7 +515,7 @@ impl HostBridge {
         f: impl FnOnce(&mut Self) -> Result<R, VmError>,
     ) -> Result<R, VmError> {
         STUB_DISPATCH.with(|slot| {
-            *slot.borrow_mut() = Some(dispatch);
+            *slot.borrow_mut() = Some(Rc::from(dispatch));
         });
         let self_ptr = self as *mut HostBridge;
         ACTIVE_BRIDGE.with(|a| {
@@ -545,11 +564,15 @@ impl HostBridge {
         self.state = BridgeState::InHost;
         self.reenter_depth += 1;
 
+        #[cfg(feature = "debug")]
+        let trace_mute = TraceMute(unsafe { tcld_trace_mute(self.interp.raw()) });
         let evaluated = self
             .interp
             .eval_objv_bytes(&refs)
             .map_err(|error| VmError::Internal(format!("eval_objv: {}", error.message)));
 
+        #[cfg(feature = "debug")]
+        drop(trace_mute);
         self.reenter_depth = self.reenter_depth.saturating_sub(1);
         self.state = self.state_stack.pop().unwrap_or(BridgeState::Idle);
         let eval: EvalResult = evaluated?;
@@ -667,6 +690,11 @@ unsafe fn execute_frame_eval(
                     }
                 }
                 HostFrameStorage::HostLink(target) => {
+                    // Fully qualified names already address the actual Tcl
+                    // variable; linking that name to itself is a Tcl error.
+                    if input.name == *target && input.name.as_bytes().starts_with(b"::") {
+                        continue;
+                    }
                     eval_objv_raw(
                         interp,
                         &[
@@ -683,11 +711,15 @@ unsafe fn execute_frame_eval(
         let body = new_obj(context.body.as_bytes());
         Tcl_IncrRefCount(body);
         let mut expression_result = std::ptr::null_mut();
+        #[cfg(feature = "debug")]
+        let visitor = FrameEvalVisitor::new(interp);
         let code = if context.expression {
             Tcl_ExprObj(interp, body, &mut expression_result)
         } else {
             Tcl_EvalObjEx(interp, body, 0)
         };
+        #[cfg(feature = "debug")]
+        drop(visitor);
         let result_object = if context.expression && code == TCL_OK && !expression_result.is_null()
         {
             expression_result
@@ -910,16 +942,21 @@ unsafe extern "C" fn stub_obj_cmd(
         }
     }
 
-    let result = STUB_DISPATCH.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if let Some(dispatch) = slot.as_mut() {
-            dispatch(&words)
-        } else {
-            Err(VmError::Internal(
-                "stub invoked without active STUB_DISPATCH".into(),
-            ))
-        }
+    // Do not retain a RefCell borrow across a callback: Tcl can invoke nested
+    // traces and the debugger can suspend this call stack.
+    let dispatch = STUB_DISPATCH.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|f| &**f as *const dyn Fn(&[VmObj]) -> Result<BridgeResult, VmError>)
     });
+    let result = dispatch.map_or_else(
+        || {
+            Err(VmError::Internal(
+                "stub invoked without active dispatcher".into(),
+            ))
+        },
+        |f| unsafe { (&*f)(&words) },
+    );
 
     match result {
         Ok(br) => {
@@ -996,5 +1033,434 @@ mod tests {
         assert_eq!(options.level, 0);
         assert_eq!(options.code, 1);
         assert!(options.error_info.is_some());
+    }
+}
+
+/// Thread-local bridge ownership travels with a suspended interpreter stack.
+/// This also lets multiple paused engines coexist on one GUI thread.
+#[derive(Clone)]
+pub(crate) struct BridgeContext {
+    active: Option<*mut HostBridge>,
+    dispatch: Option<SharedStubDispatch>,
+    frames: Vec<*mut FrameEvalContext>,
+}
+pub(crate) fn take_context() -> BridgeContext {
+    BridgeContext {
+        active: ACTIVE_BRIDGE.with(|s| s.borrow_mut().take()),
+        dispatch: STUB_DISPATCH.with(|s| s.borrow_mut().take()),
+        frames: ACTIVE_FRAME_EVALS.with(|s| std::mem::take(&mut *s.borrow_mut())),
+    }
+}
+pub(crate) fn put_context(context: BridgeContext) {
+    ACTIVE_BRIDGE.with(|s| *s.borrow_mut() = context.active);
+    STUB_DISPATCH.with(|s| *s.borrow_mut() = context.dispatch);
+    ACTIVE_FRAME_EVALS.with(|s| *s.borrow_mut() = context.frames);
+}
+
+pub(crate) fn with_context_bridge<R>(
+    context: &BridgeContext,
+    f: impl FnOnce(&mut HostBridge) -> R,
+) -> Option<R> {
+    context.active.map(|p| {
+        let previous = take_context();
+        put_context(context.clone());
+        let result = f(unsafe { &mut *p });
+        let _ = take_context();
+        put_context(previous);
+        result
+    })
+}
+
+#[cfg(feature = "debug")]
+unsafe extern "C" {
+    fn tcld_trace_command_new(
+        interp: *mut tcl_sys::Tcl_Interp,
+        ns: *const c_char,
+        objc: c_int,
+        objv: *const *mut Tcl_Obj,
+        level: c_int,
+        depth: c_int,
+    ) -> *mut c_void;
+    fn tcld_trace_mapped_hook(handle: *mut c_void, leave: c_int, code: c_int) -> c_int;
+    fn tcld_trace_command_free(handle: *mut c_void);
+    fn tcld_trace_ensemble(handle: *mut c_void) -> *mut c_void;
+    fn tcld_trace_refresh(handle: *mut c_void) -> c_int;
+    fn tcld_trace_watch(interp: *mut tcl_sys::Tcl_Interp, name: *const c_char);
+    fn tcld_trace_mute(interp: *mut tcl_sys::Tcl_Interp) -> *mut c_void;
+    fn tcld_trace_unmute(handle: *mut c_void);
+    fn tcld_trace_visitor_begin(interp: *mut tcl_sys::Tcl_Interp) -> u32;
+    fn tcld_trace_visitor_end(interp: *mut tcl_sys::Tcl_Interp, ticket: u32);
+}
+#[cfg(feature = "debug")]
+pub(crate) struct TraceCommand(*mut c_void);
+#[cfg(feature = "debug")]
+impl Drop for TraceCommand {
+    fn drop(&mut self) {
+        unsafe { tcld_trace_command_free(self.0) }
+    }
+}
+#[cfg(feature = "debug")]
+impl TraceCommand {
+    pub(crate) fn refresh(&self) -> i32 {
+        unsafe { tcld_trace_refresh(self.0) }
+    }
+    pub(crate) fn ensemble(&self) -> Option<Self> {
+        let p = unsafe { tcld_trace_ensemble(self.0) };
+        if p.is_null() { None } else { Some(Self(p)) }
+    }
+}
+#[cfg(feature = "debug")]
+struct TraceMute(*mut c_void);
+#[cfg(feature = "debug")]
+impl Drop for TraceMute {
+    fn drop(&mut self) {
+        unsafe { tcld_trace_unmute(self.0) }
+    }
+}
+#[cfg(feature = "debug")]
+impl HostBridge {
+    pub(crate) fn track_execution_command(&mut self, name: &str) {
+        if let Ok(name) = CString::new(name) {
+            unsafe { tcld_trace_watch(self.interp.raw(), name.as_ptr()) }
+        }
+    }
+    pub(crate) fn trace_command(
+        &mut self,
+        ns: &str,
+        words: &[VmObj],
+        level: usize,
+        depth: usize,
+    ) -> Result<Option<TraceCommand>, VmError> {
+        if words.is_empty() {
+            return Ok(None);
+        }
+        let ns =
+            CString::new(ns).map_err(|_| VmError::Internal("namespace contains NUL".into()))?;
+        let objects = words
+            .iter()
+            .map(|w| w.ensure_bytes())
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .map(|w| unsafe {
+                let o = new_obj(w.as_bytes());
+                Tcl_IncrRefCount(o);
+                o
+            })
+            .collect::<Vec<_>>();
+        let handle = unsafe {
+            tcld_trace_command_new(
+                self.interp.raw(),
+                ns.as_ptr(),
+                objects.len() as c_int,
+                objects.as_ptr(),
+                level as c_int,
+                depth as c_int,
+            )
+        };
+        for o in objects {
+            unsafe { Tcl_DecrRefCount(o) }
+        }
+        Ok(if handle.is_null() {
+            None
+        } else {
+            Some(TraceCommand(handle))
+        })
+    }
+    pub(crate) fn trace_hook(
+        &mut self,
+        command: &TraceCommand,
+        leave: bool,
+        completion: &crate::completion::Completion,
+    ) -> Result<Option<crate::completion::Completion>, VmError> {
+        unsafe {
+            let interp = self.interp.raw();
+            let result = completion.result.ensure_bytes()?;
+            Tcl_SetObjResult(interp, new_obj(result.as_bytes()));
+            let options = completion.options.as_vm_obj().ensure_bytes()?;
+            let obj = new_obj(options.as_bytes());
+            Tcl_IncrRefCount(obj);
+            Tcl_SetReturnOptions(interp, obj);
+            Tcl_DecrRefCount(obj);
+            let code = tcld_trace_mapped_hook(command.0, leave as c_int, completion.code);
+            if code == 0 {
+                return Ok(None);
+            }
+            let value = VmObj::from_bytes(obj_bytes(Tcl_GetObjResult(interp)));
+            let obj = Tcl_GetReturnOptions(interp, code);
+            Tcl_IncrRefCount(obj);
+            let options =
+                crate::completion::ReturnOptions::from_vm_obj(VmObj::from_bytes(obj_bytes(obj)))?;
+            Tcl_DecrRefCount(obj);
+            Ok(Some(crate::completion::Completion {
+                code,
+                result: value,
+                options,
+            }))
+        }
+    }
+}
+
+#[cfg(feature = "debug")]
+thread_local! {static FRAME_EVAL_VISITOR: std::cell::Cell<bool> = const {std::cell::Cell::new(false)};}
+#[cfg(feature = "debug")]
+pub(crate) fn in_frame_eval_visitor() -> bool {
+    FRAME_EVAL_VISITOR.with(|value| value.get())
+}
+#[cfg(feature = "debug")]
+struct FrameEvalVisitor {
+    interp: *mut tcl_sys::Tcl_Interp,
+    ticket: u32,
+    previous: bool,
+}
+#[cfg(feature = "debug")]
+impl FrameEvalVisitor {
+    fn new(interp: *mut tcl_sys::Tcl_Interp) -> Self {
+        Self {
+            interp,
+            ticket: unsafe { tcld_trace_visitor_begin(interp) },
+            previous: FRAME_EVAL_VISITOR.with(|v| v.replace(true)),
+        }
+    }
+}
+#[cfg(feature = "debug")]
+impl Drop for FrameEvalVisitor {
+    fn drop(&mut self) {
+        FRAME_EVAL_VISITOR.with(|v| v.set(self.previous));
+        unsafe { tcld_trace_visitor_end(self.interp, self.ticket) }
+    }
+}
+
+// NRE commands return to Tcl before yielding. No Rust/C evaluator stack is
+// parked across a Tcl coroutine suspension; debugger pauses use the outer fiber.
+#[cfg(feature = "debug")]
+unsafe extern "C" {
+    fn tcld_coroutine_install(interp: *mut tcl_sys::Tcl_Interp);
+}
+#[cfg(feature = "debug")]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn tcld_coroutine_dispatch(
+    interp: *mut tcl_sys::Tcl_Interp,
+    objc: c_int,
+    objv: *const *mut Tcl_Obj,
+    handoff: *mut c_int,
+) -> c_int {
+    let previous = NATIVE_HANDOFF.with(|flag| flag.replace(0));
+    let code = unsafe { stub_obj_cmd(std::ptr::dangling_mut::<u8>().cast(), interp, objc, objv) };
+    unsafe {
+        *handoff = NATIVE_HANDOFF.with(|flag| flag.replace(previous));
+    }
+    code
+}
+#[cfg(feature = "debug")]
+thread_local! {static NATIVE_HANDOFF: std::cell::Cell<c_int> = const {std::cell::Cell::new(0)};}
+#[cfg(feature = "debug")]
+pub(crate) fn set_native_handoff(code: c_int) {
+    NATIVE_HANDOFF.with(|flag| flag.set(code));
+}
+
+#[cfg(feature = "debug")]
+unsafe extern "C" {
+    fn tcld_coroutine_is_command(
+        interp: *mut tcl_sys::Tcl_Interp,
+        name: *const c_char,
+        namespace: *const c_char,
+    ) -> c_int;
+}
+#[cfg(feature = "debug")]
+impl HostBridge {
+    pub(crate) fn is_coroutine_command(&self, name: &str, namespace: &str) -> bool {
+        let (Ok(name), Ok(namespace)) = (CString::new(name), CString::new(namespace)) else {
+            return false;
+        };
+        unsafe {
+            tcld_coroutine_is_command(self.interp.raw(), name.as_ptr(), namespace.as_ptr()) != 0
+        }
+    }
+}
+#[cfg(feature = "debug")]
+unsafe extern "C" {
+    fn tcld_trace_cancel(handle: *mut c_void);
+}
+#[cfg(feature = "debug")]
+impl HostBridge {
+    pub(crate) fn cancel_trace(&mut self, trace: &TraceCommand) {
+        unsafe {
+            tcld_trace_cancel(trace.0);
+        }
+    }
+}
+
+#[cfg(feature = "debug")]
+unsafe extern "C" {
+    fn tcld_tailcall_prepare(
+        interp: *mut tcl_sys::Tcl_Interp,
+        ns: *const c_char,
+        allowed: c_int,
+        objc: c_int,
+        objv: *const *mut Tcl_Obj,
+        tail: *mut *mut c_void,
+    ) -> c_int;
+}
+#[cfg(feature = "debug")]
+impl HostBridge {
+    pub(crate) fn prepare_tailcall(
+        &mut self,
+        words: &[VmObj],
+        namespace: &str,
+        allowed: bool,
+    ) -> Result<
+        (
+            BridgeResult,
+            Option<crate::engine::tailcalls::NativeTailcall>,
+        ),
+        VmError,
+    > {
+        let ns = CString::new(namespace)
+            .map_err(|_| VmError::Internal("invalid tailcall namespace".into()))?;
+        let bytes = words
+            .iter()
+            .map(VmObj::ensure_bytes)
+            .collect::<Result<Vec<_>, _>>()?;
+        unsafe {
+            let interp = self.interp.raw();
+            let objects = bytes
+                .iter()
+                .map(|b| {
+                    let o = new_obj(b.as_bytes());
+                    Tcl_IncrRefCount(o);
+                    o
+                })
+                .collect::<Vec<_>>();
+            let mut tail = std::ptr::null_mut();
+            let code = tcld_tailcall_prepare(
+                interp,
+                ns.as_ptr(),
+                allowed as c_int,
+                objects.len() as c_int,
+                objects.as_ptr(),
+                &mut tail,
+            );
+            for o in objects {
+                Tcl_DecrRefCount(o);
+            }
+            let result = VmObj::from_bytes(obj_bytes(Tcl_GetObjResult(interp)));
+            let options = Tcl_GetReturnOptions(interp, code);
+            Tcl_IncrRefCount(options);
+            let return_options = Some(VmObj::from_bytes(obj_bytes(options)));
+            Tcl_DecrRefCount(options);
+            Ok((
+                BridgeResult {
+                    code,
+                    result,
+                    error_info: None,
+                    error_code: None,
+                    return_options,
+                },
+                if tail.is_null() {
+                    None
+                } else {
+                    Some(crate::engine::tailcalls::NativeTailcall(tail as usize))
+                },
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "debug")]
+unsafe extern "C" {
+    fn tcld_tailcall_validate(interp: *mut tcl_sys::Tcl_Interp, pending: *mut c_void) -> c_int;
+}
+#[cfg(feature = "debug")]
+impl HostBridge {
+    pub(crate) fn validate_tailcall(
+        &mut self,
+        pending: &crate::engine::tailcalls::NativeTailcall,
+    ) -> Result<Option<crate::Completion>, VmError> {
+        unsafe {
+            let interp = self.interp.raw();
+            let code = tcld_tailcall_validate(interp, pending.0 as *mut c_void);
+            if code == 0 {
+                return Ok(None);
+            }
+            let result = VmObj::from_bytes(obj_bytes(Tcl_GetObjResult(interp)));
+            let options = Tcl_GetReturnOptions(interp, code);
+            Tcl_IncrRefCount(options);
+            let parsed = crate::ReturnOptions::from_vm_obj(VmObj::from_bytes(obj_bytes(options)));
+            Tcl_DecrRefCount(options);
+            Ok(Some(crate::Completion {
+                code,
+                result,
+                options: parsed?,
+            }))
+        }
+    }
+}
+
+#[cfg(feature = "debug")]
+unsafe extern "C" {
+    fn tcld_active_control(interp: *mut tcl_sys::Tcl_Interp) -> i64;
+}
+#[cfg(feature = "debug")]
+impl HostBridge {
+    pub(crate) fn active_control(&self) -> u64 {
+        unsafe { tcld_active_control(self.interp.raw()) as u64 }
+    }
+}
+
+#[cfg(feature = "debug")]
+unsafe extern "C" {
+    fn tcld_subst_plan(
+        interp: *mut tcl_sys::Tcl_Interp,
+        objc: c_int,
+        objv: *const *mut Tcl_Obj,
+    ) -> *mut Tcl_Obj;
+}
+#[cfg(feature = "debug")]
+impl HostBridge {
+    pub(crate) fn subst_plan(&mut self, words: &[VmObj]) -> Result<Option<VmObj>, VmError> {
+        let bytes = words
+            .iter()
+            .map(VmObj::ensure_bytes)
+            .collect::<Result<Vec<_>, _>>()?;
+        unsafe {
+            let interp = self.interp.raw();
+            let objects = bytes
+                .iter()
+                .map(|b| {
+                    let o = new_obj(b.as_bytes());
+                    Tcl_IncrRefCount(o);
+                    o
+                })
+                .collect::<Vec<_>>();
+            let plan = tcld_subst_plan(interp, objects.len() as c_int, objects.as_ptr());
+            let result = if plan.is_null() {
+                None
+            } else {
+                let value = VmObj::from_bytes(obj_bytes(plan));
+                Tcl_DecrRefCount(plan);
+                Some(value)
+            };
+            for o in objects {
+                Tcl_DecrRefCount(o);
+            }
+            Ok(result)
+        }
+    }
+}
+
+#[cfg(feature = "debug")]
+unsafe extern "C" {
+    fn tcld_variable_defined(
+        interp: *mut tcl_sys::Tcl_Interp,
+        name: *const std::ffi::c_char,
+    ) -> i32;
+}
+#[cfg(feature = "debug")]
+impl HostBridge {
+    pub(crate) fn variable_defined(&mut self, name: &str) -> bool {
+        let Ok(name) = CString::new(name) else {
+            return false;
+        };
+        unsafe { tcld_variable_defined(self.interp.raw(), name.as_ptr()) != 0 }
     }
 }

@@ -99,6 +99,7 @@ impl AnalysisSnapshot {
     }
 
     pub fn from_loaded(loaded: LoadedBytecode) -> Result<Self> {
+        crate::init::ensure_initialized();
         let instructions = loaded.bytecode.get_instructions()?;
         let basic_blocks =
             build_basic_blocks_with_auxiliaries(&instructions, &loaded.bytecode.auxiliaries);

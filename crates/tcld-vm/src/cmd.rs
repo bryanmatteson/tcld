@@ -3,13 +3,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::error::VmError;
 use crate::load::LoadedCode;
 use crate::mode::RuntimeMode;
-use crate::value::ByteString;
+use crate::value::{ByteString, VmObj};
 
 /// Closed VarNameBuiltin set (executable plan §4).
 pub const VAR_NAME_BUILTINS: &[&str] = &[
     "set", "append", "lappend", "incr", "unset", "global", "variable",
+];
+
+/// Value commands the VM runs natively in every mode (`builtin::run_value_builtin`).
+pub const VALUE_BUILTINS: &[&str] = &[
+    "list", "llength", "lindex", "lrange", "concat", "join", "split", "error",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +35,11 @@ pub fn normalize_cmd_key(name: &[u8]) -> &[u8] {
 pub fn is_var_name_builtin(name: &[u8]) -> bool {
     let key = normalize_cmd_key(name);
     VAR_NAME_BUILTINS.iter().any(|b| key == b.as_bytes())
+}
+
+pub fn is_value_builtin(name: &[u8]) -> bool {
+    let key = normalize_cmd_key(name);
+    VALUE_BUILTINS.iter().any(|b| key == b.as_bytes())
 }
 
 pub fn is_facade_name(name: &[u8]) -> bool {
@@ -59,9 +70,33 @@ pub fn facade_kind(name: &[u8]) -> Option<FacadeKind> {
 pub struct VmProc {
     pub qname: ByteString,
     pub args_spec: ByteString,
+    /// The body as written, for a procedure compiled from source.
+    pub body: Option<ByteString>,
     pub code: Arc<LoadedCode>,
     pub num_args: i32,
     pub num_locals: i32,
+}
+
+impl VmProc {
+    /// `info body`: the body as written. A precompiled procedure reports the
+    /// placeholder TclPro's loader gives it.
+    pub fn body_text(&self) -> VmObj {
+        match &self.body {
+            Some(body) => VmObj::Bytes(body.clone()),
+            None => VmObj::from_str(
+                "# Compiled -- no source code available\nerror \"called a copy of a compiled script\"",
+            ),
+        }
+    }
+
+    /// `info args`: the formal argument names.
+    pub fn argument_names(&self) -> Result<VmObj, VmError> {
+        let mut names = Vec::new();
+        for formal in VmObj::Bytes(self.args_spec.clone()).as_list_vec()? {
+            names.extend(formal.as_list_vec()?.into_iter().next());
+        }
+        Ok(VmObj::List(names))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +104,7 @@ pub enum CommandRef {
     Facade(FacadeKind),
     VmProc(VmProc),
     VarNameBuiltin { name: ByteString },
+    ValueBuiltin { name: ByteString },
     WorldHost { name: ByteString },
     Denied { name: ByteString },
 }
@@ -85,6 +121,15 @@ impl CommandRegistry {
 
     pub fn register_vm_proc(&mut self, proc: VmProc) {
         self.procs.insert(proc.qname.clone(), proc);
+    }
+
+    pub fn rename_vm_proc(&mut self, old: &ByteString, new: Option<ByteString>) {
+        if let Some(mut proc) = self.procs.remove(old)
+            && let Some(new) = new
+        {
+            proc.qname = new.clone();
+            self.procs.insert(new, proc);
+        }
     }
 
     pub fn get_vm_proc(&self, name: &ByteString) -> Option<&VmProc> {
@@ -131,6 +176,12 @@ impl CommandRegistry {
 
         if is_var_name_builtin(key) {
             return CommandRef::VarNameBuiltin {
+                name: ByteString::from_bytes(key.to_vec()),
+            };
+        }
+
+        if is_value_builtin(key) {
+            return CommandRef::ValueBuiltin {
                 name: ByteString::from_bytes(key.to_vec()),
             };
         }

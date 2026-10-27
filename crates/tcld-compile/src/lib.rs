@@ -5,8 +5,18 @@
 //! Unknown commands in Hybrid mode are admitted only as opaque WorldHost leaf
 //! calls: the image maps their outer source command and makes no claim about
 //! implementation work inside the external command. Known Tcl commands/forms
-//! that evaluate scripts are rejected until the compiler can lower and map
-//! those bodies itself.
+//! that evaluate scripts are admitted only when their bodies can enter verified
+//! images, including runtime-created images in Hybrid mode.
+
+mod control;
+mod dicts;
+mod expression;
+mod lists;
+mod source;
+mod strings;
+mod words;
+
+pub use strings::DEFAULT_TRIM_SET;
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -14,13 +24,14 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use tcld_core::bytecode::{
-    ByteCode, ByteCodeInfo, CompiledLocal, LiteralObject, LiteralObjectType,
+    AuxData, AuxDataType, AuxDataValue, ByteCode, ByteCodeInfo, CompiledLocal, ExceptionRange,
+    ExceptionType, LiteralObject, LiteralObjectType, NewForeachInfo,
 };
 use tcld_core::inst_table::{Opcode, TCL_86_OPCODE_TABLE};
 use tcld_core::source::SourceRef;
 
 pub const DEBUG_IMAGE_SCHEMA: &str = "tcld.debug-image/v1";
-pub const COMPILER_SEMANTICS: &str = "tcld.source-compiler/v1.1-tcl86";
+pub const COMPILER_SEMANTICS: &str = "tcld.source-compiler/v1.17-try-tcl86";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompileMode {
@@ -53,6 +64,12 @@ pub enum DebugCodeUnitKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCommandMap {
+    /// Evaluated arguments are on the operand stack at this Nop boundary.
+    pub trace_pc: u32,
+    pub trace_end_pc: u32,
+    pub trace_argv_count: usize,
+    pub trace_inline: bool,
+    pub trace_word_copies: Vec<(u32, usize)>,
     pub source_span: Range<usize>,
     pub start_line: u32,
     pub end_line: u32,
@@ -93,6 +110,8 @@ pub struct DebugImage {
     pub source: DebugSourceIdentity,
     pub abi: DebugTclAbi,
     pub mode: CompileMode,
+    /// Runtime scripts in a procedure share Tcl's local compilation context.
+    pub procedure_context: bool,
     pub units: Vec<DebugCodeUnit>,
     pub top_level_unit: usize,
 }
@@ -134,6 +153,7 @@ impl DebugImage {
                 self.compiler_semantics,
                 self.mode,
                 &self.source.content,
+                self.procedure_context,
             )
         {
             return Err("debug image identity digest mismatch".into());
@@ -193,6 +213,26 @@ impl DebugImage {
                         map.anchor_pc, unit.logical_id
                     ));
                 }
+                if map.trace_pc <= map.anchor_pc
+                    || map.trace_end_pc <= map.trace_pc
+                    || map.trace_end_pc >= range.end
+                    || map.trace_argv_count == 0
+                    || [map.trace_pc, map.trace_end_pc].iter().any(|pc| {
+                        unit.bytecode.code_bytes.get(*pc as usize) != Some(&(Opcode::Nop as u8))
+                    })
+                    || map.trace_word_copies.iter().any(|(pc, index)| {
+                        *pc <= map.trace_pc
+                            || *pc >= map.trace_end_pc
+                            || *index >= map.trace_argv_count
+                            || unit.bytecode.code_bytes.get(*pc as usize)
+                                != Some(&(Opcode::Nop as u8))
+                    })
+                {
+                    return Err(format!(
+                        "invalid execution trace boundaries in {}",
+                        unit.logical_id
+                    ));
+                }
             }
             for left_index in 0..unit.commands.len() {
                 for right_index in left_index + 1..unit.commands.len() {
@@ -217,7 +257,7 @@ impl DebugImage {
                         || (right_contains && source_right_contains))
                     {
                         return Err(format!(
-                            "command PC overlap is not source-nested in {}",
+                            "command PC overlap is not source-nested in {}: {left:?}, {right:?}",
                             unit.logical_id
                         ));
                     }
@@ -230,6 +270,13 @@ impl DebugImage {
                     || map.source_span.end > unit.source_span.end
                 {
                     return Err(format!("invalid source span in {}", unit.logical_id));
+                }
+                let words = scan_words(&self.source.content[map.source_span.clone()])?;
+                if words.len() != map.trace_argv_count {
+                    return Err(format!(
+                        "execution argument/source disagreement in {}",
+                        unit.logical_id
+                    ));
                 }
                 let (start_line, _) = line_column(&self.source.content, map.source_span.start);
                 let (end_line, _) =
@@ -266,7 +313,7 @@ impl DebugImage {
                 }
             }
         }
-        let spans = tcld_syntax::command_spans(&self.source.content)
+        let spans = source::command_spans(&self.source.content, self.procedure_context)
             .map_err(|error| format!("debug image source cannot be reparsed: {error}"))?;
         let proc_body_ranges = self
             .units
@@ -301,7 +348,8 @@ impl DebugImage {
             let name = words
                 .first()
                 .ok_or_else(|| "empty mapped source command".to_string())
-                .and_then(|word| word_literal(text, word.clone()))?;
+                .and_then(|word| word_literal(text, word.clone()))
+                .unwrap_or_default();
             if name == "proc" && declaration_spans.contains(&(span.start_byte, span.end_byte)) {
                 continue;
             }
@@ -312,7 +360,9 @@ impl DebugImage {
             };
             match command_effect(&name, text, &words, proc_names.contains(qname.as_str())) {
                 CommandEffect::TclScriptOutsideImage(reason) => return Err(reason),
-                CommandEffect::OpaqueWorldHost if self.mode == CompileMode::VmStrict => {
+                CommandEffect::OpaqueWorldHost
+                    if self.mode == CompileMode::VmStrict && is_tcl_builtin_command(&name) =>
+                {
                     return Err(format!(
                         "command {name:?} requires WorldHost and is not admitted by vm-strict"
                     ));
@@ -376,71 +426,49 @@ pub fn compile_source(
     source: String,
     mode: CompileMode,
 ) -> Result<DebugImage, CompileDiagnostic> {
-    let tree = tcld_syntax::parse_tcl(&source).map_err(|error| {
-        diagnostic(
-            &path,
-            &source,
-            0..source.len().min(1),
-            "",
-            error.to_string(),
-        )
-    })?;
-    if tree.root_node().has_error() {
-        let error = first_error_node(tree.root_node()).unwrap_or(tree.root_node());
-        return Err(diagnostic(
-            &path,
-            &source,
-            error.start_byte()
-                ..error
-                    .end_byte()
-                    .max(error.start_byte() + 1)
-                    .min(source.len()),
-            source.get(error.byte_range()).unwrap_or(""),
-            "Tcl syntax is incomplete or malformed".into(),
-        ));
-    }
-    let spans = tcld_syntax::command_spans(&source).map_err(|error| {
-        diagnostic(
-            &path,
-            &source,
-            0..source.len().min(1),
-            "",
-            error.to_string(),
-        )
-    })?;
+    compile_source_in_context(path, source, mode, false)
+}
+
+/// Compile a runtime script without wrapping or changing its source. A local
+/// context permits Tcl's procedure-only loop instructions while retaining the
+/// caller's variable scope and the exact source map.
+pub fn compile_source_in_context(
+    path: PathBuf,
+    source: String,
+    mode: CompileMode,
+    procedure_context: bool,
+) -> Result<DebugImage, CompileDiagnostic> {
+    let spans = source::command_spans(&source, procedure_context)
+        .map_err(|reason| diagnostic(&path, &source, 0..source.len().min(1), "", reason))?;
     let direct_top = direct_commands(&spans, 0..source.len());
-    let mut saw_executable = false;
-    for span in &direct_top {
-        if span.name.as_deref() == Some("proc") {
-            if saw_executable {
-                return Err(diagnostic(
-                    &path,
-                    &source,
-                    span.start_byte..span.end_byte,
-                    &span.text,
-                    "V1 static proc declarations must precede executable top-level commands".into(),
-                ));
-            }
-        } else {
-            saw_executable = true;
-        }
-    }
     let mut proc_decls = Vec::new();
     let mut proc_signatures = std::collections::BTreeMap::new();
     for span in &direct_top {
         if span.name.as_deref() != Some("proc") {
             continue;
         }
-        let decl = parse_proc_decl(&source, span.start_byte..span.end_byte).map_err(|reason| {
-            diagnostic(
-                &path,
-                &source,
-                span.start_byte..span.end_byte,
-                &span.text,
-                reason,
-            )
-        })?;
-        let signature = ProcSignature::from_args(&decl.args)?;
+        let decl = match parse_proc_decl(&source, span.start_byte..span.end_byte) {
+            Ok(decl) => decl,
+            Err(reason) => {
+                let text = &source[span.start_byte..span.end_byte];
+                let words = scan_words(text).unwrap_or_default();
+                if words.len() == 4
+                    && words.iter().all(|w| word_literal(text, w.clone()).is_ok())
+                    && text[words[2].clone()].starts_with('{')
+                    && text[words[3].clone()].starts_with('{')
+                {
+                    return Err(diagnostic(
+                        &path,
+                        &source,
+                        span.start_byte..span.end_byte,
+                        text,
+                        reason,
+                    ));
+                }
+                continue;
+            }
+        };
+        let signature = ProcSignature::from_args(&decl.args);
         if proc_signatures
             .insert(decl.qname.clone(), signature)
             .is_some()
@@ -499,11 +527,9 @@ pub fn compile_source(
         });
     }
 
-    let top = Compiler::new(&path, &source, mode, &proc_signatures, true).compile_unit(
-        &direct_top,
-        0..source.len(),
-        None,
-    )?;
+    let mut compiler = Compiler::new(&path, &source, mode, &proc_signatures, true);
+    compiler.procedure_context = procedure_context;
+    let top = compiler.compile_unit(&direct_top, 0..source.len(), None)?;
     let top_index = units.len();
     units.push(DebugCodeUnit {
         logical_id: "file:toplevel".into(),
@@ -520,7 +546,13 @@ pub fn compile_source(
     let image = DebugImage {
         schema: DEBUG_IMAGE_SCHEMA,
         compiler_semantics: COMPILER_SEMANTICS,
-        image_digest: image_identity_digest(DEBUG_IMAGE_SCHEMA, COMPILER_SEMANTICS, mode, &source),
+        image_digest: image_identity_digest(
+            DEBUG_IMAGE_SCHEMA,
+            COMPILER_SEMANTICS,
+            mode,
+            &source,
+            procedure_context,
+        ),
         source: DebugSourceIdentity {
             path,
             content: Arc::from(source),
@@ -528,6 +560,7 @@ pub fn compile_source(
         },
         abi: DebugTclAbi::Tcl86,
         mode,
+        procedure_context,
         units,
         top_level_unit: top_index,
     };
@@ -541,17 +574,6 @@ pub fn compile_source(
         )
     })?;
     Ok(image)
-}
-
-fn first_error_node(mut node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
-    loop {
-        if node.is_error() || node.is_missing() {
-            return Some(node);
-        }
-        let mut cursor = node.walk();
-        let child = node.children(&mut cursor).find(|child| child.has_error())?;
-        node = child;
-    }
 }
 
 fn direct_commands(
@@ -640,22 +662,71 @@ fn verify_complete_source_maps(
 struct ProcDecl {
     qname: String,
     args_spec: String,
-    args: Vec<String>,
+    args: Vec<ProcArg>,
     body_span: Range<usize>,
+}
+
+/// One formal parameter: its name and, for a `{name default}` pair, the
+/// literal value Tcl binds when a call leaves it out.
+struct ProcArg {
+    name: String,
+    default: Option<String>,
 }
 
 #[derive(Clone, Copy)]
 struct ProcSignature {
-    fixed: usize,
+    /// Arguments every call supplies. Tcl binds positionally, so a parameter
+    /// without a default makes every parameter before it required too.
+    required: usize,
+    /// Parameters before a final variadic `args`.
+    positional: usize,
     variadic: bool,
 }
 impl ProcSignature {
-    fn from_args(args: &[String]) -> Result<Self, CompileDiagnostic> {
-        Ok(Self {
-            fixed: args.len() - usize::from(args.last().is_some_and(|name| name == "args")),
-            variadic: args.last().is_some_and(|name| name == "args"),
-        })
+    fn from_args(args: &[ProcArg]) -> Self {
+        let variadic = args.last().is_some_and(|arg| arg.name == "args");
+        let positional = &args[..args.len() - usize::from(variadic)];
+        Self {
+            required: positional
+                .iter()
+                .rposition(|arg| arg.default.is_none())
+                .map_or(0, |index| index + 1),
+            positional: positional.len(),
+            variadic,
+        }
     }
+
+    fn accepts(&self, supplied: usize) -> bool {
+        supplied >= self.required && (self.variadic || supplied <= self.positional)
+    }
+
+    fn expected(&self) -> String {
+        if self.variadic {
+            format!("{} or more", self.required)
+        } else if self.required == self.positional {
+            self.required.to_string()
+        } else {
+            format!("{} to {}", self.required, self.positional)
+        }
+    }
+}
+
+/// Original (possibly relative) command name, before namespace qualification.
+pub fn procedure_declaration_name(source: &str, span: Range<usize>) -> Result<String, String> {
+    let text = source
+        .get(span)
+        .ok_or("invalid procedure declaration span")?;
+    let words = scan_words(text)?;
+    word_literal(text, words.get(1).cloned().ok_or("missing procedure name")?)
+}
+
+/// The body of a procedure declaration as `info body` reports it.
+pub fn procedure_declaration_body(source: &str, span: Range<usize>) -> Result<String, String> {
+    let text = source
+        .get(span)
+        .ok_or("invalid procedure declaration span")?;
+    let words = scan_words(text)?;
+    word_literal(text, words.get(3).cloned().ok_or("missing procedure body")?)
 }
 
 fn parse_proc_decl(source: &str, span: Range<usize>) -> Result<ProcDecl, String> {
@@ -673,7 +744,7 @@ fn parse_proc_decl(source: &str, span: Range<usize>) -> Result<ProcDecl, String>
         qname = format!("::{qname}");
     }
     let args_spec = braced_literal(text, words[2].clone())?;
-    let args = parse_simple_args(&args_spec)?;
+    let args = parse_proc_args(&args_spec)?;
     let body_local = words[3].clone();
     let _ = braced_literal(text, body_local.clone())?;
     Ok(ProcDecl {
@@ -698,6 +769,16 @@ struct Compiler<'a> {
     literals: Vec<LiteralObject>,
     maps: Vec<VerifiedCommandMap>,
     static_declarations: bool,
+    procedure_context: bool,
+    return_context: Vec<ExceptionType>,
+    captured_words: Vec<(Range<usize>, u32, usize)>,
+    word_copies: Vec<(u32, u32, usize)>,
+    locals: Vec<String>,
+    exceptions: Vec<ExceptionRange>,
+    /// Extra exception nesting for ranges a command opens around a body it
+    /// compiles, beyond the body's source nesting.
+    exception_bias: u32,
+    auxiliaries: Vec<AuxData>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -715,10 +796,59 @@ fn command_effect(
     words: &[Range<usize>],
     is_static_proc: bool,
 ) -> CommandEffect {
-    let name = name.strip_prefix("::").unwrap_or(name);
+    let name = if name.starts_with("::") {
+        name.trim_start_matches(':')
+    } else {
+        name
+    };
+    if name.is_empty() {
+        return CommandEffect::CompilerOwned;
+    }
+    if lists::is_native_command(name) {
+        return CommandEffect::CompilerOwned;
+    }
     if matches!(
         name,
-        "set" | "return" | "expr" | "append" | "lappend" | "incr" | "unset" | "global" | "variable"
+        "set"
+            | "return"
+            | "expr"
+            | "append"
+            | "lappend"
+            | "incr"
+            | "unset"
+            | "global"
+            | "variable"
+            | "if"
+            | "while"
+            | "for"
+            | "foreach"
+            | "catch"
+            | "try"
+            | "switch"
+            | "lmap"
+            | "subst"
+            | "time"
+            | "break"
+            | "continue"
+            | "eval"
+            | "proc"
+            | "source"
+            | "uplevel"
+            | "upvar"
+            | "apply"
+            | "after"
+            | "update"
+            | "vwait"
+            | "trace"
+            | "fileevent"
+            | "coroutine"
+            | "yield"
+            | "yieldto"
+            | "tailcall"
+            | "::tcld::debug_event_ready"
+            | "::tcld::debug_event_dispatch"
+            | "tcld::debug_event_ready"
+            | "tcld::debug_event_dispatch"
     ) || is_static_proc
     {
         return CommandEffect::CompilerOwned;
@@ -728,40 +858,22 @@ fn command_effect(
             "{form} evaluates or schedules Tcl script outside the debug image; V1 cannot guarantee canonical stepping"
         ))
     };
-    let rejects_control = |form: &str| {
-        CommandEffect::TclScriptOutsideImage(format!(
-            "{form} performs control flow outside the debug image; V1 cannot guarantee canonical stepping"
-        ))
-    };
     match name {
-        "source" => CommandEffect::TclScriptOutsideImage(
-            "source loads Tcl script outside the debug image; V1 cannot guarantee canonical stepping"
-                .into(),
-        ),
-        "proc" => CommandEffect::TclScriptOutsideImage(
-            "proc declaration has no compiler-owned activation unit; V1 cannot guarantee canonical stepping"
-                .into(),
-        ),
-        "eval" | "uplevel" | "apply" | "if" | "while" | "for" | "foreach" | "lmap"
-        | "switch" | "catch" | "try" | "time" | "subst" => rejects_script(name),
-        "tailcall" | "coroutine" | "break" | "continue" | "yield" | "yieldto" => {
-            rejects_control(name)
-        }
         "exit" => CommandEffect::TclScriptOutsideImage(
             "exit would terminate the debugger host outside the debug image; V1 does not admit it"
                 .into(),
         ),
         "namespace" => match static_subcommand(text, words) {
-            Some(subcommand)
-                if matches!(
-                    subcommand.as_str(),
-                    "eval" | "inscope" | "code" | "unknown" | "ensemble"
-                ) =>
-            {
+            Some(subcommand) if matches!(subcommand.as_str(), "unknown" | "ensemble") => {
                 rejects_script(&format!("namespace {subcommand}"))
             }
+            Some(subcommand)
+                if matches!(subcommand.as_str(), "eval" | "inscope" | "code" | "current") =>
+            {
+                CommandEffect::CompilerOwned
+            }
             Some(_) => CommandEffect::OpaqueWorldHost,
-            None => rejects_script("namespace with a dynamic subcommand"),
+            None => CommandEffect::CompilerOwned,
         },
         "interp" => match static_subcommand(text, words) {
             Some(subcommand)
@@ -775,31 +887,17 @@ fn command_effect(
             Some(_) => CommandEffect::OpaqueWorldHost,
             None => rejects_script("interp with a dynamic subcommand"),
         },
-        "dict" => match static_subcommand(text, words) {
-            Some(subcommand)
-                if matches!(
-                    subcommand.as_str(),
-                    "for" | "map" | "update" | "with" | "filter"
-                ) =>
-            {
-                rejects_script(&format!("dict {subcommand}"))
-            }
-            Some(_) => CommandEffect::OpaqueWorldHost,
-            None => rejects_script("dict with a dynamic subcommand"),
+        // The VM runs every `dict` form but `info`, which reports Tcl's own
+        // hash table; the forms that evaluate a script are deferred.
+        "dict" => match static_subcommand(text, words)
+            .as_deref()
+            .and_then(dict_subcommand)
+        {
+            Some("info") => CommandEffect::OpaqueWorldHost,
+            _ => CommandEffect::CompilerOwned,
         },
-        "after" => match static_subcommand(text, words) {
-            Some(subcommand)
-                if subcommand == "idle"
-                    || (subcommand.parse::<u64>().is_ok() && words.len() > 2) =>
-            {
-                rejects_script("after callback")
-            }
-            Some(_) => CommandEffect::OpaqueWorldHost,
-            None => rejects_script("after with a dynamic callback form"),
-        },
-        "trace" | "fileevent" | "vwait" | "update" | "bind" | "oo::define"
-        | "oo::objdefine" | "unknown" | "auto_load" | "auto_import" | "timerate"
-        | "history" => rejects_script(name),
+        "bind" | "oo::define" | "oo::objdefine" | "unknown" | "auto_load" | "auto_import"
+        | "timerate" | "history" => rejects_script(name),
         "oo::class" => match static_subcommand(text, words) {
             Some(subcommand) if matches!(subcommand.as_str(), "create" | "new") => {
                 rejects_script(&format!("oo::class {subcommand}"))
@@ -824,48 +922,330 @@ fn command_effect(
             None => rejects_script("package with a dynamic subcommand"),
         },
         "socket" => {
-            if words.iter().skip(1).any(|word| {
-                word_literal(text, word.clone())
-                    .ok()
-                    .as_deref()
-                    == Some("-server")
-            }) {
+            if words
+                .iter()
+                .skip(1)
+                .any(|word| word_literal(text, word.clone()).ok().as_deref() == Some("-server"))
+            {
                 rejects_script("socket -server")
             } else {
                 CommandEffect::OpaqueWorldHost
             }
         }
-        "lsort" => {
-            if words.iter().skip(1).any(|word| {
-                word_literal(text, word.clone())
-                    .ok()
-                    .as_deref()
-                    == Some("-command")
-            }) {
-                rejects_script("lsort -command")
-            } else {
+        "lsort" => CommandEffect::CompilerOwned,
+        // vm-strict writes stdout and stderr itself; any other channel is
+        // Tcl's.
+        "puts" => match puts_channel(text, words) {
+            Some(channel) if channel != "stdout" && channel != "stderr" => {
                 CommandEffect::OpaqueWorldHost
             }
-        }
-        "fcopy" | "regsub" => {
-            if words.iter().skip(1).any(|word| {
-                word_literal(text, word.clone())
-                    .ok()
-                    .as_deref()
-                    == Some("-command")
-            }) {
+            _ => CommandEffect::CompilerOwned,
+        },
+        "info" => match static_subcommand(text, words)
+            .as_deref()
+            .and_then(info_subcommand)
+        {
+            Some("exists" | "commands" | "procs" | "body" | "args" | "level") => {
+                CommandEffect::CompilerOwned
+            }
+            _ => CommandEffect::OpaqueWorldHost,
+        },
+        "rename" => CommandEffect::CompilerOwned,
+        "lsearch" | "regexp" | "regsub" | "string" => CommandEffect::CompilerOwned,
+        "clock" if clock_reading(text, words).is_some() => CommandEffect::CompilerOwned,
+        "fcopy" => {
+            if words
+                .iter()
+                .skip(1)
+                .any(|word| word_literal(text, word.clone()).ok().as_deref() == Some("-command"))
+            {
                 rejects_script(&format!("{name} -command"))
             } else {
                 CommandEffect::OpaqueWorldHost
             }
         }
         "chan" => match static_subcommand(text, words) {
-            Some(subcommand) if subcommand == "event" => rejects_script("chan event"),
+            Some(subcommand) if subcommand == "event" => CommandEffect::CompilerOwned,
             Some(_) => CommandEffect::OpaqueWorldHost,
-            None => rejects_script("chan with a dynamic subcommand"),
+            None => CommandEffect::CompilerOwned,
         },
         _ => CommandEffect::OpaqueWorldHost,
     }
+}
+
+/// The channel a `puts` command writes to (`Tcl_PutsObjCmd`): `stdout` when
+/// it names none, and `None` when a computed word decides or the command is
+/// a usage error.
+fn puts_channel(text: &str, words: &[Range<usize>]) -> Option<String> {
+    if words.iter().any(|word| expanded_word(&text[word.clone()])) {
+        return None;
+    }
+    let literal = |index: usize| word_literal(text, words[index].clone()).ok();
+    match words.len() {
+        2 => Some("stdout".into()),
+        3 => match literal(1)? {
+            first if first == "-nonewline" => Some("stdout".into()),
+            channel => Some(channel),
+        },
+        4 if literal(1)? == "-nonewline" => literal(2),
+        _ => None,
+    }
+}
+
+/// The `info` subcommand a word names: an exact subcommand or a unique prefix
+/// (`defaultInfoMap`).
+fn info_subcommand(name: &str) -> Option<&'static str> {
+    unique_prefix(
+        &[
+            "args",
+            "body",
+            "cmdcount",
+            "cmdtype",
+            "commands",
+            "complete",
+            "constant",
+            "consts",
+            "coroutine",
+            "default",
+            "errorstack",
+            "exists",
+            "frame",
+            "functions",
+            "globals",
+            "hostname",
+            "level",
+            "library",
+            "loaded",
+            "locals",
+            "nameofexecutable",
+            "patchlevel",
+            "procs",
+            "script",
+            "sharedlibextension",
+            "tclversion",
+            "vars",
+        ],
+        name,
+    )
+}
+
+/// Tcl's dictionary ensemble accepts unambiguous subcommand prefixes. Use
+/// the complete upstream subcommand set before classifying executable bodies.
+pub fn dict_subcommand(name: &str) -> Option<&'static str> {
+    let commands = [
+        "append",
+        "create",
+        "exists",
+        "filter",
+        "for",
+        "get",
+        "getdef",
+        "getwithdefault",
+        "incr",
+        "info",
+        "keys",
+        "lappend",
+        "map",
+        "merge",
+        "remove",
+        "replace",
+        "set",
+        "size",
+        "unset",
+        "update",
+        "values",
+        "with",
+    ];
+    unique_prefix(&commands, name)
+}
+
+/// Tcl's `Tcl_GetIndexFromObj` rule: an exact entry, or a prefix of exactly
+/// one entry.
+fn unique_prefix(table: &[&'static str], name: &str) -> Option<&'static str> {
+    if let Some(exact) = table.iter().find(|s| **s == name) {
+        return Some(exact);
+    }
+    let mut matches = table
+        .iter()
+        .filter(|s| !name.is_empty() && s.starts_with(name));
+    let first = matches.next()?;
+    if matches.next().is_none() {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+/// The `clockRead` selector for a `clock` reading Tcl compiles
+/// (`TclCompileClockReadingCmd`, `TclCompileClockClicksCmd`).
+fn clock_reading(text: &str, words: &[Range<usize>]) -> Option<u32> {
+    if words.iter().any(|word| expanded_word(&text[word.clone()])) {
+        return None;
+    }
+    match (static_subcommand(text, words)?.as_str(), words.len()) {
+        ("clicks", 2) => Some(0),
+        ("microseconds", 2) => Some(1),
+        ("milliseconds", 2) => Some(2),
+        ("seconds", 2) => Some(3),
+        ("clicks", 3) => {
+            let flag = word_literal(text, words[2].clone()).ok()?;
+            if !(4..=13).contains(&flag.len()) {
+                None
+            } else if "-microseconds".starts_with(&flag) {
+                Some(1)
+            } else if "-milliseconds".starts_with(&flag) {
+                Some(2)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Tcl's flag for an unnamed compiler temporary in a local variable table.
+pub const VAR_TEMPORARY: i32 = 0x200;
+
+/// Tcl 9's global commands (`info commands`), with the library procedures it
+/// loads on demand, sorted.
+const TCL_BUILTIN_COMMANDS: &[&str] = &[
+    "after",
+    "append",
+    "apply",
+    "array",
+    "auto_execok",
+    "auto_import",
+    "auto_load",
+    "auto_load_index",
+    "auto_mkindex",
+    "auto_mkindex_old",
+    "auto_qualify",
+    "auto_reset",
+    "binary",
+    "break",
+    "catch",
+    "cd",
+    "chan",
+    "clock",
+    "close",
+    "concat",
+    "const",
+    "continue",
+    "coroinject",
+    "coroprobe",
+    "coroutine",
+    "dict",
+    "encoding",
+    "eof",
+    "error",
+    "eval",
+    "exec",
+    "exit",
+    "expr",
+    "fblocked",
+    "fconfigure",
+    "fcopy",
+    "file",
+    "fileevent",
+    "flush",
+    "for",
+    "foreach",
+    "foreachLine",
+    "format",
+    "fpclassify",
+    "gets",
+    "glob",
+    "global",
+    "history",
+    "if",
+    "incr",
+    "info",
+    "interp",
+    "join",
+    "lappend",
+    "lassign",
+    "ledit",
+    "lindex",
+    "linsert",
+    "list",
+    "llength",
+    "lmap",
+    "load",
+    "lpop",
+    "lrange",
+    "lremove",
+    "lrepeat",
+    "lreplace",
+    "lreverse",
+    "lsearch",
+    "lseq",
+    "lset",
+    "lsort",
+    "namespace",
+    "open",
+    "package",
+    "parray",
+    "pid",
+    "pkg_mkIndex",
+    "proc",
+    "puts",
+    "pwd",
+    "read",
+    "readFile",
+    "regexp",
+    "regsub",
+    "rename",
+    "return",
+    "scan",
+    "seek",
+    "set",
+    "socket",
+    "source",
+    "split",
+    "string",
+    "subst",
+    "switch",
+    "tailcall",
+    "tclLog",
+    "tclPkgSetup",
+    "tclPkgUnknown",
+    "tcl_endOfWord",
+    "tcl_findLibrary",
+    "tcl_startOfNextWord",
+    "tcl_startOfPreviousWord",
+    "tcl_wordBreakAfter",
+    "tcl_wordBreakBefore",
+    "tell",
+    "throw",
+    "time",
+    "timerate",
+    "trace",
+    "try",
+    "unknown",
+    "unload",
+    "unset",
+    "update",
+    "uplevel",
+    "upvar",
+    "variable",
+    "vwait",
+    "while",
+    "writeFile",
+    "yield",
+    "yieldto",
+    "zipfs",
+    "zlib",
+];
+
+/// Whether `name` is a command the Tcl host provides. In vm-strict any other
+/// command outside the image may be a procedure the program creates at
+/// runtime, so it is resolved when it runs.
+pub fn is_tcl_builtin_command(name: &str) -> bool {
+    let name = name.strip_prefix("::").unwrap_or(name);
+    TCL_BUILTIN_COMMANDS.binary_search(&name).is_ok()
+        || ["tcl::", "oo::", "zlib::"]
+            .iter()
+            .any(|namespace| name.starts_with(namespace))
 }
 
 fn static_subcommand(text: &str, words: &[Range<usize>]) -> Option<String> {
@@ -891,6 +1271,14 @@ impl<'a> Compiler<'a> {
             literals: Vec::new(),
             maps: Vec::new(),
             static_declarations,
+            procedure_context: false,
+            return_context: Vec::new(),
+            captured_words: Vec::new(),
+            word_copies: Vec::new(),
+            locals: Vec::new(),
+            exceptions: Vec::new(),
+            exception_bias: 0,
+            auxiliaries: Vec::new(),
         }
     }
 
@@ -900,6 +1288,19 @@ impl<'a> Compiler<'a> {
         unit_span: Range<usize>,
         args_spec: Option<&str>,
     ) -> Result<CompiledUnit, CompileDiagnostic> {
+        self.procedure_context |= args_spec.is_some();
+        let (names, defaults): (Vec<_>, Vec<_>) = args_spec
+            .map(parse_proc_args)
+            .transpose()
+            .map_err(|reason| {
+                diagnostic(self.path, self.source, unit_span.clone(), "proc", reason)
+            })?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|arg| (arg.name, arg.default))
+            .unzip();
+        self.locals = names;
+        let argument_count = self.locals.len();
         for (index, command) in commands.iter().enumerate() {
             self.compile_command(command.start_byte..command.end_byte, 0)?;
             if index + 1 != commands.len() {
@@ -922,22 +1323,25 @@ impl<'a> Compiler<'a> {
                 .pc_range
                 .end = self.code.len() as u32;
         }
-        let locals = args_spec
-            .map(parse_simple_args)
-            .transpose()
-            .map_err(|reason| {
-                diagnostic(self.path, self.source, unit_span.clone(), "proc", reason)
-            })?
-            .unwrap_or_default()
-            .into_iter()
-            .enumerate()
-            .map(|(index, name)| CompiledLocal {
-                name,
-                default_value: None,
-                frame_index: index as i32,
-                flag_mask: 0,
-            })
-            .collect::<Vec<_>>();
+        let locals =
+            self.locals
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| (index, name.is_empty(), name))
+                .map(|(index, name_is_temporary, name)| CompiledLocal {
+                    name,
+                    // The VM binds these when a call leaves the argument out.
+                    default_value: defaults.get(index).cloned().flatten().map(|value| {
+                        LiteralObject {
+                            kind: LiteralObjectType::XString,
+                            value: SourceRef::Shared(value.into()),
+                            proc_body: None,
+                        }
+                    }),
+                    frame_index: index as i32,
+                    flag_mask: if name_is_temporary { VAR_TEMPORARY } else { 0 },
+                })
+                .collect::<Vec<_>>();
         let cmd_code_ranges = self
             .maps
             .iter()
@@ -955,10 +1359,15 @@ impl<'a> Compiler<'a> {
                 num_src_bytes: self.source.len() as i32,
                 num_code_bytes: self.code.len() as i32,
                 num_lit_objects: self.literals.len() as i32,
-                num_except_ranges: 0,
-                num_aux_data_items: 0,
+                num_except_ranges: self.exceptions.len() as i32,
+                num_aux_data_items: self.auxiliaries.len() as i32,
                 num_cmd_loc_bytes: 0,
-                max_except_depth: 0,
+                max_except_depth: self
+                    .exceptions
+                    .iter()
+                    .map(|e| e.nesting_level + 1)
+                    .max()
+                    .unwrap_or(0),
                 max_stack_depth: 64,
                 code_delta_size: 0,
                 code_length_size: 0,
@@ -969,9 +1378,9 @@ impl<'a> Compiler<'a> {
             cmd_code_ranges,
             cmd_source_ranges: Some(cmd_source_ranges),
             literals: self.literals,
-            exceptions: vec![],
-            auxiliaries: vec![],
-            proc_num_args: locals.len() as i32,
+            exceptions: self.exceptions,
+            auxiliaries: self.auxiliaries,
+            proc_num_args: argument_count as i32,
             proc_num_locals: locals.len() as i32,
             locals,
         };
@@ -1003,10 +1412,73 @@ impl<'a> Compiler<'a> {
         // is intentionally used instead of Tcl's 9-byte StartCmd opcode so
         // the image map does not need to synthesize private compiler operands.
         self.emit(Opcode::Nop);
-        let name = word_literal(text, words[0].clone())
-            .map_err(|reason| diagnostic(self.path, self.source, span.clone(), text, reason))?;
-        if name == "proc" {
-            if !self.static_declarations {
+        let name = word_literal(text, words[0].clone()).unwrap_or_default();
+        let deferred = runtime_command(
+            text,
+            &words,
+            nesting_depth,
+            self.static_declarations,
+            self.proc_signature(&name).is_some(),
+            self.procedure_context,
+        );
+        if deferred && self.mode == CompileMode::VmStrict && !vm_runtime_command(text, &words) {
+            return Err(diagnostic(
+                self.path,
+                self.source,
+                span,
+                text,
+                format!("{name:?} runs script through the Tcl host and requires hybrid mode"),
+            ));
+        }
+        let builtin = (!deferred && self.proc_signature(&name).is_none())
+            .then(|| name.strip_prefix("::").unwrap_or(&name));
+        let string_form = (builtin == Some("string"))
+            .then(|| strings::string_form(text, &words))
+            .flatten();
+        let dict_form = (builtin == Some("dict"))
+            .then(|| dicts::dict_form(text, &words))
+            .flatten();
+        let clock = (builtin == Some("clock"))
+            .then(|| clock_reading(text, &words))
+            .flatten();
+        let list_form = builtin.and_then(|name| lists::list_form(name, text, &words));
+        let trace_inline = !deferred
+            && (string_form.is_some()
+                || dict_form.is_some()
+                || clock.is_some()
+                || list_form.is_some()
+                || matches!(
+                    name.as_str(),
+                    "proc"
+                        | "if"
+                        | "while"
+                        | "for"
+                        | "foreach"
+                        | "catch"
+                        | "break"
+                        | "continue"
+                        | "expr"
+                        | "return"
+                )
+                || builtin == Some("lmap"));
+        let captured_start = self.captured_words.len();
+        let mut trace_pc = 0;
+        if trace_inline {
+            for word in &words {
+                self.compile_word(text, word.clone(), span.start, nesting_depth)?;
+            }
+            self.emit_arg(Opcode::List, words.len() as u32);
+            trace_pc = self.code.len() as u32;
+            self.emit(Opcode::Nop);
+            self.captured_words.extend(
+                words
+                    .iter()
+                    .enumerate()
+                    .map(|(i, w)| (span.start + w.start..span.start + w.end, anchor, i)),
+            );
+        }
+        if name == "proc" && !deferred {
+            if !self.static_declarations || nesting_depth != 0 {
                 return Err(diagnostic(
                     self.path,
                     self.source,
@@ -1018,7 +1490,20 @@ impl<'a> Compiler<'a> {
             self.push_literal("");
             let (line, _) = line_column(self.source, span.start);
             let (end_line, _) = line_column(self.source, span.end.saturating_sub(1));
+            let trace_end_pc = self.code.len() as u32;
+            self.emit(Opcode::Nop);
+            self.captured_words.truncate(captured_start);
             self.maps.push(VerifiedCommandMap {
+                trace_pc,
+                trace_end_pc,
+                trace_argv_count: words.len(),
+                trace_inline,
+                trace_word_copies: self
+                    .word_copies
+                    .iter()
+                    .filter(|(_, a, _)| *a == anchor)
+                    .map(|(pc, _, i)| (*pc, *i))
+                    .collect(),
                 source_span: span,
                 start_line: line,
                 end_line,
@@ -1038,7 +1523,10 @@ impl<'a> Compiler<'a> {
                 reason.clone(),
             ));
         }
-        if self.mode == CompileMode::VmStrict && effect == CommandEffect::OpaqueWorldHost {
+        if self.mode == CompileMode::VmStrict
+            && effect == CommandEffect::OpaqueWorldHost
+            && is_tcl_builtin_command(&name)
+        {
             return Err(diagnostic(
                 self.path,
                 self.source,
@@ -1047,73 +1535,152 @@ impl<'a> Compiler<'a> {
                 format!("command {name:?} requires WorldHost and is not admitted by vm-strict"),
             ));
         }
-        if let Some(signature) = self.proc_signature(&name) {
+        let expanded = words.iter().any(|w| expanded_word(&text[w.clone()]));
+        if let Some(signature) = self.proc_signature(&name).filter(|_| !expanded) {
             let supplied = words.len() - 1;
-            if supplied < signature.fixed || (!signature.variadic && supplied != signature.fixed) {
+            if !signature.accepts(supplied) {
                 return Err(diagnostic(
                     self.path,
                     self.source,
                     span,
                     text,
                     format!(
-                        "wrong # args for {name}: expected {}{}, got {supplied}",
-                        signature.fixed,
-                        if signature.variadic { " or more" } else { "" }
+                        "wrong # args for {name}: expected {}, got {supplied}",
+                        signature.expected()
                     ),
                 ));
             }
         }
-        if name == "expr" {
-            self.compile_expr(text, &words, span.clone())?;
-        } else if name == "return" {
-            let (options, result_word) = match words.len() {
-                1 => ("-code 0 -level 1".to_string(), None),
-                2 => ("-code 0 -level 1".to_string(), Some(words[1].clone())),
-                4 if word_literal(text, words[1].clone()).ok().as_deref() == Some("-code") => {
-                    let code = word_literal(text, words[2].clone()).map_err(|reason| {
-                        diagnostic(self.path, self.source, span.clone(), text, reason)
-                    })?;
-                    if !matches!(
-                        code.as_str(),
-                        "ok" | "error" | "return" | "break" | "continue"
-                    ) && code.parse::<i32>().is_err()
-                    {
-                        return Err(diagnostic(
-                            self.path,
-                            self.source,
-                            span,
-                            text,
-                            format!("unsupported return code {code:?}"),
-                        ));
-                    }
-                    (format!("-code {code} -level 1"), Some(words[3].clone()))
+        // Deferred commands, and native commands taking expanded words,
+        // invoke the command with its final argument list.
+        if deferred || expanded {
+            if expanded {
+                self.emit(Opcode::ExpandStart);
+            }
+            for word in &words {
+                let expand = expanded_word(&text[word.clone()]);
+                let start = word.start + if expand { 3 } else { 0 };
+                self.compile_word(text, start..word.end, span.start, nesting_depth)?;
+                if expand {
+                    self.emit_arg(Opcode::ExpandStktop, words.len() as u32);
                 }
-                _ => {
-                    return Err(diagnostic(
-                        self.path,
-                        self.source,
-                        span,
-                        text,
-                        "V1 return accepts `return ?-code code? ?result?`".into(),
-                    ));
-                }
-            };
-            self.push_literal(&options);
-            if let Some(word) = result_word {
-                self.compile_word(text, word, span.start, nesting_depth)?;
+            }
+            trace_pc = self.code.len() as u32;
+            self.emit(Opcode::Nop);
+            if expanded {
+                self.emit(Opcode::InvokeExpanded);
             } else {
-                self.push_literal("");
+                self.emit_arg(Opcode::InvokeStk1, words.len() as u32);
+            }
+        } else if matches!(name.as_str(), "if" | "while" | "for" | "foreach" | "catch")
+            || builtin == Some("lmap")
+        {
+            self.compile_control(
+                if builtin == Some("lmap") {
+                    "lmap"
+                } else {
+                    &name
+                },
+                text,
+                &words,
+                span.clone(),
+                nesting_depth,
+            )?;
+        } else if matches!(name.as_str(), "break" | "continue") {
+            if words.len() != 1 {
+                return Err(diagnostic(
+                    self.path,
+                    self.source,
+                    span,
+                    text,
+                    "break/continue take no arguments".into(),
+                ));
+            }
+            self.emit(if name == "break" {
+                Opcode::Break
+            } else {
+                Opcode::Continue
+            });
+        } else if let Some(form) = &string_form {
+            self.compile_string_form(form, text, &words, span.start, nesting_depth)?;
+        } else if let Some(form) = &dict_form {
+            self.compile_dict_form(form, text, &words, span.start, nesting_depth)?;
+        } else if let Some(selector) = clock {
+            self.emit_arg(Opcode::ClockRead, selector);
+        } else if let Some(form) = list_form {
+            self.compile_list_form(form, text, &words, span.start, nesting_depth)?;
+        } else if name == "expr" {
+            self.compile_expression_command(text, &words, span.clone(), nesting_depth)?;
+            self.emit(Opcode::Nop);
+        } else if name == "return"
+            && self.return_context.last() == Some(&ExceptionType::Loop)
+            && let Some(opcode) = control::static_loop_return(text, &words)
+        {
+            // Tcl's CompileReturnInternal discards static return options when
+            // it can branch straight to an enclosing loop's break/continue.
+            if words.len().is_multiple_of(2) {
+                self.compile_word(
+                    text,
+                    words.last().unwrap().clone(),
+                    span.start,
+                    nesting_depth,
+                )?;
+                self.emit(Opcode::Pop);
+            }
+            self.emit(opcode);
+        } else if name == "return" {
+            if words.len() == 4
+                && word_literal(text, words[1].clone()).ok().as_deref() == Some("-options")
+            {
+                // Tcl's dedicated return-options form feeds the dictionary
+                // directly to returnStk, preserving its dictionary diagnostics.
+                self.compile_word(text, words[2].clone(), span.start, nesting_depth)?;
+                self.compile_word(text, words[3].clone(), span.start, nesting_depth)?;
+            } else {
+                // Tcl uses word-count parity, rather than an option whitelist or
+                // `--`, to separate option pairs from the optional final result.
+                let explicit_result = words.len().is_multiple_of(2);
+                let option_end = words.len() - usize::from(explicit_result);
+                for word in &words[1..option_end] {
+                    self.compile_word(text, word.clone(), span.start, nesting_depth)?;
+                }
+                self.emit_arg(Opcode::List, (option_end - 1) as u32);
+                if explicit_result {
+                    self.compile_word(
+                        text,
+                        words.last().unwrap().clone(),
+                        span.start,
+                        nesting_depth,
+                    )?;
+                } else {
+                    self.push_literal("");
+                }
             }
             self.emit(Opcode::ReturnStk);
         } else {
             for word in &words {
                 self.compile_word(text, word.clone(), span.start, nesting_depth)?;
             }
+            trace_pc = self.code.len() as u32;
+            self.emit(Opcode::Nop);
             self.emit_arg(Opcode::InvokeStk1, words.len() as u32);
         }
+        let trace_end_pc = self.code.len() as u32;
+        self.emit(Opcode::Nop);
+        self.captured_words.truncate(captured_start);
         let (line, _) = line_column(self.source, span.start);
         let (end_line, _) = line_column(self.source, span.end.saturating_sub(1));
         self.maps.push(VerifiedCommandMap {
+            trace_pc,
+            trace_end_pc,
+            trace_argv_count: words.len(),
+            trace_inline,
+            trace_word_copies: self
+                .word_copies
+                .iter()
+                .filter(|(_, a, _)| *a == anchor)
+                .map(|(pc, _, i)| (*pc, *i))
+                .collect(),
             source_span: span,
             start_line: line,
             end_line,
@@ -1124,101 +1691,15 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    fn exception_level(&self, depth: u32) -> i32 {
+        (depth + self.exception_bias) as i32
+    }
+
     fn proc_signature(&self, name: &str) -> Option<ProcSignature> {
         self.proc_signatures
             .get(name)
             .copied()
             .or_else(|| self.proc_signatures.get(&format!("::{name}")).copied())
-    }
-
-    fn compile_expr(
-        &mut self,
-        text: &str,
-        words: &[Range<usize>],
-        span: Range<usize>,
-    ) -> Result<(), CompileDiagnostic> {
-        if words.len() != 2 {
-            return Err(diagnostic(
-                self.path,
-                self.source,
-                span,
-                text,
-                "V1 expr requires one braced expression".into(),
-            ));
-        }
-        let expr = braced_literal(text, words[1].clone())
-            .map_err(|reason| diagnostic(self.path, self.source, span.clone(), text, reason))?;
-        let parts = expr.split_whitespace().collect::<Vec<_>>();
-        if parts.len() == 1 {
-            self.compile_expr_atom(parts[0], span, text)?;
-            return Ok(());
-        }
-        if parts.len() != 3 {
-            return Err(diagnostic(
-                self.path,
-                self.source,
-                span,
-                text,
-                "V1 expr supports an atom or binary expression with spaces".into(),
-            ));
-        }
-        self.compile_expr_atom(parts[0], span.clone(), text)?;
-        self.compile_expr_atom(parts[2], span.clone(), text)?;
-        let opcode = match parts[1] {
-            "+" => Opcode::Add,
-            "-" => Opcode::Sub,
-            "*" => Opcode::Mult,
-            "/" => Opcode::Div,
-            "==" => Opcode::Eq,
-            "!=" => Opcode::Neq,
-            "<" => Opcode::Lt,
-            ">" => Opcode::Gt,
-            "<=" => Opcode::Le,
-            ">=" => Opcode::Ge,
-            other => {
-                return Err(diagnostic(
-                    self.path,
-                    self.source,
-                    span,
-                    text,
-                    format!("unsupported V1 expr operator {other:?}"),
-                ));
-            }
-        };
-        self.emit(opcode);
-        Ok(())
-    }
-
-    fn compile_expr_atom(
-        &mut self,
-        atom: &str,
-        span: Range<usize>,
-        command: &str,
-    ) -> Result<(), CompileDiagnostic> {
-        if let Some(name) = atom.strip_prefix('$') {
-            if !valid_var_name(name) {
-                return Err(diagnostic(
-                    self.path,
-                    self.source,
-                    span,
-                    command,
-                    "unsupported expr variable".into(),
-                ));
-            }
-            self.push_literal(name);
-            self.emit(Opcode::LoadScalarStk);
-        } else if atom.parse::<i64>().is_ok() {
-            self.push_literal(atom);
-        } else {
-            return Err(diagnostic(
-                self.path,
-                self.source,
-                span,
-                command,
-                format!("unsupported expr atom {atom:?}"),
-            ));
-        }
-        Ok(())
     }
 
     fn compile_word(
@@ -1228,6 +1709,19 @@ impl<'a> Compiler<'a> {
         command_start: usize,
         nesting_depth: u32,
     ) -> Result<(), CompileDiagnostic> {
+        let absolute = command_start + word.start..command_start + word.end;
+        if let Some((_, anchor, index)) = self
+            .captured_words
+            .iter()
+            .rev()
+            .find(|(span, _, _)| *span == absolute)
+            .cloned()
+        {
+            let pc = self.code.len() as u32;
+            self.emit(Opcode::Nop);
+            self.word_copies.push((pc, anchor, index));
+            return Ok(());
+        }
         let raw = &command[word.clone()];
         if raw.starts_with('{') {
             let value = braced_literal(command, word).map_err(|reason| {
@@ -1254,34 +1748,59 @@ impl<'a> Compiler<'a> {
         while cursor < bytes.len() {
             match bytes[cursor] {
                 b'\\' => {
-                    return Err(diagnostic(
-                        self.path,
-                        self.source,
-                        inner_base + cursor..inner_base + cursor + 1,
-                        command,
-                        "backslash substitution is not admitted by V1".into(),
-                    ));
-                }
-                b'$' => {
                     if literal_start < cursor {
                         self.push_literal(&inner[literal_start..cursor]);
                         pieces += 1;
                     }
-                    let end = variable_end(inner, cursor + 1);
-                    let name = &inner[cursor + 1..end];
-                    if !valid_var_name(name) {
-                        return Err(diagnostic(
+                    let (value, end) = backslash(inner, cursor).map_err(|reason| {
+                        diagnostic(
                             self.path,
                             self.source,
-                            inner_base + cursor..inner_base + end,
+                            inner_base + cursor..inner_base + cursor + 1,
                             command,
-                            "unsupported scalar substitution".into(),
-                        ));
-                    }
-                    self.push_literal(name);
-                    self.emit(Opcode::LoadScalarStk);
+                            reason,
+                        )
+                    })?;
+                    self.push_literal(&value);
                     pieces += 1;
                     cursor = end;
+                    literal_start = cursor;
+                }
+                b'$' => {
+                    let reference = words::variable(inner, cursor).map_err(|reason| {
+                        diagnostic(
+                            self.path,
+                            self.source,
+                            inner_base + cursor..inner_base + inner.len(),
+                            command,
+                            reason,
+                        )
+                    })?;
+                    // A `$` that starts no variable name is an ordinary character.
+                    let Some(reference) = reference else {
+                        cursor += 1;
+                        continue;
+                    };
+                    if literal_start < cursor {
+                        self.push_literal(&inner[literal_start..cursor]);
+                        pieces += 1;
+                    }
+                    self.push_literal(&inner[reference.name.clone()]);
+                    match reference.index {
+                        Some(index) => {
+                            let offset = inner_base - command_start;
+                            self.compile_word(
+                                command,
+                                offset + index.start..offset + index.end,
+                                command_start,
+                                nesting_depth,
+                            )?;
+                            self.emit(Opcode::LoadArrayStk);
+                        }
+                        None => self.emit(Opcode::LoadStk),
+                    }
+                    cursor = reference.end;
+                    pieces += 1;
                     literal_start = cursor;
                 }
                 b'[' => {
@@ -1289,26 +1808,17 @@ impl<'a> Compiler<'a> {
                         self.push_literal(&inner[literal_start..cursor]);
                         pieces += 1;
                     }
-                    let close = matching_bracket(inner, cursor).ok_or_else(|| {
+                    let close = matching_bracket(inner, cursor).map_err(|reason| {
                         diagnostic(
                             self.path,
                             self.source,
                             inner_base + cursor..inner_base + inner.len(),
                             command,
-                            "unterminated command substitution".into(),
+                            reason,
                         )
                     })?;
                     let nested_span = inner_base + cursor + 1..inner_base + close;
-                    if has_top_level_separator(&self.source[nested_span.clone()]) {
-                        return Err(diagnostic(
-                            self.path,
-                            self.source,
-                            nested_span,
-                            command,
-                            "V1 command substitution must contain exactly one command".into(),
-                        ));
-                    }
-                    self.compile_command(nested_span, nesting_depth + 1)?;
+                    self.compile_script(nested_span, nesting_depth + 1)?;
                     pieces += 1;
                     cursor = close + 1;
                     literal_start = cursor;
@@ -1345,18 +1855,21 @@ impl<'a> Compiler<'a> {
         self.code.push(opcode_byte(opcode));
     }
     fn emit_arg(&mut self, opcode: Opcode, arg: u32) {
+        self.emit_args(opcode, &[arg]);
+    }
+    fn emit_args(&mut self, opcode: Opcode, args: &[u32]) {
         self.emit(opcode);
-        let size = TCL_86_OPCODE_TABLE
+        let operands = TCL_86_OPCODE_TABLE
             .iter()
             .position(|candidate| *candidate == opcode)
             .and_then(|index| tcld_core::inst_table::TCL_86_INSTRUCTION_TABLE.get(index))
-            .and_then(|desc| desc.operands.first())
-            .map(|op| op.mem_size())
-            .unwrap_or(0);
-        if size == 1 {
-            self.code.push(arg as u8);
-        } else {
-            self.code.extend_from_slice(&arg.to_be_bytes());
+            .map_or(&[][..], |desc| desc.operands);
+        for (index, arg) in args.iter().enumerate() {
+            if operands.get(index).map(|op| op.mem_size()) == Some(1) {
+                self.code.push(*arg as u8);
+            } else {
+                self.code.extend_from_slice(&arg.to_be_bytes());
+            }
         }
     }
 }
@@ -1368,167 +1881,211 @@ fn opcode_byte(opcode: Opcode) -> u8 {
         .expect("Tcl 8.6 opcode") as u8
 }
 
-fn parse_simple_args(spec: &str) -> Result<Vec<String>, String> {
-    let words = scan_words(spec)?;
-    let args = words
+/// Parse a proc's argument list the way Tcl does: a list whose elements are
+/// a name or a `{name default}` pair. Defaults stay literal text.
+fn parse_proc_args(spec: &str) -> Result<Vec<ProcArg>, String> {
+    let args = list_elements(spec)?
         .into_iter()
-        .map(|span| {
-            let name = word_literal(spec, span)?;
-            if !valid_var_name(&name) {
-                Err(format!("V1 proc argument {name:?} is not a simple scalar"))
-            } else {
-                Ok(name)
+        .map(|specifier| {
+            let mut fields = list_elements(&specifier)?.into_iter();
+            let name = fields.next().ok_or("argument with no name")?;
+            let default = fields.next();
+            if fields.next().is_some() {
+                return Err(format!(
+                    "too many fields in argument specifier {specifier:?}"
+                ));
             }
+            if !valid_var_name(&name) {
+                return Err(format!("V1 proc argument {name:?} is not a simple scalar"));
+            }
+            Ok(ProcArg { name, default })
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, String>>()?;
     let mut unique = std::collections::BTreeSet::new();
-    for (index, name) in args.iter().enumerate() {
-        if !unique.insert(name.as_str()) {
-            return Err(format!("duplicate proc argument {name:?}"));
+    for (index, arg) in args.iter().enumerate() {
+        if !unique.insert(arg.name.as_str()) {
+            return Err(format!("duplicate proc argument {:?}", arg.name));
         }
-        if name == "args" && index + 1 != args.len() {
+        if arg.name == "args" && index + 1 != args.len() {
             return Err("variadic `args` must be the final proc argument".into());
         }
     }
     Ok(args)
 }
 
-fn scan_words(text: &str) -> Result<Vec<Range<usize>>, String> {
+/// Elements of a Tcl list. List syntax is not script syntax: `$` and `[` are
+/// ordinary characters, braced elements stay verbatim, and backslashes are
+/// resolved only outside braces.
+fn list_elements(text: &str) -> Result<Vec<String>, String> {
     let bytes = text.as_bytes();
-    let mut words = Vec::new();
+    let push_char = |element: &mut String, i: &mut usize| -> Result<(), String> {
+        if bytes[*i] == b'\\' {
+            let (value, end) = backslash(text, *i)?;
+            element.push_str(&value);
+            *i = end;
+        } else {
+            let ch = text[*i..].chars().next().expect("in bounds");
+            element.push(ch);
+            *i += ch.len_utf8();
+        }
+        Ok(())
+    };
+    let mut elements = Vec::new();
     let mut i = 0;
-    while i < bytes.len() {
+    loop {
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
         if i == bytes.len() {
-            break;
+            return Ok(elements);
         }
-        let start = i;
-        let mut brace = 0usize;
-        let mut bracket = 0usize;
-        let mut quote = false;
-        while i < bytes.len() {
-            match bytes[i] {
-                b'\\' => i = (i + 2).min(bytes.len()),
-                b'{' if !quote => {
-                    brace += 1;
+        let mut element = String::new();
+        match bytes[i] {
+            b'{' => {
+                let start = i + 1;
+                let mut depth = 1;
+                while depth > 0 {
                     i += 1;
-                }
-                b'}' if !quote => {
-                    if brace == 0 {
-                        return Err("unmatched closing brace".into());
+                    match bytes.get(i) {
+                        None => return Err("unmatched open brace in list".into()),
+                        Some(b'\\') => i += 1,
+                        Some(b'{') => depth += 1,
+                        Some(b'}') => depth -= 1,
+                        Some(_) => {}
                     }
-                    brace -= 1;
-                    i += 1;
                 }
-                b'[' if brace == 0 => {
-                    bracket += 1;
-                    i += 1;
-                }
-                b']' if brace == 0 => {
-                    if bracket == 0 {
-                        return Err("unmatched closing bracket".into());
+                element.push_str(&text[start..i]);
+                i += 1;
+            }
+            b'"' => {
+                i += 1;
+                loop {
+                    match bytes.get(i) {
+                        None => return Err("unmatched open quote in list".into()),
+                        Some(b'"') => break,
+                        Some(_) => push_char(&mut element, &mut i)?,
                     }
-                    bracket -= 1;
-                    i += 1;
                 }
-                b'"' if brace == 0 => {
-                    quote = !quote;
-                    i += 1;
+                i += 1;
+            }
+            _ => {
+                while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                    push_char(&mut element, &mut i)?;
                 }
-                byte if byte.is_ascii_whitespace() && brace == 0 && bracket == 0 && !quote => break,
-                _ => i += 1,
             }
         }
-        if brace != 0 || bracket != 0 || quote {
-            return Err("unterminated word grouping".into());
+        if i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+            return Err("list element in braces or quotes followed by extra characters".into());
         }
-        words.push(start..i);
+        elements.push(element);
     }
-    Ok(words)
+}
+
+use words::scan_words;
+
+fn expanded_word(raw: &str) -> bool {
+    raw.starts_with("{*}")
+        && raw
+            .as_bytes()
+            .get(3)
+            .is_some_and(|b| !b.is_ascii_whitespace())
 }
 
 fn word_literal(text: &str, span: Range<usize>) -> Result<String, String> {
     let raw = &text[span];
+    if expanded_word(raw) {
+        return Err("expanded word is evaluated at runtime".into());
+    }
     if raw.starts_with('{') {
         braced_literal_raw(raw)
-    } else if raw.starts_with('"') {
-        if raw.len() < 2 || !raw.ends_with('"') {
-            Err("unterminated quoted word".into())
-        } else if raw[1..raw.len() - 1].contains(['$', '[', '\\']) {
-            Err("word must be static".into())
-        } else {
-            Ok(raw[1..raw.len() - 1].to_string())
-        }
-    } else if raw.contains(['$', '[', '\\']) {
-        Err("word must be static".into())
     } else {
-        Ok(raw.to_string())
+        let inner = if raw.starts_with('"') {
+            if raw.len() < 2 || !raw.ends_with('"') {
+                return Err("unterminated quoted word".into());
+            }
+            &raw[1..raw.len() - 1]
+        } else {
+            raw
+        };
+        let mut result = String::new();
+        let mut i = 0;
+        while i < inner.len() {
+            match inner.as_bytes()[i] {
+                b'$' | b'[' => return Err("word must be static".into()),
+                b'\\' => {
+                    let (value, end) = backslash(inner, i)?;
+                    result.push_str(&value);
+                    i = end;
+                }
+                _ => {
+                    let ch = inner[i..].chars().next().unwrap();
+                    result.push(ch);
+                    i += ch.len_utf8();
+                }
+            }
+        }
+        Ok(result)
     }
 }
 
 fn braced_literal(text: &str, span: Range<usize>) -> Result<String, String> {
     braced_literal_raw(&text[span])
 }
+/// The value of a braced word: its text, except that a backslash-newline and
+/// the spaces and tabs after it read as one space, as `Tcl_ParseBraces`
+/// substitutes them. Every other backslash sequence stays as written.
 fn braced_literal_raw(raw: &str) -> Result<String, String> {
     if raw.len() < 2 || !raw.starts_with('{') || !raw.ends_with('}') {
-        Err("expected braced literal".into())
-    } else {
-        Ok(raw[1..raw.len() - 1].to_string())
+        return Err("expected braced literal".into());
     }
+    let inner = &raw[1..raw.len() - 1];
+    let bytes = inner.as_bytes();
+    let mut value = String::with_capacity(inner.len());
+    let (mut i, mut literal_start) = (0, 0);
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            i += 1;
+        } else if bytes.get(i + 1) == Some(&b'\n') {
+            value.push_str(&inner[literal_start..i]);
+            i += 2;
+            while matches!(bytes.get(i), Some(b' ' | b'\t')) {
+                i += 1;
+            }
+            value.push(' ');
+            literal_start = i;
+        } else {
+            i += 2;
+        }
+    }
+    value.push_str(&inner[literal_start.min(inner.len())..]);
+    Ok(value)
 }
+/// A bare word whose value is its own text, such as the `break` in
+/// `if {$done} break`: Tcl compiles it as a script in place.
+fn bare_script_word(text: &str, word: &Range<usize>) -> bool {
+    let raw = &text[word.clone()];
+    !raw.starts_with(['{', '"']) && word_literal(text, word.clone()).is_ok_and(|value| value == raw)
+}
+
 fn valid_var_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b':'))
 }
-fn variable_end(text: &str, start: usize) -> usize {
-    text.as_bytes()[start..]
-        .iter()
-        .position(|b| !(b.is_ascii_alphanumeric() || matches!(b, b'_' | b':')))
-        .map_or(text.len(), |offset| start + offset)
-}
-fn matching_bracket(text: &str, open: usize) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut depth = 0usize;
-    let mut brace = 0usize;
-    for (i, byte) in bytes.iter().enumerate().skip(open) {
-        match *byte {
-            b'{' => brace += 1,
-            b'}' => brace = brace.saturating_sub(1),
-            b'[' if brace == 0 => depth += 1,
-            b']' if brace == 0 => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-fn has_top_level_separator(text: &str) -> bool {
-    let mut brace = 0usize;
-    let mut bracket = 0usize;
-    let mut quote = false;
-    for byte in text.bytes() {
-        match byte {
-            b'{' if !quote => brace += 1,
-            b'}' if !quote => brace = brace.saturating_sub(1),
-            b'[' if brace == 0 => bracket += 1,
-            b']' if brace == 0 => bracket = bracket.saturating_sub(1),
-            b'"' if brace == 0 => quote = !quote,
-            b';' | b'\n' if brace == 0 && bracket == 0 && !quote => return true,
-            _ => {}
-        }
-    }
-    false
+/// The offset of the `]` closing the command substitution that opens at
+/// `open`.
+fn matching_bracket(text: &str, open: usize) -> Result<usize, String> {
+    words::substitution_end(text.as_bytes(), open)
 }
 fn line_column(source: &str, offset: usize) -> (u32, u32) {
-    let prefix = &source[..offset.min(source.len())];
+    // End-line lookups use end_byte - 1, which may fall inside the final
+    // UTF-8 character. Source maps remain byte based; columns count characters.
+    let mut offset = offset.min(source.len());
+    while !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let prefix = &source[..offset];
     let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32 + 1;
     let column = prefix
         .rsplit_once('\n')
@@ -1562,6 +2119,7 @@ fn image_identity_digest(
     compiler_semantics: &str,
     mode: CompileMode,
     source: &str,
+    procedure_context: bool,
 ) -> String {
     let mut identity = Sha256::new();
     identity.update(schema);
@@ -1573,13 +2131,293 @@ fn image_identity_digest(
         CompileMode::VmStrict => b"vm-strict".as_slice(),
     });
     identity.update([0]);
+    identity.update([u8::from(procedure_context)]);
     identity.update(source.as_bytes());
     format!("{:x}", identity.finalize())
+}
+
+/// Runtime-controlled forms are admitted as mapped invocations. Their evaluated
+/// argument values are compiled by the VM before any generated body executes.
+/// Whether vm-strict can run a runtime command itself: the VM compiles its
+/// generated source under vm-strict, and resolves a computed command name when
+/// it runs, where host commands stay denied. Tcl implements the excluded
+/// commands with its event loop, file system, or callbacks into script.
+fn vm_runtime_command(text: &str, words: &[Range<usize>]) -> bool {
+    let Some(name) = words
+        .first()
+        .and_then(|word| word_literal(text, word.clone()).ok())
+    else {
+        return true;
+    };
+    !matches!(
+        name.strip_prefix("::").unwrap_or(&name),
+        "source"
+            | "after"
+            | "update"
+            | "vwait"
+            | "trace"
+            | "fileevent"
+            | "chan"
+            | "subst"
+            | "time"
+            | "tailcall"
+    ) && dict_script(text, words) != Some(true)
+}
+
+/// Whether a `dict` command evaluates a script: `for`, `map`, `update` and
+/// `with`, and `filter` with the `script` filter type. `None` when its words
+/// do not say, because the subcommand or filter type is computed.
+fn dict_script(text: &str, words: &[Range<usize>]) -> Option<bool> {
+    let literal = |index: usize| match words.get(index) {
+        Some(word) if expanded_word(&text[word.clone()]) => None,
+        Some(word) => word_literal(text, word.clone()).ok().map(Some),
+        None => Some(None),
+    };
+    let name = literal(0)??;
+    if name.strip_prefix("::").unwrap_or(&name) != "dict" {
+        return Some(false);
+    }
+    Some(match literal(1)?.as_deref().and_then(dict_subcommand) {
+        Some("for" | "map" | "update" | "with") => true,
+        Some("filter") => {
+            literal(3)?.and_then(|filter| unique_prefix(&["key", "script", "value"], &filter))
+                == Some("script")
+        }
+        _ => false,
+    })
+}
+
+fn runtime_command(
+    text: &str,
+    words: &[Range<usize>],
+    depth: u32,
+    static_declarations: bool,
+    static_proc: bool,
+    procedure_context: bool,
+) -> bool {
+    let name = words
+        .first()
+        .and_then(|w| word_literal(text, w.clone()).ok())
+        .unwrap_or_default();
+    if words.iter().any(|w| expanded_word(&text[w.clone()])) {
+        // A native command takes expanded words like any other arguments.
+        return !lists::is_native_command(&name);
+    }
+    match name.trim_start_matches("::") {
+        "" | "eval" | "source" | "uplevel" | "apply" | "try" | "switch" | "subst" | "time"
+        | "tailcall" | "after" | "update" | "vwait" | "trace" | "fileevent" => true,
+        "dict" => {
+            dicts::dict_form(text, words).is_none() && dict_script(text, words) != Some(false)
+        }
+        "chan" => words
+            .get(1)
+            .is_none_or(|w| word_literal(text, w.clone()).map_or(true, |s| s == "event")),
+        "namespace" => words.get(1).is_none_or(|w| {
+            word_literal(text, w.clone())
+                .map_or(true, |s| matches!(s.as_str(), "eval" | "inscope" | "code"))
+        }),
+        "proc" => {
+            !static_declarations || depth != 0 || parse_proc_decl(text, 0..text.len()).is_err()
+        }
+        "for" | "while" | "if" | "catch" => words[1..]
+            .iter()
+            .any(|word| word_literal(text, word.clone()).is_err()),
+        "foreach" => {
+            words
+                .last()
+                .is_some_and(|word| word_literal(text, word.clone()).is_err())
+                || words
+                    .get(1..words.len().saturating_sub(1))
+                    .unwrap_or(&[])
+                    .iter()
+                    .step_by(2)
+                    .any(|word| word_literal(text, word.clone()).is_err())
+        }
+        "lmap" => !procedure_context || !control::inline_lmap(text, words),
+        "expr" => words.get(1).is_some_and(|word| {
+            !text[word.clone()].starts_with('{')
+                && text[word.start..words.last().unwrap().end].contains(['$', '['])
+        }),
+        _ => {
+            let _ = static_proc;
+            false
+        }
+    }
+}
+
+fn backslash(text: &str, start: usize) -> Result<(String, usize), String> {
+    let mut i = start + 1;
+    let Some(ch) = text[i..].chars().next() else {
+        return Ok(("\\".into(), i));
+    };
+    i += ch.len_utf8();
+    let simple = match ch {
+        'a' => Some('\u{7}'),
+        'b' => Some('\u{8}'),
+        'f' => Some('\u{c}'),
+        'n' => Some('\n'),
+        'r' => Some('\r'),
+        't' => Some('\t'),
+        'v' => Some('\u{b}'),
+        _ => None,
+    };
+    if let Some(value) = simple {
+        return Ok((value.to_string(), i));
+    }
+    if ch == '\n' {
+        while text
+            .as_bytes()
+            .get(i)
+            .is_some_and(|b| matches!(b, b' ' | b'\t'))
+        {
+            i += 1;
+        }
+        return Ok((" ".into(), i));
+    }
+    let (radix, max) = match ch {
+        'x' => (16, 2),
+        'u' => (16, 4),
+        'U' => (16, 8),
+        '0'..='7' => (8, if ch <= '3' { 3 } else { 2 }),
+        _ => return Ok((ch.to_string(), i)),
+    };
+    let begin = if radix == 8 { start + 1 } else { i };
+    let mut end = begin;
+    while end < text.len()
+        && end - begin < max
+        && text.as_bytes()[end].is_ascii()
+        && (text.as_bytes()[end] as char).is_digit(radix)
+    {
+        end += 1;
+    }
+    if end == begin {
+        return Ok((ch.to_string(), i));
+    }
+    let value = u32::from_str_radix(&text[begin..end], radix).map_err(|e| e.to_string())?;
+    Ok((char::from_u32(value).unwrap_or('\u{fffd}').to_string(), end))
+}
+
+/// Lossless Tcl word representation used to capture already-evaluated argument
+/// values. Prefer braces so ordinary script bodies retain readable source maps.
+pub fn quote_word(value: &str) -> String {
+    let mut depth = 0i64;
+    let mut escaped = false;
+    let mut braced = true;
+    for ch in value.chars() {
+        if escaped {
+            if ch == '\n' {
+                braced = false;
+            }
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth < 0 {
+                    braced = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    if braced && depth == 0 && !escaped {
+        return format!("{{{value}}}");
+    }
+    let mut result = String::from("\"");
+    for ch in value.chars() {
+        if matches!(ch, '\\' | '"' | '$' | '[' | ']') {
+            result.push('\\');
+        }
+        result.push(ch);
+    }
+    result.push('"');
+    result
+}
+
+/// Apply the compiler's script-effect boundary to a command whose name or
+/// arguments became known at runtime. Unsupported evaluators never slip into
+/// the opaque Tcl leaf bridge through a computed command name/subcommand.
+pub fn validate_runtime_invocation(values: &[String], mode: CompileMode) -> Result<(), String> {
+    let name = values.first().ok_or("empty invocation")?;
+    let source = values
+        .iter()
+        .map(|word| quote_word(word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let words = scan_words(&source)?;
+    match command_effect(name, &source, &words, false) {
+        CommandEffect::TclScriptOutsideImage(reason) => Err(reason),
+        CommandEffect::OpaqueWorldHost if mode == CompileMode::VmStrict => {
+            Err("WorldHost invocation requires hybrid mode".into())
+        }
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verifier_checks_execution_arguments_and_boundaries() {
+        let image = compile_source(
+            "/trace.tcl".into(),
+            "foreach x {1 2} {incr x}; return $x".into(),
+            CompileMode::Hybrid,
+        )
+        .unwrap();
+        let mut changed = image.clone();
+        changed.units[changed.top_level_unit].commands[0].trace_pc = 0;
+        assert!(changed.verify().is_err());
+        let mut changed = image.clone();
+        changed.units[changed.top_level_unit].commands[0].trace_argv_count += 1;
+        assert!(changed.verify().is_err());
+        let mut changed = image.clone();
+        let map = changed.units[changed.top_level_unit]
+            .commands
+            .iter_mut()
+            .find(|m| !m.trace_word_copies.is_empty())
+            .unwrap();
+        map.trace_word_copies[0].1 = map.trace_argv_count;
+        assert!(changed.verify().is_err());
+    }
+
+    #[test]
+    fn eof_terminates_commands_without_changing_source_identity() {
+        for source in [
+            "set x 73",
+            "set x héllo\nputs $x",
+            "proc inc {x} {return [expr {$x + 1}]}\nset x [inc 2]",
+        ] {
+            let image = compile_source(
+                PathBuf::from("/tmp/eof.tcl"),
+                source.into(),
+                CompileMode::Hybrid,
+            )
+            .unwrap();
+            image.verify().unwrap();
+            assert_eq!(image.source.content.as_ref(), source);
+            assert_eq!(image.source.content_sha256, hex_digest(source.as_bytes()));
+            assert!(
+                image
+                    .units
+                    .iter()
+                    .flat_map(|unit| &unit.commands)
+                    .all(|map| map.source_span.end <= source.len())
+            );
+        }
+        assert!(
+            compile_source(
+                PathBuf::from("/tmp/eof.tcl"),
+                "set x {unclosed".into(),
+                CompileMode::Hybrid
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn deterministic_image_maps_nested_commands_and_procs() {
@@ -1605,7 +2443,7 @@ mod tests {
                 .flat_map(|unit| &unit.commands)
                 .any(|map| map.nesting_depth == 1)
         );
-        let mut parsed = tcld_syntax::command_spans(source)
+        let mut parsed = source::command_spans(source, false)
             .unwrap()
             .into_iter()
             .map(|span| (span.start_byte, span.end_byte))
@@ -1663,7 +2501,7 @@ mod tests {
     fn vm_strict_rejects_world_host_with_precise_fallback() {
         let error = compile_source(
             PathBuf::from("/tmp/demo.tcl"),
-            "puts hello\n".into(),
+            "exec ls\n".into(),
             CompileMode::VmStrict,
         )
         .unwrap_err();
@@ -1671,6 +2509,61 @@ mod tests {
         assert!(rendered.contains("/tmp/demo.tcl:1:1"));
         assert!(rendered.contains("WorldHost"));
         assert!(rendered.contains("--backend=host"));
+    }
+
+    #[test]
+    fn lmap_local_compilation_preserves_maps_and_runtime_fallbacks() {
+        for mode in [CompileMode::Hybrid, CompileMode::VmStrict] {
+            let source = "lmap x {1 2} {incr x}";
+            let global = compile_source("/workspace/lmap.tcl".into(), source.into(), mode).unwrap();
+            let local =
+                compile_source_in_context("/workspace/lmap.tcl".into(), source.into(), mode, true)
+                    .unwrap();
+            assert_ne!(global.image_digest, local.image_digest);
+            for (image, collects) in [(&global, false), (&local, true)] {
+                image.verify().unwrap();
+                assert_eq!(
+                    image
+                        .top_level()
+                        .bytecode
+                        .get_instructions_raw()
+                        .unwrap()
+                        .iter()
+                        .any(|inst| inst.opcode == Opcode::LmapCollect),
+                    collects
+                );
+                assert_eq!(
+                    image
+                        .top_level()
+                        .commands
+                        .iter()
+                        .any(|map| &image.source.content[map.source_span.clone()] == "incr x"),
+                    collects
+                );
+            }
+            for source in [
+                "lmap a(k) {1} {set a(k)}",
+                "lmap $vars {1} $body",
+                "lmap {} {1} {error wrong}",
+            ] {
+                let image = compile_source_in_context(
+                    "/workspace/lmap.tcl".into(),
+                    source.into(),
+                    mode,
+                    true,
+                )
+                .unwrap();
+                assert!(
+                    !image
+                        .top_level()
+                        .bytecode
+                        .get_instructions_raw()
+                        .unwrap()
+                        .iter()
+                        .any(|inst| inst.opcode == Opcode::LmapCollect)
+                );
+            }
+        }
     }
 
     #[test]
@@ -1685,12 +2578,6 @@ mod tests {
         leaf.verify().unwrap();
 
         for (label, source) in [
-            ("source", "source child.tcl\n"),
-            ("eval", "eval {set hidden 1}\n"),
-            ("if", "if {1} {set hidden 1}\n"),
-            ("while", "while {0} {set hidden 1}\n"),
-            ("namespace eval", "namespace eval demo {set hidden 1}\n"),
-            ("apply", "apply {{} {set hidden 1}}\n"),
             ("interp eval", "interp eval {} {set hidden 1}\n"),
             ("interp create", "interp create child\n"),
             (
@@ -1745,6 +2632,7 @@ mod tests {
                 image.compiler_semantics,
                 image.mode,
                 replacement,
+                image.procedure_context,
             );
 
             let error = image.verify().unwrap_err();
@@ -1769,6 +2657,18 @@ mod tests {
     }
 
     #[test]
+    fn utf8_command_end_is_a_valid_source_location() {
+        let image = compile_source(
+            "/workspace/unicode.tcl".into(),
+            "list 世界\nset x λ".into(),
+            CompileMode::Hybrid,
+        )
+        .unwrap();
+        image.verify().unwrap();
+        assert_eq!(image.units[0].commands.last().unwrap().end_line, 2);
+    }
+
+    #[test]
     fn schema_and_semantics_change_image_identity() {
         let image = compile_source(
             PathBuf::from("/tmp/a.tcl"),
@@ -1785,7 +2685,8 @@ mod tests {
                 "tcld.debug-image/v2",
                 COMPILER_SEMANTICS,
                 image.mode,
-                "set x 1\n"
+                "set x 1\n",
+                false
             )
         );
         assert_ne!(
@@ -1794,7 +2695,8 @@ mod tests {
                 DEBUG_IMAGE_SCHEMA,
                 "different-policy",
                 image.mode,
-                "set x 1\n"
+                "set x 1\n",
+                false
             )
         );
         assert_ne!(
@@ -1803,7 +2705,8 @@ mod tests {
                 DEBUG_IMAGE_SCHEMA,
                 COMPILER_SEMANTICS,
                 CompileMode::VmStrict,
-                "set x 1\n"
+                "set x 1\n",
+                false
             )
         );
         assert_ne!(
@@ -1812,7 +2715,8 @@ mod tests {
                 DEBUG_IMAGE_SCHEMA,
                 COMPILER_SEMANTICS,
                 image.mode,
-                "set x 2\n"
+                "set x 2\n",
+                false
             )
         );
 
@@ -1823,6 +2727,9 @@ mod tests {
         let mut corrupt_image_digest = image.clone();
         corrupt_image_digest.image_digest = "0".repeat(64);
         assert!(corrupt_image_digest.verify().is_err());
+        let mut corrupt_context = image.clone();
+        corrupt_context.procedure_context = true;
+        assert!(corrupt_context.verify().is_err());
     }
 
     #[test]
@@ -1835,13 +2742,76 @@ mod tests {
         .unwrap_err();
         assert!(wrong_arity.reason.contains("wrong # args"), "{wrong_arity}");
 
-        let default = compile_source(
-            PathBuf::from("/tmp/default.tcl"),
-            "proc greet {{name world}} { return $name }\n".into(),
-            CompileMode::VmStrict,
-        )
-        .unwrap_err();
-        assert!(default.reason.contains("simple scalar"), "{default}");
+        let compile = |source: &str| {
+            compile_source(
+                PathBuf::from("/tmp/default.tcl"),
+                source.into(),
+                CompileMode::VmStrict,
+            )
+        };
+        let image = compile("proc greet {{name world}} { return $name }\ngreet\ngreet you\n")
+            .expect("defaulted arguments are admitted");
+        let greet = image.unit("proc:greet").expect("greet unit");
+        let defaults = greet
+            .bytecode
+            .locals
+            .iter()
+            .map(|local| {
+                local
+                    .default_value
+                    .as_ref()
+                    .map(|value| value.value.source_repr())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(defaults, [Some("world".to_string())]);
+
+        // Tcl binds positionally: a later parameter without a default makes
+        // the defaulted one before it required as well.
+        for (source, admitted) in [
+            ("proc f {a {b 2}} {}\nf 1\nf 1 2\n", true),
+            ("proc f {a {b 2}} {}\nf\n", false),
+            ("proc f {a {b 2}} {}\nf 1 2 3\n", false),
+            ("proc f {{a 1} b} {}\nf 1\n", false),
+            ("proc f {{a 1} b} {}\nf 1 2\n", true),
+            ("proc f {{a 1} args} {}\nf\nf 1 2 3\n", true),
+        ] {
+            let result = compile(source);
+            assert_eq!(result.is_ok(), admitted, "{source}: {result:?}");
+            if let Err(error) = result {
+                assert!(
+                    error.reason.contains("wrong # args for f: expected"),
+                    "{error}"
+                );
+            }
+        }
+
+        // An argument list is a Tcl list: defaults are literal text.
+        for (spec, expected) in [
+            ("{{v $x}}", "$x"),
+            ("{{v [list]}}", "[list]"),
+            ("{{v {}}}", ""),
+            ("{{v {a {b c}}}}", "a {b c}"),
+            ("{{v \"q r\"}}", "q r"),
+        ] {
+            let image = compile(&format!("proc d {spec} {{ return $v }}\n"))
+                .unwrap_or_else(|error| panic!("{spec}: {error}"));
+            let local = &image.unit("proc:d").unwrap().bytecode.locals[0];
+            assert_eq!(
+                local
+                    .default_value
+                    .as_ref()
+                    .map(|value| value.value.source_repr()),
+                Some(expected.to_string()),
+                "{spec}"
+            );
+        }
+        let fields = compile("proc d {{v 1 2}} {}\n").unwrap_err();
+        assert!(fields.reason.contains("too many fields"), "{fields}");
+        let unnamed = compile("proc d {{}} {}\n").unwrap_err();
+        assert!(
+            unnamed.reason.contains("argument with no name"),
+            "{unnamed}"
+        );
 
         let misplaced_args = compile_source(
             PathBuf::from("/tmp/args.tcl"),

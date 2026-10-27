@@ -118,6 +118,14 @@ ABIs into one process.
 Tcl source is also a first-class debug target. `auto` and `host` execute the
 original source in the host debugger. In a hybrid build, explicit `hybrid` and
 `vm-strict` compile admitted source into a verified in-process debug image.
+The source compiler reads words as Tcl 9's parser does: braces and quotes
+group only at the start of a word, so `a{b}c`, `a"b` and `${name}x` are
+ordinary unquoted words; braced variable names may hold balanced braces; and
+array indices, command substitutions, and comments end where Tcl ends them.
+Compiled expressions take the same operands Tcl's do: array elements such as
+`$a($k)`, braced names such as `${x y}`, quoted strings with substitutions,
+and braced literals. As in Tcl, operands keep their strings inside an
+expression (`$x eq "0x10"`), and only the expression's value becomes a number.
 
 The downloadable CLI archive is the host-debugger distribution: it has no
 compile-time Tcl dependency and includes the versioned loadable nubs. The
@@ -134,8 +142,121 @@ Both versioned opcode tables have explicit dispositions:
 
 | Table | VM | HostValue | HostFrame | Trap |
 |---|---:|---:|---:|---:|
-| Tcl 8.6 | 139 | 34 | 2 | 15 |
-| Tcl 9.0 | 139 | 33 | 2 | 17 |
+| Tcl 8.6 | 173 | 1 | 2 | 14 |
+| Tcl 9.0 | 172 | 1 | 2 | 16 |
+
+The VM computes arithmetic, math functions, strings, dictionaries, clock
+reads, and Tcl 9 `lreplace`/`linsert` natively, matching Tcl 9 results and
+errors, so `vm-strict` runs them too. String case and character classes use
+Tcl 9.0.2's Unicode tables. Regular expressions use a native Rust port of
+Tcl 9.0.2's Henry Spencer engine, including its Unicode classes, captures,
+backreferences, lookahead constraints, and compile errors. Only `namespace
+upvar` still needs the host to compute a value.
+
+The source compiler emits these instructions where Tcl's own compiler does:
+`string` subcommands such as `length`, `index`, `range`, `map`, `trim`, `is`,
+and `match`; `dict get`, `exists`, `set`, `unset`, `incr`, `append`,
+`lappend`, `create`, `for`, `map`, `update`, and `with`; and `clock`
+readings.
+
+`list`, `llength`, `lindex`, `lrange`, `concat`, `join`, `split`, and `error`
+are VM commands in every form, including expanded `{*}` arguments and
+computed `lrange` indices. The compiler emits Tcl's list instructions for the
+forms Tcl compiles and invokes the VM command for the rest.
+
+Every `string` subcommand, and every `dict` subcommand that does not evaluate
+a script, is also a VM command, with Tcl's results and its usage, option, and
+index errors: for example `string repeat`, `reverse`, `wordstart`, `wordend`,
+`insert`, and `is` with `-strict` and `-failindex`, and `dict keys`, `values`,
+`size`, `merge`, `remove`, `replace`, `getdef`, and `filter` by key or value.
+Forms the compiler does not lower, including computed subcommands, run as VM
+commands in `vm-strict` and in compiled source; precompiled bytecode in hybrid
+mode still calls Tcl's commands for them.
+
+`vm-strict` also compiles source created at runtime: unbraced `expr` with
+substitutions, `eval`, `uplevel`, procedures with computed names or bodies,
+`namespace eval`, `inscope`, and `code`, control commands with computed bodies
+or conditions, `switch` arms, `lmap` bodies, `apply` lambdas, and computed
+command names. Generated code is admitted under
+`vm-strict` as well, so it cannot reach the host either. In `vm-strict` the VM
+keeps global and namespace variables and namespaces itself; hybrid mode keeps
+them in embedded Tcl. A command that is neither a Tcl command nor defined in
+the image resolves when it runs, because the program may create it then; an
+undefined one fails with Tcl's `invalid command name` error. Commands Tcl
+implements with its event loop, file system, or callbacks into script still
+require hybrid mode: `source`, `after`, `update`, `vwait`, `trace`,
+`subst`, `time`, `tailcall`, the `dict` forms that
+evaluate a computed script (`for`, `map`, `update`, and `with` with a computed
+body, `update` of a qualified variable, and `filter` with a script), and
+`dict info`, which reports Tcl's own hash table.
+
+In `vm-strict`, `puts` to `stdout` and `stderr` runs in the VM, with Tcl's
+arguments and errors. It writes the process's own streams, or the
+debugger's output events when the debugger captures them, as hybrid mode's
+host capture does; any other channel requires hybrid mode.
+
+The VM answers `info exists`, `commands`, `procs`, `body`, `args`, and `level`
+from its own procedures, levels, and variables, and runs `lsearch` and
+`lsort` itself in both modes, including `lsort -command`.
+`regexp`, `regsub`, and `lsearch -regexp` also run natively in both modes,
+including expanded or computed arguments, match variables, `-all`,
+`-indices`, `-inline`, `-start`, `-about`, and replacement backreferences.
+Their results and error codes are checked against embedded Tcl, including
+the applicable command cases from Tcl's `reg.test` corpus.
+
+In `vm-strict`, `info commands` lists the program's
+procedures and the Tcl commands the VM provides, `rename` renames or deletes
+the program's procedures. `lsort -command` invokes mapped comparator commands
+in both modes, preserving Tcl's comparison order, stable ties, `-unique`,
+`-index`, `-stride`, and `-indices`. Comparator results follow Tcl's integer
+conversion rules; errors and other completion codes propagate with the
+comparison context. `regsub -command` invokes replacement commands in mapped VM
+images in both modes, in the caller's variable scope and namespace. Captures
+are literal arguments, including every subexpression when there are more than
+nine, and successful replacement values are appended literally.
+Errors and other completion codes propagate, and an output variable is assigned
+only after substitution succeeds. As in Tcl, these synchronous callbacks cannot
+yield across the substitution computation or a sort comparison.
+
+`apply` executes the lambda's exact body as mapped VM source in both modes,
+with its own local variables, literal defaults, variadic arguments, and the
+lambda's global or explicit namespace. It supports command prefixes used by
+`lsort -command` and `regsub -command`, including computed lambdas and captured
+arguments. Lambda bodies retain breakpoint and local-edit support. Argument,
+namespace, and completion results are checked against embedded Tcl; hybrid
+mode also retains coroutine suspension, traces, and tailcalls through lambdas.
+
+`switch` selects arms natively in both modes, including computed arm lists,
+abbreviated options, exact/glob/regexp matching, `-nocase`, fallthrough,
+and regexp capture variables. Only the selected body is admitted and compiled;
+it executes as mapped source in the caller's scope and namespace, preserving
+breakpoints, locals, return/break/continue, and the selected pattern's error
+context. Branches inside lambda, sort, and substitution callbacks remain mapped.
+Results, completion options, and error codes are compared with embedded Tcl in
+both modes; hybrid mode also supports traces and coroutine suspension in arms.
+Mapped bodies retain their code identity as callback arguments change, so a
+breakpoint in a lambda or branch continues to stop on later comparisons and
+substitutions. Debugger local edits remain available in hybrid mode.
+
+`lmap` iterates and collects results natively in both modes, including computed
+variable lists, input lists, and bodies. It snapshots input values, pads short
+lists with empty values, binds variables in the caller's scope, and preserves
+Tcl's assignment order, break/continue behavior, and nonlocal completions.
+Eligible literal loops inside procedures use native foreach/lmapCollect
+instructions and retain their original source maps. Runtime bodies are admitted
+only when an iteration executes. Both forms retain repeated breakpoints and
+caller locals, including inside sort and substitution callbacks. Hybrid mode
+also preserves variable traces, coroutine suspension, and tailcalls. Results,
+completion options, and error codes are checked against embedded Tcl in both
+modes.
+
+`try` validates clauses, selects handlers, and runs cleanup natively in both
+modes. Bodies, `on`/`trap` handlers, and `finally` scripts enter exact mapped
+source only when executed. Handler bindings use the caller's scope; shared
+handler bodies, custom completion codes, return levels, and nested `-during`
+options follow Tcl. Those scripts retain breakpoints and locals, including in
+sort and substitution callbacks. Hybrid mode also supports traces, coroutines,
+cancellation, and tailcalls through try handlers and cleanup.
 
 Traps cover Tcl 9 constant opcodes, object-system operations,
 yield/coroutine behavior, and selected introspection. They return

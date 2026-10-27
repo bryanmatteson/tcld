@@ -4,6 +4,18 @@ use std::os::raw::{c_char, c_int, c_void};
 
 use tcl_sys::*;
 
+// Tcl keeps a process-wide notifier registry keyed by OS thread ID. Release
+// it when a Rust-owned thread exits so a reused thread ID is initialized anew.
+struct TclThreadGuard;
+impl Drop for TclThreadGuard {
+    fn drop(&mut self) {
+        unsafe {
+            Tcl_FinalizeThread();
+        }
+    }
+}
+thread_local! {static TCL_THREAD: TclThreadGuard = const {TclThreadGuard};}
+
 type TraceCallback = Box<dyn FnMut(&str, i32) -> bool>;
 
 /// Error returned by Tcl operations.
@@ -35,6 +47,7 @@ pub struct Interpreter {
 impl Interpreter {
     /// Create a new Tcl interpreter and call `Tcl_Init`.
     pub fn new() -> Result<Self, TclError> {
+        TCL_THREAD.with(|_| {});
         unsafe {
             let interp = Tcl_CreateInterp();
             if interp.is_null() {
@@ -200,7 +213,9 @@ impl Interpreter {
                         Tcl_FindExecutable(std::ptr::null());
                     }
                 }
-                None => Tcl_FindExecutable(std::ptr::null()),
+                None => {
+                    Tcl_FindExecutable(std::ptr::null());
+                }
             }
         }
     }
@@ -336,6 +351,15 @@ impl Interpreter {
         name2: Option<&[u8]>,
         value: &[u8],
     ) -> Result<(), TclError> {
+        self.set_var_result_bytes(name1, name2, value).map(|_| ())
+    }
+
+    pub fn set_var_result_bytes(
+        &self,
+        name1: &[u8],
+        name2: Option<&[u8]>,
+        value: &[u8],
+    ) -> Result<Vec<u8>, TclError> {
         let c1 = CString::new(name1).map_err(|_| TclError {
             message: "name contains null byte".into(),
             error_info: None,
@@ -362,14 +386,39 @@ impl Interpreter {
             if result.is_null() {
                 Err(self.make_error(get_string_result(self.interp)))
             } else {
-                Ok(())
+                Ok({
+                    let mut len: Tcl_Size = 0;
+                    let ptr = Tcl_GetStringFromObj(result, &mut len);
+                    std::slice::from_raw_parts(ptr as *const u8, len as usize).to_vec()
+                })
             }
         }
     }
 
     fn make_error(&self, message: String) -> TclError {
-        let error_info = self.get_var("errorInfo");
-        let error_code = self.get_var("errorCode");
+        // Direct C API failures can set return options before the legacy
+        // errorInfo/errorCode variables are synchronized. Read the options
+        // themselves, so a variable write never reports a stale error code.
+        let (error_info, error_code) = unsafe {
+            let options = Tcl_GetReturnOptions(self.interp, TCL_ERROR);
+            if options.is_null() {
+                (None, None)
+            } else {
+                let field = |key: &[u8]| {
+                    let key_obj =
+                        Tcl_NewStringObj(key.as_ptr() as *const c_char, key.len() as Tcl_Size);
+                    Tcl_IncrRefCount(key_obj);
+                    let mut value = std::ptr::null_mut();
+                    let code = Tcl_DictObjGet(std::ptr::null_mut(), options, key_obj, &mut value);
+                    Tcl_DecrRefCount(key_obj);
+                    (code == TCL_OK && !value.is_null())
+                        .then(|| String::from_utf8_lossy(&obj_to_bytes(value)).into_owned())
+                };
+                let fields = (field(b"-errorinfo"), field(b"-errorcode"));
+                Tcl_DecrRefCount(options);
+                fields
+            }
+        };
         TclError {
             message,
             error_info,

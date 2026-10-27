@@ -2,7 +2,7 @@ version = 1
 
 [[synthetic_proof]]
 group = "pass_f1_f12"
-test = "f1_hand_built_arith_jump, f2_host_puts, f3_local_set_append, f4_proc_tbc, f5_catch1_tbc, f6_break_tbc, f7_cont2_happy_path, f8_public_fixture_registration_count, f9_hostvar_synthetic, f9b_upvar_vm_to_vm, f10_trap_suite, f11_vm_strict_puts_denied, f12_debug_hybrid_pause_shape"
+test = "f1_hand_built_arith_jump, f2_host_puts, f3_local_set_append, f4_proc_tbc, f5_catch1_tbc, f6_break_tbc, f7_cont2_happy_path, f8_public_fixture_registration_count, f9_hostvar_synthetic, f9b_upvar_vm_to_vm, f10_trap_suite, f11_vm_strict_world_host_denied, f12_debug_hybrid_pause_shape"
 
 [[synthetic_proof]]
 group = "catch_completion"

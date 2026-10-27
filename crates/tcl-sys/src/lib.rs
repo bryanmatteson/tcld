@@ -78,6 +78,9 @@ unsafe extern "C" {
     /// Required before any use of the event loop (`vwait`, `after`,
     /// fileevent). Pass `NULL` when the embedding application has no
     /// own argv[0] to register.
+    #[cfg(feature = "tcl9")]
+    pub fn Tcl_FindExecutable(arg0: *const c_char) -> *const c_char;
+    #[cfg(not(feature = "tcl9"))]
     pub fn Tcl_FindExecutable(arg0: *const c_char);
     pub fn Tcl_InitStubs(
         interp: *mut Tcl_Interp,

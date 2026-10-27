@@ -5,21 +5,37 @@
 
 pub mod error;
 pub mod mode;
+pub mod number;
 pub mod opcode_class;
 pub mod policy;
 
 #[cfg(feature = "host")]
 pub mod bridge;
 
+pub mod args;
 pub mod builtin;
 pub mod cmd;
 pub mod completion;
+pub mod dict;
+pub mod dict_command;
 pub mod engine;
 pub mod list_codec;
+pub mod lists;
 pub mod load;
+pub mod lsearch;
+pub mod lsort;
+pub mod mathfunc;
+pub mod output;
+pub mod regex;
+pub mod regexp_command;
+pub mod string_command;
+pub mod strings;
 pub mod tbcload;
+pub mod unicode;
+mod unicode_data;
 pub mod value;
 pub mod var;
+pub mod world;
 
 #[cfg(feature = "debug")]
 pub mod debug;
@@ -44,6 +60,16 @@ pub struct DebugImageBinding {
     pub code_id: load::CodeId,
 }
 
+/// A verified code unit, including generated text and its producing call site.
+#[cfg(feature = "debug")]
+#[derive(Debug, Clone)]
+pub struct DebugSource {
+    pub code_id: load::CodeId,
+    pub image: std::sync::Arc<tcld_compile::DebugImage>,
+    pub unit_index: usize,
+    pub origin: Option<CodeAddress>,
+}
+
 #[cfg(feature = "debug")]
 #[derive(Debug)]
 pub struct DebugImageStart {
@@ -63,14 +89,14 @@ use crate::engine::HybridEngineInner;
 /// Entry points consume `ByteCode` / `.tbc` paths only — never a decompiled
 /// temp `.tcl` execution target (I1).
 pub struct HybridEngine {
-    inner: HybridEngineInner,
+    inner: Box<HybridEngineInner>,
     _not_send: PhantomData<*mut ()>,
 }
 
 impl HybridEngine {
     pub fn new(mode: RuntimeMode) -> Result<Self, VmError> {
         Ok(Self {
-            inner: HybridEngineInner::new(mode)?,
+            inner: Box::new(HybridEngineInner::new(mode)?),
             _not_send: PhantomData,
         })
     }
@@ -196,6 +222,12 @@ impl HybridEngine {
         self.inner.debug_step_over()
     }
 
+    /// All compiler-owned units discovered in this session, retained after return.
+    #[cfg(feature = "debug")]
+    pub fn debug_sources(&self) -> Vec<DebugSource> {
+        self.inner.debug_sources()
+    }
+
     /// Run until the selected VM frame exits, honoring qualified breakpoints.
     #[cfg(feature = "debug")]
     pub fn step_out(&mut self) -> Result<DebugOutcome, VmError> {
@@ -259,6 +291,13 @@ impl HybridEngine {
         self.inner.debug_current_code()
     }
 
+    /// Bound retained instruction telemetry without limiting execution or
+    /// coverage counters. None preserves the native full-history default.
+    #[cfg(feature = "debug")]
+    pub fn set_observation_limit(&mut self, limit: Option<usize>) {
+        self.inner.set_observation_limit(limit);
+    }
+
     #[cfg(feature = "debug")]
     pub fn observations(&self) -> &[OpcodeObservation] {
         self.inner.observations()
@@ -279,6 +318,13 @@ impl HybridEngine {
         expression: VmObj,
     ) -> Result<Completion, VmError> {
         self.inner.debug_eval_in_frame(level, expression, true)
+    }
+}
+
+impl Drop for HybridEngine {
+    fn drop(&mut self) {
+        #[cfg(feature = "debug")]
+        self.inner.cancel_suspension();
     }
 }
 
@@ -307,6 +353,310 @@ mod tests {
     }
 
     #[test]
+    fn regexp_opcode_executes_without_bootstrapping_a_host() {
+        let opcode = tcld_core::inst_table::DEFAULT_INSTRUCTION_SET
+            .opcode_table
+            .iter()
+            .position(|opcode| *opcode == tcld_core::inst_table::Opcode::Regexp)
+            .unwrap() as u8;
+        let literals = ["^(héllo|world)$", "HÉLLO"]
+            .into_iter()
+            .map(|text| LiteralObject {
+                kind: LiteralObjectType::String,
+                value: SourceRef::Static(text),
+                proc_body: None,
+            })
+            .collect();
+        let bytecode = minimal_bc(vec![1, 0, 1, 1, opcode, 0o33, 0], literals);
+        let mut engine = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        assert_eq!(engine.run_tbc(bytecode).unwrap().as_i64().unwrap(), 1);
+        assert_eq!(engine.coverage_snapshot().host_command_invocations, 0);
+    }
+
+    #[test]
+    fn regsub_callbacks_execute_from_bytecode_without_bootstrapping_a_host() {
+        let invoke = tcld_core::inst_table::DEFAULT_INSTRUCTION_SET
+            .opcode_table
+            .iter()
+            .position(|opcode| *opcode == tcld_core::inst_table::Opcode::InvokeStk1)
+            .unwrap() as u8;
+        let literals = ["regsub", "-all", "-command", ".", "aé🙂", "string toupper"]
+            .into_iter()
+            .map(|text| LiteralObject {
+                kind: LiteralObjectType::String,
+                value: SourceRef::Static(text),
+                proc_body: None,
+            })
+            .collect();
+        let bytecode = minimal_bc(
+            vec![1, 0, 1, 1, 1, 2, 1, 3, 1, 4, 1, 5, invoke, 6, 0],
+            literals,
+        );
+        let mut engine = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        assert_eq!(
+            engine.run_tbc(bytecode).unwrap().as_string().unwrap(),
+            "AÉ🙂"
+        );
+        assert_eq!(engine.coverage_snapshot().host_command_invocations, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "debug")]
+    fn regsub_callback_source_image_executes_without_host_support() {
+        let image = tcld_compile::compile_source(
+            "/workspace/regsub-callback.tcl".into(),
+            "proc cb {m} {upvar 1 n n; incr n; return [string toupper $m]}\n\
+             proc f {} {set n 0; set out [regsub -all -command . aé🙂 cb]; list $out $n}\n\
+             f\n"
+            .into(),
+            tcld_compile::CompileMode::VmStrict,
+        )
+        .unwrap();
+        let mut engine = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        match engine.debug_start_image(&image, false).unwrap().outcome {
+            DebugOutcome::Finished { result } => assert_eq!(result.as_string().unwrap(), "AÉ🙂 3"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(engine.coverage_snapshot().host_command_invocations, 0);
+    }
+
+    #[test]
+    fn lsort_callbacks_execute_from_bytecode_without_bootstrapping_a_host() {
+        let invoke = tcld_core::inst_table::DEFAULT_INSTRUCTION_SET
+            .opcode_table
+            .iter()
+            .position(|opcode| *opcode == tcld_core::inst_table::Opcode::InvokeStk1)
+            .unwrap() as u8;
+        let literals = ["lsort", "-command", "string compare", "b aé a"]
+            .into_iter()
+            .map(|text| LiteralObject {
+                kind: LiteralObjectType::String,
+                value: SourceRef::Static(text),
+                proc_body: None,
+            })
+            .collect();
+        let bytecode = minimal_bc(vec![1, 0, 1, 1, 1, 2, 1, 3, invoke, 4, 0], literals);
+        let mut engine = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        assert_eq!(
+            engine.run_tbc(bytecode).unwrap().as_string().unwrap(),
+            "a aé b"
+        );
+        assert_eq!(engine.coverage_snapshot().host_command_invocations, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "debug")]
+    fn lmap_iteration_completions_and_callbacks_execute_without_host_support() {
+        let image = tcld_compile::compile_source(
+            "/workspace/lmap.tcl".into(),
+            "set mapped [lmap {x y} {1 2 3} z {a b c} {list $x $y $z}]\n\
+             set filtered [lmap x {1 2 3 4} {if {$x == 2} {continue}; if {$x == 4} {break}; expr {$x*10}}]\n\
+             set replaced [regsub -all -command . abc {apply {{m} {lindex [lmap x [list $m] {string toupper $x}] 0}}}]\n\
+             list $mapped $filtered $replaced\n".into(),
+            tcld_compile::CompileMode::VmStrict,
+        ).unwrap();
+        let mut engine = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        match engine.debug_start_image(&image, false).unwrap().outcome {
+            DebugOutcome::Finished { result } => assert_eq!(
+                result.as_string().unwrap(),
+                "{{1 2 a} {3 {} b} {{} {} c}} {10 30} ABC"
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(engine.coverage_snapshot().host_command_invocations, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "debug")]
+    fn try_handlers_cleanup_and_callbacks_execute_without_host_support() {
+        let image = tcld_compile::compile_source(
+            "/workspace/try.tcl".into(),
+            "set out {}; set handled [try {error missing {} {APP MISSING}} trap APP {m o} {lappend out handler; list $m [dict get $o -errorcode]} finally {lappend out cleanup}]\n\
+             set replaced [regsub -all -command . abc {apply {{m} {try {string toupper $m} finally {set cleaned yes}}}}]\n\
+             list $handled $out $replaced\n".into(),
+            tcld_compile::CompileMode::VmStrict,
+        ).unwrap();
+        let mut engine = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        match engine.debug_start_image(&image, false).unwrap().outcome {
+            DebugOutcome::Finished { result } => assert_eq!(
+                result.as_string().unwrap(),
+                "{missing {APP MISSING}} {handler cleanup} ABC"
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(engine.coverage_snapshot().host_command_invocations, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "debug")]
+    fn try_executes_from_bytecode_without_a_parent_source_image() {
+        let invoke = tcld_core::inst_table::DEFAULT_INSTRUCTION_SET
+            .opcode_table
+            .iter()
+            .position(|opcode| *opcode == tcld_core::inst_table::Opcode::InvokeStk1)
+            .unwrap() as u8;
+        let literals = [
+            "try",
+            "error missing {} {APP MISSING}",
+            "trap",
+            "APP",
+            "m o",
+            "list $m [dict get $o -errorcode]",
+            "finally",
+            "set cleaned yes",
+        ]
+        .into_iter()
+        .map(|text| LiteralObject {
+            kind: LiteralObjectType::String,
+            value: SourceRef::Static(text),
+            proc_body: None,
+        })
+        .collect();
+        let bytecode = minimal_bc(
+            vec![1, 0, 1, 1, 1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1, 7, invoke, 8, 0],
+            literals,
+        );
+        let mut engine = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        assert_eq!(
+            engine.run_tbc(bytecode).unwrap().as_string().unwrap(),
+            "missing {APP MISSING}"
+        );
+        assert_eq!(engine.coverage_snapshot().host_command_invocations, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "debug")]
+    fn lmap_executes_from_bytecode_without_a_parent_source_image() {
+        let invoke = tcld_core::inst_table::DEFAULT_INSTRUCTION_SET
+            .opcode_table
+            .iter()
+            .position(|opcode| *opcode == tcld_core::inst_table::Opcode::InvokeStk1)
+            .unwrap() as u8;
+        let literals = ["lmap", "x", "1 2 3", "expr {$x*2}"]
+            .into_iter()
+            .map(|text| LiteralObject {
+                kind: LiteralObjectType::String,
+                value: SourceRef::Static(text),
+                proc_body: None,
+            })
+            .collect();
+        let bytecode = minimal_bc(vec![1, 0, 1, 1, 1, 2, 1, 3, invoke, 4, 0], literals);
+        let mut engine = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        assert_eq!(
+            engine.run_tbc(bytecode).unwrap().as_string().unwrap(),
+            "2 4 6"
+        );
+        assert_eq!(engine.coverage_snapshot().host_command_invocations, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "debug")]
+    fn switch_matching_captures_and_callback_bodies_execute_without_host_support() {
+        let image = tcld_compile::compile_source(
+            "/workspace/switch.tcl".into(),
+            "set sorted [lsort -command {apply {{a b} {switch $a {default {expr {$a-$b}}}}}} {3 1 2}]\n\
+             set captures [switch -r -m m -i i abc {(a)(bc)} {list $m $i}]\n\
+             list $sorted $captures [switch absent {default {expr {6*7}}}]\n".into(),
+            tcld_compile::CompileMode::VmStrict,
+        ).unwrap();
+        let mut engine = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        match engine.debug_start_image(&image, false).unwrap().outcome {
+            DebugOutcome::Finished { result } => assert_eq!(
+                result.as_string().unwrap(),
+                "{1 2 3} {{abc a bc} {{0 2} {0 0} {1 2}}} 42",
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(engine.coverage_snapshot().host_command_invocations, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "debug")]
+    fn switch_executes_from_bytecode_without_a_parent_source_image() {
+        let invoke = tcld_core::inst_table::DEFAULT_INSTRUCTION_SET
+            .opcode_table
+            .iter()
+            .position(|opcode| *opcode == tcld_core::inst_table::Opcode::InvokeStk1)
+            .unwrap() as u8;
+        let literals = ["switch", "a", "a {expr {6*7}} default {error wrong}"]
+            .into_iter()
+            .map(|text| LiteralObject {
+                kind: LiteralObjectType::String,
+                value: SourceRef::Static(text),
+                proc_body: None,
+            })
+            .collect();
+        let bytecode = minimal_bc(vec![1, 0, 1, 1, 1, 2, invoke, 3, 0], literals);
+        let mut engine = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        assert_eq!(engine.run_tbc(bytecode).unwrap().as_string().unwrap(), "42");
+        assert_eq!(engine.coverage_snapshot().host_command_invocations, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "debug")]
+    fn apply_lambdas_and_callbacks_execute_without_host_support() {
+        let image = tcld_compile::compile_source(
+            "/workspace/apply.tcl".into(),
+            "namespace eval n {variable suffix !}\n\
+             set sorted [lsort -command {apply {{a b} {expr {$a-$b}}}} {3 1 2}]\n\
+             set replaced [regsub -all -command . abc {apply {{m} {variable suffix; string cat $m $suffix} ::n}}]\n\
+             list $sorted $replaced [apply {{x {y 2} args} {list $x $y $args}} 40]\n".into(),
+            tcld_compile::CompileMode::VmStrict,
+        ).unwrap();
+        let mut engine = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        match engine.debug_start_image(&image, false).unwrap().outcome {
+            DebugOutcome::Finished { result } => {
+                assert_eq!(result.as_string().unwrap(), "{1 2 3} a!b!c! {40 2 {}}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(engine.coverage_snapshot().host_command_invocations, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "debug")]
+    fn apply_executes_from_bytecode_without_a_parent_source_image() {
+        let invoke = tcld_core::inst_table::DEFAULT_INSTRUCTION_SET
+            .opcode_table
+            .iter()
+            .position(|opcode| *opcode == tcld_core::inst_table::Opcode::InvokeStk1)
+            .unwrap() as u8;
+        let literals = ["apply", "{x {y 2}} {expr {$x+$y}}", "40"]
+            .into_iter()
+            .map(|text| LiteralObject {
+                kind: LiteralObjectType::String,
+                value: SourceRef::Static(text),
+                proc_body: None,
+            })
+            .collect();
+        let bytecode = minimal_bc(vec![1, 0, 1, 1, 1, 2, invoke, 3, 0], literals);
+        let mut engine = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        assert_eq!(engine.run_tbc(bytecode).unwrap().as_string().unwrap(), "42");
+        assert_eq!(engine.coverage_snapshot().host_command_invocations, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "debug")]
+    fn lsort_callback_source_image_executes_without_host_support() {
+        let image = tcld_compile::compile_source(
+            "/workspace/lsort-callback.tcl".into(),
+            "proc compare {a b} {upvar 1 calls counter; incr counter; expr {$a-$b}}\n\
+             proc f {} {set calls 0; set sorted [lsort -command compare {3 1 2}]; list $sorted $calls}\n\
+             f\n".into(),
+            tcld_compile::CompileMode::VmStrict,
+        ).unwrap();
+        let mut engine = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
+        match engine.debug_start_image(&image, false).unwrap().outcome {
+            DebugOutcome::Finished { result } => {
+                assert_eq!(result.as_string().unwrap(), "{1 2 3} 3")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(engine.coverage_snapshot().host_command_invocations, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "debug")]
     fn compiled_source_image_executes_nested_proc_without_host() {
         let image = tcld_compile::compile_source(
             std::path::PathBuf::from("/tmp/compiled-image.tcl"),
@@ -327,6 +677,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "debug", feature = "host"))]
     fn compiled_proc_activation_and_declaration_breakpoint_match_source_truth() {
         let image = tcld_compile::compile_source(
             std::path::PathBuf::from("/tmp/declarations.tcl"),
@@ -378,9 +729,12 @@ mod tests {
         };
         engine.add_breakpoint(second_address);
 
-        let DebugOutcome::Paused(_) = engine.step_instruction().unwrap() else {
-            panic!("step after first declaration")
-        };
+        while engine.vm_proc_count() == 0 {
+            assert!(matches!(
+                engine.step_instruction().unwrap(),
+                DebugOutcome::Paused(_)
+            ));
+        }
         assert_eq!(engine.vm_proc_count(), 1);
         let after_first = engine
             .eval_in_frame(0, VmObj::from_str("info commands ::first"))
@@ -402,9 +756,12 @@ mod tests {
             .unwrap();
         assert_eq!(before_second.result.as_string().unwrap(), "");
 
-        let DebugOutcome::Paused(_) = engine.step_instruction().unwrap() else {
-            panic!("step after second declaration")
-        };
+        while engine.vm_proc_count() == 1 {
+            assert!(matches!(
+                engine.step_instruction().unwrap(),
+                DebugOutcome::Paused(_)
+            ));
+        }
         assert_eq!(engine.vm_proc_count(), 2);
         let after_second = engine
             .eval_in_frame(0, VmObj::from_str("info commands ::second"))
@@ -416,9 +773,12 @@ mod tests {
     fn source_compile_failure_cannot_start_or_mutate_the_vm() {
         let engine = HybridEngine::new(RuntimeMode::VmStrict).unwrap();
         for (source, mode) in [
-            ("puts not-admitted\n", tcld_compile::CompileMode::VmStrict),
-            ("source child.tcl\n", tcld_compile::CompileMode::Hybrid),
-            ("if {1} {set hidden 1}\n", tcld_compile::CompileMode::Hybrid),
+            ("exec not-admitted\n", tcld_compile::CompileMode::VmStrict),
+            ("source child.tcl\n", tcld_compile::CompileMode::VmStrict),
+            (
+                "interp eval {} {set x 1}\n",
+                tcld_compile::CompileMode::Hybrid,
+            ),
             (
                 "package require hidden\n",
                 tcld_compile::CompileMode::Hybrid,
@@ -440,6 +800,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "debug")]
     fn compiled_source_return_routes_normal_top_level_and_error_completions() {
         let compile = |source: &str| {
             tcld_compile::compile_source(
@@ -466,6 +827,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "debug", feature = "host"))]
     fn compiled_source_hybrid_world_host_dispatch_preserves_mapped_command_execution() {
         let image = tcld_compile::compile_source(
             std::path::PathBuf::from("/tmp/compiled-hybrid.tcl"),

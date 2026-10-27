@@ -123,6 +123,18 @@ impl LocalSlot {
             link: None,
         }
     }
+
+    /// An unnamed compiler temporary (`VAR_TEMPORARY`): runtime state, not
+    /// a variable the program can name.
+    pub fn is_temporary(&self) -> bool {
+        self.flags & 0x200 != 0
+    }
+
+    /// Whether the program's variable `name` is this slot; a temporary has
+    /// no name to find, even when the program names a variable `""`.
+    pub fn is_named(&self, name: &ByteString) -> bool {
+        !self.is_temporary() && self.name == *name
+    }
 }
 
 /// Resolve a variable name that may use `arr(elem)` syntax into primary + optional part2.

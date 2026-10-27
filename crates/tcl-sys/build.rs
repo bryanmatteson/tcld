@@ -81,10 +81,17 @@ fn main() {
         let lib_dir = resolve_lib_dir(&prefix, abi)
             .unwrap_or_else(|| panic!("Tcl library directory not found under {prefix}"));
         println!("cargo:rustc-link-search=native={lib_dir}");
-        println!("cargo:rustc-link-lib=dylib={}", abi.dylib_name());
+        let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+        let kind = if target_os == "emscripten" {
+            println!("cargo:rerun-if-changed={lib_dir}/lib{}.a", abi.dylib_name());
+            "static"
+        } else {
+            "dylib"
+        };
+        println!("cargo:rustc-link-lib={kind}={}", abi.dylib_name());
         println!("cargo:lib_dir={lib_dir}");
         println!("cargo:link_lib={}", abi.dylib_name());
-        if cfg!(any(target_os = "macos", target_os = "linux")) {
+        if matches!(target_os.as_str(), "macos" | "linux") {
             println!("cargo:rustc-link-arg=-Wl,-rpath,{lib_dir}");
         }
     }
@@ -123,6 +130,14 @@ fn find_tcl_prefix(abi: TclAbi, require_lib: bool) -> String {
     {
         eprintln!("tcl-sys: using TCL_PREFIX={prefix}");
         return prefix;
+    }
+
+    // A browser target must never link the build machine's native Tcl.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("emscripten") {
+        panic!(
+            "Emscripten requires {} or TCL_PREFIX pointing to a static cross-compiled Tcl installation",
+            abi.version_env_key()
+        );
     }
 
     if let Some(prefix) = detect_via_tclsh(abi, require_lib) {
@@ -323,7 +338,9 @@ fn resolve_lib_dir(prefix: &str, abi: TclAbi) -> Option<String> {
     ];
     candidates.into_iter().find(|dir| {
         let name = abi.dylib_name();
-        Path::new(&format!("{dir}/lib{name}.dylib")).exists()
+        (std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("emscripten")
+            && Path::new(&format!("{dir}/lib{name}.a")).exists())
+            || Path::new(&format!("{dir}/lib{name}.dylib")).exists()
             || Path::new(&format!("{dir}/lib{name}.so")).exists()
             || Path::new(&format!("{dir}/{name}.lib")).exists()
             || Path::new(&format!("{dir}/lib{name}.tbd")).exists()

@@ -171,7 +171,7 @@ fn hybrid_run_proc_tbc_exit_0() {
 
 #[test]
 #[cfg(feature = "hybrid")]
-fn hybrid_run_sandbox_denies_world_host_puts() {
+fn hybrid_run_sandbox_denies_world_host_exec() {
     // Drive shipped HybridEngine path used by `tcld run --sandbox` / vm-strict.
     use tcld_core::bytecode::{ByteCode, ByteCodeInfo, LiteralObject, LiteralObjectType};
     use tcld_core::source::SourceRef;
@@ -184,7 +184,7 @@ fn hybrid_run_sandbox_denies_world_host_puts() {
             proc_body: None,
         }
     }
-    // push puts; push msg; invokeStk1 2; done  (opcodes match hybrid_fixtures puts_bc)
+    // push exec; push msg; invokeStk1 2; done  (opcodes match hybrid_fixtures command_bc)
     let code = vec![1, 0, 1, 1, 6, 2, 0];
     let bc = ByteCode {
         header: None,
@@ -206,7 +206,7 @@ fn hybrid_run_sandbox_denies_world_host_puts() {
         code_bytes: code,
         cmd_code_ranges: vec![],
         cmd_source_ranges: None,
-        literals: vec![lit_str("puts"), lit_str("sandbox-deny")],
+        literals: vec![lit_str("exec"), lit_str("sandbox-deny")],
         exceptions: vec![],
         auxiliaries: vec![],
         proc_num_args: 0,
@@ -214,7 +214,7 @@ fn hybrid_run_sandbox_denies_world_host_puts() {
         locals: vec![],
     };
     let mut eng = HybridEngine::new(RuntimeMode::VmStrict).expect("vm-strict");
-    let err = eng.run_tbc(bc).expect_err("puts must be denied");
+    let err = eng.run_tbc(bc).expect_err("exec must be denied");
     assert!(
         matches!(err, VmError::PolicyDenied { .. }),
         "expected PolicyDenied, got {err:?}"

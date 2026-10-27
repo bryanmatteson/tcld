@@ -16,6 +16,16 @@ pub trait VarNameCtx {
         name2: Option<&ByteString>,
         value: VmObj,
     ) -> Result<(), VmError>;
+    /// Tcl stores may return a value changed by a synchronous write trace.
+    fn set_var_value(
+        &mut self,
+        name1: &ByteString,
+        name2: Option<&ByteString>,
+        value: VmObj,
+    ) -> Result<VmObj, VmError> {
+        self.set_var(name1, name2, value.clone())?;
+        Ok(value)
+    }
     fn unset_var(&mut self, name1: &ByteString, name2: Option<&ByteString>) -> Result<(), VmError>;
     fn install_host_link(
         &mut self,
@@ -47,6 +57,118 @@ pub fn run_var_name_builtin(
     }
 }
 
+/// Run a value command the VM implements natively. `invoked` is the command
+/// word as written, which usage messages repeat.
+pub fn run_value_builtin(cmd: &[u8], invoked: &VmObj, args: &[VmObj]) -> Result<VmObj, VmError> {
+    use crate::lists;
+    let usage = |arity_ok: bool, usage: &str| -> Result<(), VmError> {
+        if arity_ok {
+            return Ok(());
+        }
+        Err(VmError::TclError {
+            message: format!(
+                "wrong # args: should be \"{} {usage}\"",
+                invoked.ensure_bytes()?.as_str_lossy()
+            ),
+            error_info: None,
+            error_code: Some("TCL WRONGARGS".into()),
+        })
+    };
+    match cmd {
+        b"list" => Ok(VmObj::List(args.to_vec())),
+        b"llength" => {
+            usage(args.len() == 1, "list")?;
+            Ok(VmObj::Int(args[0].as_list_vec()?.len() as i64))
+        }
+        b"lindex" => {
+            usage(!args.is_empty(), "list ?index ...?")?;
+            match args {
+                [list, index] => lists::index_list(list, index),
+                [list, indices @ ..] => lists::index_flat(list, indices),
+                [] => unreachable!(),
+            }
+        }
+        b"lrange" => {
+            usage(args.len() == 3, "list first last")?;
+            lists::range(&args[0], &args[1], &args[2])
+        }
+        b"concat" => lists::concat(args),
+        b"join" => {
+            usage((1..=2).contains(&args.len()), "list ?joinString?")?;
+            match args[0].as_list_vec()?.as_slice() {
+                [] => Ok(VmObj::empty()),
+                [only] => Ok(only.clone()),
+                items => {
+                    let separator = match args.get(1) {
+                        Some(separator) => separator.ensure_bytes()?,
+                        None => ByteString::from(" "),
+                    };
+                    let mut out = Vec::new();
+                    for (i, item) in items.iter().enumerate() {
+                        if i > 0 {
+                            out.extend_from_slice(separator.as_bytes());
+                        }
+                        out.extend_from_slice(item.ensure_bytes()?.as_bytes());
+                    }
+                    Ok(VmObj::from_bytes(out))
+                }
+            }
+        }
+        b"split" => {
+            usage((1..=2).contains(&args.len()), "string ?splitChars?")?;
+            let text = args[0].as_string()?;
+            let separators: Vec<char> = match args.get(1) {
+                Some(separators) => separators.as_string()?.chars().collect(),
+                None => vec![' ', '\n', '\t', '\r'],
+            };
+            Ok(VmObj::List(if text.is_empty() {
+                Vec::new()
+            } else if separators.is_empty() {
+                text.chars()
+                    .map(|c| VmObj::from_str(c.encode_utf8(&mut [0; 4])))
+                    .collect()
+            } else {
+                text.split(|c| separators.contains(&c))
+                    .map(VmObj::from_str)
+                    .collect()
+            }))
+        }
+        b"error" => {
+            usage(
+                (1..=3).contains(&args.len()),
+                "message ?errorInfo? ?errorCode?",
+            )?;
+            let error_info = match args.get(1) {
+                Some(info) => Some(info.as_string()?).filter(|info| !info.is_empty()),
+                None => None,
+            };
+            let error_code = match args.get(2) {
+                Some(code) if code.as_list_vec().is_err() => {
+                    return Err(VmError::TclError {
+                        message: format!(
+                            "bad -errorcode value: expected a list but got \"{}\"",
+                            code.as_string()?
+                        ),
+                        error_info: None,
+                        error_code: Some("TCL RESULT ILLEGAL_ERRORCODE".into()),
+                    });
+                }
+                Some(code) => Some(code.as_string()?),
+                None => None,
+            };
+            Err(VmError::TclError {
+                message: args[0].as_string()?,
+                error_info,
+                error_code,
+            })
+        }
+        _ => Err(VmError::Internal(format!(
+            "not a value builtin: {}",
+            String::from_utf8_lossy(cmd)
+        ))),
+    }
+}
+
 fn arg_bytes(args: &[VmObj], i: usize, cmd: &str) -> Result<ByteString, VmError> {
     args.get(i)
         .ok_or_else(|| VmError::VarNameUnsupported {
@@ -67,8 +189,7 @@ fn builtin_set(args: &[VmObj], ctx: &mut dyn VarNameCtx) -> Result<VmObj, VmErro
             let name = arg_bytes(args, 0, "set")?;
             let (n1, n2) = split_var_name(&name);
             let val = args[1].clone();
-            ctx.set_var(&n1, n2.as_ref(), val.clone())?;
-            Ok(val)
+            ctx.set_var_value(&n1, n2.as_ref(), val)
         }
         _ => Err(VmError::VarNameUnsupported {
             cmd: "set".into(),
@@ -95,8 +216,7 @@ fn builtin_append(args: &[VmObj], ctx: &mut dyn VarNameCtx) -> Result<VmObj, VmE
         base.extend_from_slice(a.ensure_bytes()?.as_bytes());
     }
     let result = VmObj::from_bytes(base);
-    ctx.set_var(&n1, n2.as_ref(), result.clone())?;
-    Ok(result)
+    ctx.set_var_value(&n1, n2.as_ref(), result)
 }
 
 fn builtin_lappend(args: &[VmObj], ctx: &mut dyn VarNameCtx) -> Result<VmObj, VmError> {
@@ -118,8 +238,7 @@ fn builtin_lappend(args: &[VmObj], ctx: &mut dyn VarNameCtx) -> Result<VmObj, Vm
     }
     let s = list_to_string(&list)?;
     let result = VmObj::from_str(&s);
-    ctx.set_var(&n1, n2.as_ref(), result.clone())?;
-    Ok(result)
+    ctx.set_var_value(&n1, n2.as_ref(), result)
 }
 
 fn builtin_incr(args: &[VmObj], ctx: &mut dyn VarNameCtx) -> Result<VmObj, VmError> {
@@ -142,8 +261,7 @@ fn builtin_incr(args: &[VmObj], ctx: &mut dyn VarNameCtx) -> Result<VmObj, VmErr
         Err(error) => return Err(error),
     };
     let next = VmObj::Int(cur + delta);
-    ctx.set_var(&n1, n2.as_ref(), next.clone())?;
-    Ok(next)
+    ctx.set_var_value(&n1, n2.as_ref(), next)
 }
 
 fn is_missing_value(error: &VmError) -> bool {

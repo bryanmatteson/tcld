@@ -1,37 +1,81 @@
-//! Counted-byte Tcl list parser and serializer.
+//! Counted-byte Tcl list parser and serializer, ported from `tclUtil.c`
+//! (`FindElement`, `TclCopyAndCollapse`, `TclScanElement`,
+//! `TclConvertElement`) and `tclParse.c` (`TclParseBackslash`).
 //!
 //! This implements Tcl list syntax only: braces/quotes group elements and
-//! backslashes substitute bytes, but `$` and `[...]` are ordinary list data.
+//! backslashes substitute characters, but `$` and `[...]` are ordinary list
+//! data. Dictionaries share the syntax and differ only in error messages.
 
 use crate::error::VmError;
 
+/// Malformed list or dictionary syntax (`FindElement`'s errors).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TclListError {
-    UnterminatedBrace,
-    UnterminatedQuote,
-    TrailingBackslash,
-    NonWhitespaceAfterBrace,
-    NonWhitespaceAfterQuote,
-    UnexpectedClosingBrace,
-    InvalidUnicodeEscape,
+    UnmatchedBrace,
+    UnmatchedQuote,
+    /// The characters after a closing brace, up to 20 bytes.
+    JunkAfterBrace(Vec<u8>),
+    /// The characters after a closing quote, up to 20 bytes.
+    JunkAfterQuote(Vec<u8>),
+}
+
+/// What is being parsed, which names it in error messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListKind {
+    List,
+    Dict,
+}
+
+impl ListKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Dict => "dict",
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::List => "LIST",
+            Self::Dict => "DICTIONARY",
+        }
+    }
+}
+
+impl TclListError {
+    pub fn message(&self, kind: ListKind) -> String {
+        let name = kind.name();
+        match self {
+            Self::UnmatchedBrace => format!("unmatched open brace in {name}"),
+            Self::UnmatchedQuote => format!("unmatched open quote in {name}"),
+            Self::JunkAfterBrace(junk) => format!(
+                "{name} element in braces followed by \"{}\" instead of space",
+                String::from_utf8_lossy(junk)
+            ),
+            Self::JunkAfterQuote(junk) => format!(
+                "{name} element in quotes followed by \"{}\" instead of space",
+                String::from_utf8_lossy(junk)
+            ),
+        }
+    }
+
+    pub fn into_vm_error(self, kind: ListKind) -> VmError {
+        let detail = match self {
+            Self::UnmatchedBrace => "BRACE",
+            Self::UnmatchedQuote => "QUOTE",
+            Self::JunkAfterBrace(_) | Self::JunkAfterQuote(_) => "JUNK",
+        };
+        VmError::TclError {
+            message: self.message(kind),
+            error_info: None,
+            error_code: Some(format!("TCL VALUE {} {detail}", kind.code())),
+        }
+    }
 }
 
 impl std::fmt::Display for TclListError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::UnterminatedBrace => "unmatched open brace in list",
-            Self::UnterminatedQuote => "unmatched open quote in list",
-            Self::TrailingBackslash => "trailing backslash in list",
-            Self::NonWhitespaceAfterBrace => {
-                "list element in braces followed by non-space character"
-            }
-            Self::NonWhitespaceAfterQuote => {
-                "list element in quotes followed by non-space character"
-            }
-            Self::UnexpectedClosingBrace => "unmatched close brace in list",
-            Self::InvalidUnicodeEscape => "invalid Unicode escape in list",
-        };
-        f.write_str(message)
+        f.write_str(&self.message(ListKind::List))
     }
 }
 
@@ -39,11 +83,7 @@ impl std::error::Error for TclListError {}
 
 impl From<TclListError> for VmError {
     fn from(value: TclListError) -> Self {
-        Self::TclError {
-            message: value.to_string(),
-            error_info: None,
-            error_code: Some("TCL VALUE LIST".into()),
-        }
+        value.into_vm_error(ListKind::List)
     }
 }
 
@@ -52,262 +92,360 @@ pub struct TclListCodec;
 impl TclListCodec {
     pub fn parse(bytes: &[u8]) -> Result<Vec<Vec<u8>>, TclListError> {
         let mut elements = Vec::new();
-        let mut cursor = 0usize;
-        while cursor < bytes.len() {
-            while cursor < bytes.len() && is_list_space(bytes[cursor]) {
-                cursor += 1;
-            }
-            if cursor == bytes.len() {
-                break;
-            }
-            if bytes[cursor] == b'}' {
-                return Err(TclListError::UnexpectedClosingBrace);
-            }
-
-            let (element, next) = match bytes[cursor] {
-                b'{' => parse_braced(bytes, cursor)?,
-                b'"' => parse_quoted(bytes, cursor)?,
-                _ => parse_bare(bytes, cursor)?,
-            };
+        let mut cursor = 0;
+        while let Some((element, next)) = find_element(bytes, cursor)? {
             elements.push(element);
             cursor = next;
         }
         Ok(elements)
     }
 
+    /// The canonical list string of `elements` (`UpdateStringOfList`): each
+    /// element bare, brace-quoted or backslash-escaped as Tcl chooses, and a
+    /// leading `#` quoted so the list cannot read as a comment.
     pub fn format<I, B>(elements: I) -> Vec<u8>
     where
         I: IntoIterator<Item = B>,
         B: AsRef<[u8]>,
     {
         let mut out = Vec::new();
-        for element in elements {
-            if !out.is_empty() {
+        for (index, element) in elements.into_iter().enumerate() {
+            if index > 0 {
                 out.push(b' ');
             }
-            append_element(&mut out, element.as_ref());
+            let element = element.as_ref();
+            let quote_hash = index == 0;
+            convert_element(
+                &mut out,
+                element,
+                scan_element(element, quote_hash),
+                quote_hash,
+            );
         }
         out
     }
 }
 
-fn parse_braced(bytes: &[u8], start: usize) -> Result<(Vec<u8>, usize), TclListError> {
-    let mut cursor = start + 1;
-    let mut depth = 1usize;
-    let mut out = Vec::new();
-    while cursor < bytes.len() {
-        match bytes[cursor] {
+/// `FindElement` followed by `TclCopyAndCollapse`: the next element at or
+/// after `start` and the offset just past the white space that follows it,
+/// or `None` when only white space remains.
+pub fn find_element(bytes: &[u8], start: usize) -> Result<Option<(Vec<u8>, usize)>, TclListError> {
+    let limit = bytes.len();
+    let mut p = start;
+    while p < limit && is_list_space(bytes[p]) {
+        p += 1;
+    }
+    if p == limit {
+        return Ok(None);
+    }
+    let braced = bytes[p] == b'{';
+    let quoted = bytes[p] == b'"';
+    if braced || quoted {
+        p += 1;
+    }
+    let element_start = p;
+    let mut open_braces = usize::from(braced);
+    let mut literal = true;
+    let size = loop {
+        let Some(&byte) = bytes.get(p) else {
+            if open_braces != 0 {
+                return Err(TclListError::UnmatchedBrace);
+            }
+            if quoted {
+                return Err(TclListError::UnmatchedQuote);
+            }
+            break p - element_start;
+        };
+        match byte {
+            b'{' if open_braces != 0 => open_braces += 1,
+            b'}' if open_braces > 1 => open_braces -= 1,
+            b'}' if open_braces == 1 => {
+                let size = p - element_start;
+                p += 1;
+                if p >= limit || is_list_space(bytes[p]) {
+                    break size;
+                }
+                return Err(TclListError::JunkAfterBrace(junk(bytes, p)));
+            }
             b'\\' => {
-                out.push(b'\\');
-                cursor += 1;
-                if cursor < bytes.len() {
-                    out.push(bytes[cursor]);
-                    cursor += 1;
+                // Inside braces a backslash only shields the next
+                // character; elsewhere it changes the element's value.
+                if open_braces == 0 {
+                    literal = false;
                 }
+                p += backslash(&bytes[p..]).1 - 1;
             }
-            b'{' => {
-                depth += 1;
-                out.push(b'{');
-                cursor += 1;
-            }
-            b'}' => {
-                depth -= 1;
-                cursor += 1;
-                if depth == 0 {
-                    if cursor < bytes.len() && !is_list_space(bytes[cursor]) {
-                        return Err(TclListError::NonWhitespaceAfterBrace);
-                    }
-                    return Ok((out, cursor));
+            b'"' if quoted => {
+                let size = p - element_start;
+                p += 1;
+                if p >= limit || is_list_space(bytes[p]) {
+                    break size;
                 }
-                out.push(b'}');
+                return Err(TclListError::JunkAfterQuote(junk(bytes, p)));
             }
-            byte => {
-                out.push(byte);
-                cursor += 1;
+            byte if is_list_space(byte) && open_braces == 0 && !quoted => {
+                break p - element_start;
             }
+            _ => {}
         }
-    }
-    Err(TclListError::UnterminatedBrace)
-}
-
-fn parse_quoted(bytes: &[u8], start: usize) -> Result<(Vec<u8>, usize), TclListError> {
-    let mut cursor = start + 1;
-    let mut out = Vec::new();
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'"' => {
-                cursor += 1;
-                if cursor < bytes.len() && !is_list_space(bytes[cursor]) {
-                    return Err(TclListError::NonWhitespaceAfterQuote);
-                }
-                return Ok((out, cursor));
-            }
-            b'\\' => append_backslash_substitution(bytes, &mut cursor, &mut out)?,
-            byte => {
-                out.push(byte);
-                cursor += 1;
-            }
-        }
-    }
-    Err(TclListError::UnterminatedQuote)
-}
-
-fn parse_bare(bytes: &[u8], start: usize) -> Result<(Vec<u8>, usize), TclListError> {
-    let mut cursor = start;
-    let mut out = Vec::new();
-    while cursor < bytes.len() && !is_list_space(bytes[cursor]) {
-        if bytes[cursor] == b'\\' {
-            append_backslash_substitution(bytes, &mut cursor, &mut out)?;
-        } else {
-            out.push(bytes[cursor]);
-            cursor += 1;
-        }
-    }
-    Ok((out, cursor))
-}
-
-fn append_backslash_substitution(
-    bytes: &[u8],
-    cursor: &mut usize,
-    out: &mut Vec<u8>,
-) -> Result<(), TclListError> {
-    debug_assert_eq!(bytes[*cursor], b'\\');
-    *cursor += 1;
-    if *cursor >= bytes.len() {
-        return Err(TclListError::TrailingBackslash);
-    }
-
-    let escaped = bytes[*cursor];
-    *cursor += 1;
-    match escaped {
-        b'a' => out.push(0x07),
-        b'b' => out.push(0x08),
-        b'f' => out.push(0x0c),
-        b'n' => out.push(b'\n'),
-        b'r' => out.push(b'\r'),
-        b't' => out.push(b'\t'),
-        b'v' => out.push(0x0b),
-        b'\n' => {
-            while *cursor < bytes.len() && matches!(bytes[*cursor], b' ' | b'\t') {
-                *cursor += 1;
-            }
-            out.push(b' ');
-        }
-        b'x' => append_radix_escape(bytes, cursor, out, 16, usize::MAX, b'x')?,
-        b'u' => append_unicode_escape(bytes, cursor, out, 4)?,
-        b'U' => append_unicode_escape(bytes, cursor, out, 8)?,
-        b'0'..=b'7' => {
-            let mut value = (escaped - b'0') as u32;
-            let mut count = 1usize;
-            while count < 3 && *cursor < bytes.len() && matches!(bytes[*cursor], b'0'..=b'7') {
-                value = value * 8 + (bytes[*cursor] - b'0') as u32;
-                *cursor += 1;
-                count += 1;
-            }
-            out.push((value & 0xff) as u8);
-        }
-        other => out.push(other),
-    }
-    Ok(())
-}
-
-fn append_radix_escape(
-    bytes: &[u8],
-    cursor: &mut usize,
-    out: &mut Vec<u8>,
-    radix: u32,
-    max_digits: usize,
-    fallback: u8,
-) -> Result<(), TclListError> {
-    let start = *cursor;
-    let mut value = 0u32;
-    let mut count = 0usize;
-    while *cursor < bytes.len() && count < max_digits {
-        let Some(digit) = (bytes[*cursor] as char).to_digit(radix) else {
-            break;
-        };
-        value = value.saturating_mul(radix).saturating_add(digit);
-        *cursor += 1;
-        count += 1;
-    }
-    if *cursor == start {
-        out.push(fallback);
-    } else if value <= 0xff {
-        out.push(value as u8);
-    } else {
-        let Some(ch) = char::from_u32(value) else {
-            return Err(TclListError::InvalidUnicodeEscape);
-        };
-        let mut buf = [0u8; 4];
-        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-    }
-    Ok(())
-}
-
-fn append_unicode_escape(
-    bytes: &[u8],
-    cursor: &mut usize,
-    out: &mut Vec<u8>,
-    max_digits: usize,
-) -> Result<(), TclListError> {
-    let start = *cursor;
-    let mut value = 0u32;
-    let mut count = 0usize;
-    while *cursor < bytes.len() && count < max_digits {
-        let Some(digit) = (bytes[*cursor] as char).to_digit(16) else {
-            break;
-        };
-        value = value.saturating_mul(16).saturating_add(digit);
-        *cursor += 1;
-        count += 1;
-    }
-    if *cursor == start {
-        return Err(TclListError::InvalidUnicodeEscape);
-    }
-    let Some(ch) = char::from_u32(value) else {
-        return Err(TclListError::InvalidUnicodeEscape);
+        p += 1;
     };
-    let mut buf = [0u8; 4];
-    out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-    Ok(())
+    let raw = &bytes[element_start..element_start + size];
+    let element = if literal { raw.to_vec() } else { collapse(raw) };
+    while p < limit && is_list_space(bytes[p]) {
+        p += 1;
+    }
+    Ok(Some((element, p)))
 }
 
-fn append_element(out: &mut Vec<u8>, element: &[u8]) {
-    if element.is_empty() {
+fn junk(bytes: &[u8], start: usize) -> Vec<u8> {
+    bytes[start..]
+        .iter()
+        .take(20)
+        .take_while(|byte| !is_list_space(**byte))
+        .copied()
+        .collect()
+}
+
+/// `TclCopyAndCollapse`: substitute every backslash sequence.
+fn collapse(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'\\' {
+            let (value, read) = backslash(&raw[i..]);
+            out.extend_from_slice(&value);
+            i += read;
+        } else {
+            out.push(raw[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// `TclParseBackslash`: the UTF-8 value of the backslash sequence that
+/// starts `src`, and how many bytes the sequence spans.
+fn backslash(src: &[u8]) -> (Vec<u8>, usize) {
+    let Some(&next) = src.get(1) else {
+        return (b"\\".to_vec(), 1);
+    };
+    let (value, read) = match next {
+        b'a' => (0x7, 2),
+        b'b' => (0x8, 2),
+        b'f' => (0xc, 2),
+        b'n' => (0xa, 2),
+        b'r' => (0xd, 2),
+        b't' => (0x9, 2),
+        b'v' => (0xb, 2),
+        b'x' => match hex(&src[2..], 2) {
+            (_, 0) => (u32::from(b'x'), 2),
+            (value, digits) => (value & 0xff, 2 + digits),
+        },
+        b'u' => match hex(&src[2..], 4) {
+            (_, 0) => (u32::from(b'u'), 2),
+            (value, digits) => (value, 2 + digits),
+        },
+        b'U' => match hex(&src[2..], 8) {
+            (_, 0) => (u32::from(b'U'), 2),
+            (value, digits) => (value, 2 + digits),
+        },
+        b'\n' => {
+            let blanks = src[2..]
+                .iter()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            (u32::from(b' '), 2 + blanks)
+        }
+        0 => return (b"\\".to_vec(), 1),
+        b'0'..=b'7' => {
+            let mut value = u32::from(next - b'0');
+            let mut read = 2;
+            if let Some(digit @ b'0'..=b'7') = src.get(2) {
+                value = (value << 3) + u32::from(digit - b'0');
+                read = 3;
+                if let Some(digit @ b'0'..=b'7') = src.get(3).filter(|_| value < 0x20) {
+                    value = ((value << 3) + u32::from(digit - b'0')) & 0xff;
+                    read = 4;
+                }
+            }
+            (value, read)
+        }
+        _ => {
+            // A backslash before any other character yields that
+            // character, keeping a multi-byte UTF-8 sequence whole.
+            let width = utf8_width(next).min(src.len() - 1);
+            return match std::str::from_utf8(&src[1..1 + width]) {
+                Ok(text) => (text.as_bytes().to_vec(), 1 + width),
+                Err(_) => (vec![next], 2),
+            };
+        }
+    };
+    (encode(value), read)
+}
+
+/// `ParseHex`: up to `max_digits` hex digits, never past U+10FFFF.
+fn hex(src: &[u8], max_digits: usize) -> (u32, usize) {
+    let mut value = 0u32;
+    let mut digits = 0;
+    for &byte in src.iter().take(max_digits) {
+        let Some(digit) = (byte as char).to_digit(16) else {
+            break;
+        };
+        if value > 0x10fff {
+            break;
+        }
+        value = (value << 4) | digit;
+        digits += 1;
+    }
+    (value, digits)
+}
+
+fn utf8_width(lead: u8) -> usize {
+    match lead {
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf7 => 4,
+        _ => 1,
+    }
+}
+
+/// UTF-8 for a code point; surrogates get the three-byte form Tcl writes.
+fn encode(value: u32) -> Vec<u8> {
+    match char::from_u32(value) {
+        Some(ch) => ch.encode_utf8(&mut [0; 4]).as_bytes().to_vec(),
+        None => vec![
+            0xe0 | (value >> 12) as u8,
+            0x80 | ((value >> 6) & 0x3f) as u8,
+            0x80 | (value & 0x3f) as u8,
+        ],
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Conversion {
+    /// The element needs no quoting.
+    None,
+    /// Enclose the element in braces.
+    Brace,
+    /// Backslash-escape every special character.
+    Escape,
+    /// Backslash-escape every special character except braces.
+    Mask,
+}
+
+/// `TclScanElement` with Tcl's compatibility preferences: brace-quote when
+/// possible, but escape an element quoted only for `]` or `"`.
+fn scan_element(src: &[u8], quote_hash: bool) -> Conversion {
+    if src.is_empty() {
+        return Conversion::Brace;
+    }
+    let mut nesting = 0isize;
+    let mut forbid_none = false;
+    let mut require_escape = false;
+    let mut prefer_escape = false;
+    let mut prefer_brace = quote_hash && src[0] == b'#';
+    if matches!(src[0], b'{' | b'"') {
+        forbid_none = true;
+        prefer_brace = true;
+    }
+    let mut i = 0;
+    while i < src.len() {
+        match src[i] {
+            b'{' => nesting += 1,
+            b'}' => {
+                if nesting < 1 {
+                    require_escape = true;
+                }
+                nesting -= 1;
+            }
+            b']' | b'"' => {
+                forbid_none = true;
+                prefer_escape = true;
+            }
+            b'[' | b'$' | b';' => {
+                forbid_none = true;
+                prefer_brace = true;
+            }
+            b'\\' => match src.get(i + 1) {
+                // A final backslash or backslash-newline cannot be braced.
+                None => require_escape = true,
+                Some(b'\n') => {
+                    require_escape = true;
+                    i += 1;
+                }
+                Some(next) => {
+                    if matches!(next, b'{' | b'}' | b'\\') {
+                        i += 1;
+                    }
+                    forbid_none = true;
+                    prefer_brace = true;
+                }
+            },
+            byte if is_list_space(byte) => {
+                forbid_none = true;
+                prefer_brace = true;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if nesting > 0 || require_escape {
+        Conversion::Escape
+    } else if forbid_none && prefer_escape && !prefer_brace {
+        Conversion::Mask
+    } else if forbid_none {
+        Conversion::Brace
+    } else {
+        Conversion::None
+    }
+}
+
+/// `TclConvertElement`.
+fn convert_element(out: &mut Vec<u8>, src: &[u8], mut conversion: Conversion, quote_hash: bool) {
+    if src.is_empty() {
         out.extend_from_slice(b"{}");
         return;
     }
-    if element.iter().copied().all(is_bare_safe) {
-        out.extend_from_slice(element);
-        return;
+    let mut src = src;
+    if quote_hash && src[0] == b'#' {
+        if conversion == Conversion::Escape {
+            out.extend_from_slice(br"\#");
+            src = &src[1..];
+        } else {
+            conversion = Conversion::Brace;
+        }
     }
-    for &byte in element {
-        match byte {
-            b' ' => out.extend_from_slice(br"\ "),
-            b'\t' => out.extend_from_slice(br"\t"),
-            b'\n' => out.extend_from_slice(br"\n"),
-            b'\r' => out.extend_from_slice(br"\r"),
-            0x0c => out.extend_from_slice(br"\f"),
-            0x0b => out.extend_from_slice(br"\v"),
-            b'\\' => out.extend_from_slice(br"\\"),
-            b'{' => out.extend_from_slice(br"\{"),
-            b'}' => out.extend_from_slice(br"\}"),
-            b'"' => out.extend_from_slice(br#"\""#),
-            b'$' => out.extend_from_slice(br"\$"),
-            b'[' => out.extend_from_slice(br"\["),
-            b']' => out.extend_from_slice(br"\]"),
-            b';' => out.extend_from_slice(br"\;"),
-            other => out.push(other),
+    match conversion {
+        Conversion::None => out.extend_from_slice(src),
+        Conversion::Brace => {
+            out.push(b'{');
+            out.extend_from_slice(src);
+            out.push(b'}');
+        }
+        Conversion::Escape | Conversion::Mask => {
+            for &byte in src {
+                match byte {
+                    b']' | b'[' | b'$' | b';' | b' ' | b'\\' | b'"' => {
+                        out.extend_from_slice(&[b'\\', byte]);
+                    }
+                    b'{' | b'}' if conversion == Conversion::Escape => {
+                        out.extend_from_slice(&[b'\\', byte]);
+                    }
+                    0x0c => out.extend_from_slice(br"\f"),
+                    b'\n' => out.extend_from_slice(br"\n"),
+                    b'\r' => out.extend_from_slice(br"\r"),
+                    b'\t' => out.extend_from_slice(br"\t"),
+                    0x0b => out.extend_from_slice(br"\v"),
+                    byte => out.push(byte),
+                }
+            }
         }
     }
 }
 
 fn is_list_space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
-}
-
-fn is_bare_safe(byte: u8) -> bool {
-    !is_list_space(byte) && !matches!(byte, b'\\' | b'{' | b'}' | b'"' | b'$' | b'[' | b']' | b';')
 }
 
 #[cfg(test)]
@@ -350,13 +488,24 @@ mod tests {
     #[test]
     fn substitutes_backslash_sequences_outside_braces() {
         assert_eq!(
-            parse(br#"a\tb \x41 \u263a \101"#),
+            parse(br#"a\tb \x41 \u263a \101 \xff \777 a\ b\"#),
             vec![
                 b"a\tb".to_vec(),
                 b"A".to_vec(),
                 "☺".as_bytes().to_vec(),
-                b"A".to_vec()
+                b"A".to_vec(),
+                "ÿ".as_bytes().to_vec(),
+                b"?7".to_vec(),
+                b"a b\\".to_vec(),
             ]
+        );
+    }
+
+    #[test]
+    fn bare_braces_and_quotes_are_data() {
+        assert_eq!(
+            parse(b"a } b\"c"),
+            vec![b"a".to_vec(), b"}".to_vec(), b"b\"c".to_vec()]
         );
     }
 
@@ -364,24 +513,44 @@ mod tests {
     fn rejects_malformed_lists() {
         assert_eq!(
             TclListCodec::parse(b"{open").unwrap_err(),
-            TclListError::UnterminatedBrace
+            TclListError::UnmatchedBrace
         );
         assert_eq!(
             TclListCodec::parse(b"\"open").unwrap_err(),
-            TclListError::UnterminatedQuote
+            TclListError::UnmatchedQuote
         );
+        let junk = TclListCodec::parse(b"{a}x y").unwrap_err();
+        assert_eq!(junk, TclListError::JunkAfterBrace(b"x".to_vec()));
         assert_eq!(
-            TclListCodec::parse(b"{a}x").unwrap_err(),
-            TclListError::NonWhitespaceAfterBrace
+            junk.message(ListKind::Dict),
+            "dict element in braces followed by \"x\" instead of space"
         );
         assert_eq!(
             TclListCodec::parse(b"\"a\"x").unwrap_err(),
-            TclListError::NonWhitespaceAfterQuote
+            TclListError::JunkAfterQuote(b"x".to_vec())
         );
-        assert_eq!(
-            TclListCodec::parse(b"word\\").unwrap_err(),
-            TclListError::TrailingBackslash
-        );
+    }
+
+    #[test]
+    fn formats_like_tcl() {
+        for (elements, expected) in [
+            (vec!["a", "b c"], "a {b c}"),
+            (vec!["", "x"], "{} x"),
+            (vec!["#a", "#b"], "{#a} #b"),
+            (vec!["a]b", "a\"b"], "a\\]b a\\\"b"),
+            (vec!["a{", "}b"], "a\\{ \\}b"),
+            (vec!["a\\"], "a\\\\"),
+            (vec!["{a}", "$x", "a;b"], "{{a}} {$x} {a;b}"),
+            (vec!["a\nb"], "{a\nb}"),
+            (vec!["a\\\nb"], "a\\\\\\nb"),
+            (vec!["#{a"], "\\#\\{a"),
+        ] {
+            assert_eq!(
+                String::from_utf8(TclListCodec::format(&elements)).unwrap(),
+                expected,
+                "{elements:?}"
+            );
+        }
     }
 
     #[test]
@@ -392,6 +561,8 @@ mod tests {
             b"two words".to_vec(),
             b"a{b}\\c;$[d]".to_vec(),
             vec![0, 0xff, b' ', b'\n'],
+            b"}{".to_vec(),
+            b"x\\".to_vec(),
         ];
         let encoded = TclListCodec::format(&elements);
         assert_eq!(TclListCodec::parse(&encoded).unwrap(), elements);
@@ -406,18 +577,47 @@ mod tests {
             b"{a {b} \\
               c \\t}"
                 .to_vec(),
-            br#"a\tb \x41 \u263a \101"#.to_vec(),
+            br#"a\tb \x41 \u263a \101 \xe9 \351 a\ b\"#.to_vec(),
+            b"a } b\"c \\\n  d".to_vec(),
             TclListCodec::format([
                 b"plain".as_slice(),
                 b"two words".as_slice(),
                 b"a{b}\\c;$[d]".as_slice(),
-                &[0, 0xff, b' ', b'\n'],
+                b"#x".as_slice(),
+                b"}{".as_slice(),
             ]),
         ];
         for encoded in cases {
             let ours = TclListCodec::parse(&encoded).expect("our parser");
             let tcl = interp.split_list_bytes(&encoded).expect("Tcl parser");
             assert_eq!(ours, tcl, "encoded={encoded:?}");
+        }
+        for elements in [
+            vec![
+                "a", "b c", "", "#x", "a]b", "a\"b", "a{", "}b", "x\\", "{y}",
+            ],
+            vec!["#first", "$v", "a;b", "tab\there", "nl\nx", "\\{", "q\"{"],
+        ] {
+            let ours = String::from_utf8(TclListCodec::format(&elements)).unwrap();
+            let quoted = elements.iter().map(|element| {
+                let mut word = String::from("\"");
+                for ch in element.chars() {
+                    match ch {
+                        '\n' => word.push_str("\\n"),
+                        '\t' => word.push_str("\\t"),
+                        '\\' | '"' | '$' | '[' | ']' | '{' | '}' | ';' => {
+                            word.push('\\');
+                            word.push(ch);
+                        }
+                        ch => word.push(ch),
+                    }
+                }
+                word.push('"');
+                word
+            });
+            let script = format!("list {}", quoted.collect::<Vec<_>>().join(" "));
+            let tcl = interp.eval(&script).unwrap();
+            assert_eq!(ours, tcl, "{elements:?}");
         }
     }
 }

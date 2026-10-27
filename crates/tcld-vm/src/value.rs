@@ -116,22 +116,12 @@ impl VmObj {
     }
 
     pub fn as_bigint(&self) -> Result<BigInt, VmError> {
-        match self {
-            Self::Int(value) => Ok(BigInt::from(*value)),
-            Self::Bytes(bytes) => {
-                parse_tcl_bigint(&bytes.as_str_lossy()).ok_or_else(|| VmError::TclError {
-                    message: format!("expected integer but got \"{}\"", bytes.as_str_lossy()),
-                    error_info: None,
-                    error_code: Some("ARITH DOMAIN {expected integer}".into()),
-                })
-            }
-            Self::List(_) => Err(VmError::TclError {
-                message: "expected integer but got list".into(),
-                error_info: None,
-                error_code: None,
-            }),
-            Self::ProcBody(_) => Err(VmError::BridgeMarshalProcBody),
+        if let Self::ProcBody(_) = self {
+            return Err(VmError::BridgeMarshalProcBody);
         }
+        crate::number::of(self)
+            .and_then(|number| number.to_bigint())
+            .ok_or_else(|| crate::number::expected("integer", self))
     }
 
     pub fn ensure_bytes(&self) -> Result<ByteString, VmError> {
@@ -165,13 +155,12 @@ impl VmObj {
         }
     }
 
-    /// Tcl boolean truthiness (for jumps / `not` / land/lor).
+    /// Tcl boolean truthiness (`Tcl_GetBooleanFromObj`): boolean words or
+    /// numbers; anything else is an error.
     pub fn is_true(&self) -> Result<bool, VmError> {
         match self {
-            Self::Int(i) => Ok(*i != 0),
-            Self::Bytes(b) => Ok(tcl_bool_bytes(b.as_bytes())),
-            Self::List(xs) => Ok(!xs.is_empty()),
             Self::ProcBody(_) => Err(VmError::BridgeMarshalProcBody),
+            _ => crate::number::boolean(self),
         }
     }
 
@@ -251,28 +240,6 @@ pub fn parse_tcl_number(s: &str) -> Option<f64> {
     s.parse::<f64>().ok()
 }
 
-fn tcl_bool_bytes(b: &[u8]) -> bool {
-    if b.is_empty() {
-        return false;
-    }
-    if let Ok(s) = std::str::from_utf8(b) {
-        let t = s.trim();
-        if t.is_empty() {
-            return false;
-        }
-        if let Some(n) = parse_tcl_number(t) {
-            return n != 0.0;
-        }
-        match t.to_ascii_lowercase().as_str() {
-            "yes" | "true" | "on" => true,
-            "no" | "false" | "off" => false,
-            _ => true, // non-empty non-falsey strings are true in Tcl expr bool context often
-        }
-    } else {
-        true
-    }
-}
-
 /// Space-joined Tcl list string (MVP string-rep marshal).
 pub fn list_to_string(xs: &[VmObj]) -> Result<String, VmError> {
     Ok(String::from_utf8_lossy(&list_to_bytes(xs)?).into_owned())
@@ -303,63 +270,108 @@ pub fn cmp_values(a: &VmObj, b: &VmObj) -> Result<std::cmp::Ordering, VmError> {
     Ok(sa.cmp(&sb))
 }
 
-/// Simple glob match for `strmatch` (supports `*`, `?`; case-sensitive unless flag).
+/// `Tcl_StringCaseMatch`: glob matching with `*`, `?`, `[...]` sets and
+/// ranges, and `\` escapes; `nocase` compares Tcl's lowercase mappings.
 pub fn glob_match(pattern: &str, string: &str, nocase: bool) -> bool {
-    fn rec(p: &[u8], s: &[u8], nocase: bool) -> bool {
-        let mut i = 0;
-        let mut j = 0;
-        while i < p.len() {
-            match p[i] {
-                b'*' => {
-                    i += 1;
-                    if i == p.len() {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let string: Vec<char> = string.chars().collect();
+    glob_match_chars(&pattern, &string, nocase)
+}
+
+/// `TclMatchIsTrivial`: a pattern without glob characters matches only
+/// itself.
+pub fn match_is_trivial(pattern: &str) -> bool {
+    !pattern.contains(['*', '?', '[', '\\'])
+}
+
+fn glob_match_chars(pattern: &[char], string: &[char], nocase: bool) -> bool {
+    let fold = |c: char| {
+        if nocase {
+            crate::unicode::to_lower(c)
+        } else {
+            c
+        }
+    };
+    let (mut p, mut s) = (0, 0);
+    loop {
+        let Some(&next) = pattern.get(p) else {
+            return s == string.len();
+        };
+        if s == string.len() && next != '*' {
+            return false;
+        }
+        match next {
+            '*' => {
+                while pattern.get(p) == Some(&'*') {
+                    p += 1;
+                }
+                if p == pattern.len() {
+                    return true;
+                }
+                loop {
+                    if glob_match_chars(&pattern[p..], &string[s..], nocase) {
                         return true;
                     }
-                    while j <= s.len() {
-                        if rec(&p[i..], &s[j..], nocase) {
-                            return true;
-                        }
-                        if j == s.len() {
-                            break;
-                        }
-                        j += 1;
-                    }
-                    return false;
-                }
-                b'?' => {
-                    if j >= s.len() {
+                    if s == string.len() {
                         return false;
                     }
-                    i += 1;
-                    j += 1;
-                }
-                b'\\' if i + 1 < p.len() => {
-                    i += 1;
-                    if j >= s.len() || !eq_byte(p[i], s[j], nocase) {
-                        return false;
-                    }
-                    i += 1;
-                    j += 1;
-                }
-                c => {
-                    if j >= s.len() || !eq_byte(c, s[j], nocase) {
-                        return false;
-                    }
-                    i += 1;
-                    j += 1;
+                    s += 1;
                 }
             }
+            '?' => {
+                p += 1;
+                s += 1;
+            }
+            '[' => {
+                p += 1;
+                let ch = fold(string[s]);
+                s += 1;
+                loop {
+                    let start = match pattern.get(p) {
+                        None | Some(']') => return false,
+                        Some(&c) => fold(c),
+                    };
+                    p += 1;
+                    if pattern.get(p) == Some(&'-') {
+                        p += 1;
+                        let Some(&end) = pattern.get(p) else {
+                            return false;
+                        };
+                        let end = fold(end);
+                        p += 1;
+                        if (start <= ch && ch <= end) || (end <= ch && ch <= start) {
+                            break;
+                        }
+                    } else if start == ch {
+                        break;
+                    }
+                }
+                // Matched: skip the rest of the set. An unclosed set
+                // matches only at the end of the string.
+                loop {
+                    match pattern.get(p) {
+                        None => return s == string.len(),
+                        Some(']') => break,
+                        Some(_) => p += 1,
+                    }
+                }
+                p += 1;
+            }
+            _ => {
+                if next == '\\' {
+                    p += 1;
+                    if p == pattern.len() {
+                        return false;
+                    }
+                }
+                if fold(string[s]) != fold(pattern[p]) {
+                    return false;
+                }
+                p += 1;
+                s += 1;
+            }
         }
-        j == s.len()
     }
-    fn eq_byte(a: u8, b: u8, nocase: bool) -> bool {
-        if nocase {
-            a.eq_ignore_ascii_case(&b)
-        } else {
-            a == b
-        }
-    }
-    rec(pattern.as_bytes(), string.as_bytes(), nocase)
 }
 
 /// Parse `name(element)` array form → (name1, Some(name2)).

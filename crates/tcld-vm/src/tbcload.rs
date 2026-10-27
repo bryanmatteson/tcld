@@ -40,6 +40,7 @@ pub fn handle_bcproc_in_namespace(
     registry.register_vm_proc(VmProc {
         qname,
         args_spec,
+        body: None,
         code,
         num_args,
         num_locals,

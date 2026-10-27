@@ -283,3 +283,70 @@ Copyright 2026 Bryan Matteson. Licensed under the
 [Apache License, Version 2.0](LICENSE). Redistributed TclPro fixtures retain
 their original notices; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+
+The mapped debugger also supports real Tcl `coroutine`, `yield`, and `yieldto`.
+Its NRE adapter returns to Tcl before suspending, preserving each coroutine's
+source frames, local variables, command completions and code-qualified breakpoints.
+Runtime-generated and sourced bodies remain inspectable. `yieldto` targets run
+in the caller's variable context; nested coroutine transfers, resume values,
+execution traces, deletion and errors are checked against the embedded interpreter.
+The browser build uses this same adapter with the real Tcl runtime in its isolated
+worker; its existing memory, filesystem, output and watchdog limits still apply.
+
+The mapped debugger supports `try` with native Tcl `on`, `trap`, shared handler
+bodies and `finally`. Tcl owns validation, handler matching, variable bindings and
+completion precedence, including nested `-during` options. Executed scripts gain
+source images and caller links, instruction stepping, breakpoints and editable
+live locals. Native NRE continuations retain pending cleanup across coroutine
+suspension and run it before a pending tail target. Deleting a coroutine follows
+Tcl's rewind semantics: it releases suspended state without running a pending
+`finally`. The native entry accepts only the exact single-use mapped request;
+calling the internal command cannot bypass source admission.
+
+
+`switch` and `lmap` use the same native NRE control adapter. Tcl owns switch
+selection (exact/glob/regexp, captures, fallthrough and defaults), and lmap's
+parallel iteration, variable bindings, padding and result collection. Selected
+branches and each lmap iteration enter mapped source frames, including bodies
+constructed at runtime. The exact captured text and caller links remain
+inspectable; code-qualified breakpoints persist across iterations and live-local
+edits affect the real ongoing operation. Traces, break/continue, errors, pending
+tail calls and coroutine suspension retain native Tcl behavior. Restart discards
+suspended continuations and their retained repeated-body templates.
+
+
+`subst` maps command substitutions, including those inside array indices and
+runtime-built templates. Tcl's own public parsers locate command/variable tokens;
+the real substitution engine retains flag handling, escapes, variable traces,
+completion semantics and deferred parse errors. Exact command source, bytecode,
+caller links and live locals remain inspectable and editable. `time` invokes the
+native Tcl timing command over a repeated mapped body, retaining the same source
+identity and breakpoints on each iteration. Timing includes debugger pauses and
+instrumentation. Native Tcl's restriction on yielding across time's C evaluator
+frame remains; debugger instruction stepping and suspension are supported.
+
+`apply` delegates lambda validation, formal/default/variadic argument binding,
+namespace resolution and procedure completion to native Tcl. Its body is a
+mapped source continuation, retaining exact runtime-generated text, its caller,
+breakpoints and live locals across native coroutine suspension. Tcl closures
+use ordinary command prefixes/explicit captured arguments or namespace state;
+no implicit lexical capture is added. No temporary named procedures are created.
+
+
+`dict for`, `dict map`, `dict update`, and `dict with` also delegate iteration,
+key selection, binding, write-back and completion handling to native Tcl. Their
+literal or generated bodies have source images, caller links, instruction
+stepping, reusable breakpoints and live variable edits across coroutine yields.
+`dict with` resolves its native frame's variables lazily to the mapped caller's
+storage: Tcl reads the dictionary and discovers keys itself, without a second
+read that could duplicate traces or observe a different value. Its native
+finalizer still owns write-back, missing variables, nested paths and error
+precedence. `dict filter ... script` also maps literal/generated predicates,
+including computed subcommands and filter modes. Its native C adapter ports Tcl's
+synchronous filter loop to Tcl NRE continuations: Tcl's dictionary APIs, variable
+bindings and boolean conversion retain original pairs/order, traces and completion
+semantics while allowing real coroutine suspension. Predicate edits affect which
+pairs are selected; changing bound keys/values does not rewrite selected pairs.
+Key/value glob modes keep their upstream implementation. This extends stock Tcl's
+filter, whose recursive C evaluator prevents coroutine yields.

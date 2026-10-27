@@ -34,6 +34,16 @@ pub(crate) fn run(this: &mut Decompiler, range: Range<i32>) {
                 ),
                 _ => continue,
             };
+        // Processing an outer loop recursively replaces its nested starts.
+        // The candidates above are a snapshot, so skip nodes no longer owned
+        // by the live graph rather than rebuilding them from stale operands.
+        if !this
+            .graph
+            .code_at_location(start_location)
+            .is_some_and(|live| live.ptr_eq(&start))
+        {
+            continue;
+        }
         let aux = match this.bytecode.auxiliaries.get(aux_idx) {
             Some(aux) => aux,
             None => continue,
@@ -135,6 +145,9 @@ pub(crate) fn run(this: &mut Decompiler, range: Range<i32>) {
                 this.process(body_range.clone());
                 let body_codes = this.filter_codes(this.graph.code_in_range(body_range));
 
+                if foreach_codes.is_empty() {
+                    continue;
+                }
                 let cmd = cmd_foreach(foreach_codes, CmdBody::new(body_codes), lists, values);
                 this.graph.replace_code(cmd);
             }
@@ -199,6 +212,9 @@ pub(crate) fn run(this: &mut Decompiler, range: Range<i32>) {
                     continue;
                 }
                 let foreach_codes = this.graph.code_in_range(start_loc..end_loc);
+                if foreach_codes.is_empty() {
+                    continue;
+                }
                 let cmd = cmd_foreach(foreach_codes, CmdBody::new(body_codes), lists, values);
                 this.graph.replace_code(cmd);
             }

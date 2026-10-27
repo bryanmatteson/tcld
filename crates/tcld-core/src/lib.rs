@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod bytecode;
 pub mod error;
 pub mod inst_table;
+pub mod number;
 pub mod scanner;
 pub mod source;
 pub mod util;
