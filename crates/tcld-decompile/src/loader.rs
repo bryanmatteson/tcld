@@ -32,6 +32,9 @@ pub struct LoadedBytecode {
     pub provenance: LoadProvenance,
     pub payload_text: String,
     pub original_source: Option<String>,
+    /// Inline-traced command regions when the bytecode came from tcld's own
+    /// compiler; empty for Tcl-compiled bytecode.
+    pub trace_captures: Vec<crate::decompiler::InlineTraceCapture>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +128,7 @@ pub fn load_bytecode(input: LoadInput) -> Result<LoadedBytecode> {
                 },
                 payload_text: payload,
                 original_source: Some(source),
+                trace_captures: Vec::new(),
             })
         }
         LoadInput::RawPayloadText { payload, label } => {
@@ -142,6 +146,7 @@ pub fn load_bytecode(input: LoadInput) -> Result<LoadedBytecode> {
                 },
                 payload_text: normalized,
                 original_source: None,
+                trace_captures: Vec::new(),
             })
         }
         LoadInput::TclSourceText { source, label } => {
@@ -158,6 +163,7 @@ pub fn load_bytecode(input: LoadInput) -> Result<LoadedBytecode> {
                 },
                 payload_text: payload,
                 original_source: Some(source),
+                trace_captures: Vec::new(),
             })
         }
         LoadInput::RawBytes { bytes, label } => {

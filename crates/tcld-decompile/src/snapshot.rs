@@ -106,12 +106,14 @@ impl AnalysisSnapshot {
         let traces =
             interpret_trace_frames_with_auxiliaries(&instructions, &loaded.bytecode.auxiliaries);
         let groups = build_instruction_group_map(&instructions, &loaded.bytecode);
-        let decompiled =
-            match Decompiler::new(loaded.bytecode.clone())?.get_output_with_diagnostics() {
-                Ok(report) => report,
-                Err(_) => Decompiler::new(loaded.bytecode.clone())?
-                    .get_output_approximate_with_diagnostics()?,
-            };
+        let decompiler = || -> Result<Decompiler> {
+            Ok(Decompiler::new(loaded.bytecode.clone())?
+                .with_trace_captures(loaded.trace_captures.clone()))
+        };
+        let decompiled = match decompiler()?.get_output_with_diagnostics() {
+            Ok(report) => report,
+            Err(_) => decompiler()?.get_output_approximate_with_diagnostics()?,
+        };
         let source_map = SourceMap::from_decompiled_output(
             &loaded.bytecode,
             &decompiled.output,

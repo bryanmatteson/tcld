@@ -32,6 +32,56 @@ fn every_bundled_example_compiles_matching_original_source() {
 }
 
 #[test]
+fn bundled_examples_reconstruct_strictly_as_their_source_commands() {
+    for id in ["hello", "proc", "for-break", "expr", "foreach", "catch"] {
+        let result = tcld_tauri::load_bundled_example(id).unwrap();
+        assert_eq!(result.reconstruction, "Strict", "{id}");
+        assert!(result.diagnostics.unreduced_opcodes.is_empty(), "{id}");
+        assert!(result.diagnostics.approximations.is_empty(), "{id}");
+        // Compiler step boundaries and inline trace captures used to surface
+        // as one word per line or as `[list <command> ...]` wrappers.
+        assert!(
+            result
+                .decompile_text
+                .lines()
+                .all(|line| !line.trim_start().starts_with('[')),
+            "{id}: {}",
+            result.decompile_text
+        );
+    }
+
+    let hello = tcld_tauri::load_bundled_example("hello").unwrap();
+    assert_eq!(hello.decompile_text, "set msg {hello, world}\nset msg");
+
+    let procs = tcld_tauri::load_bundled_example("proc").unwrap();
+    assert!(
+        procs
+            .decompile_text
+            .starts_with("proc a { x } {\n    return \"$x : $x\"\n}"),
+        "{}",
+        procs.decompile_text
+    );
+    assert!(procs.decompile_text.ends_with("list [a TEST] [b TEST]"));
+
+    let catch = tcld_tauri::load_bundled_example("catch").unwrap();
+    assert_eq!(
+        catch.decompile_text,
+        "set result FAIL\ncatch {\n    error PASS\n} result\nset result"
+    );
+}
+
+#[test]
+fn inline_traced_control_flow_renders_from_its_source_words() {
+    let source = "set a 2\nif {$a > 1} {puts big} else {puts small}\nputs done\n";
+    let result = tcld_tauri::do_load_source(source, "branch.tcl").unwrap();
+    assert_eq!(result.reconstruction, "Strict");
+    assert_eq!(
+        result.decompile_text,
+        "set a 2\nif {$a > 1} {puts big} else {puts small}\nputs done"
+    );
+}
+
+#[test]
 fn plain_source_load_uses_compiler_and_never_executes_commands() {
     let result = tcld_tauri::do_load_source("set value 42\nputs $value\n", "sample.tcl").unwrap();
     assert_eq!(result.metadata.filename, "sample.tcl");

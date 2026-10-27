@@ -1227,8 +1227,22 @@ pub fn do_load_source(source: &str, label: &str) -> Result<LoadResult, String> {
         tcld_compile::CompileMode::Hybrid,
     )
     .map_err(|error| error.to_string())?;
+    let unit = image.top_level();
+    // The compiler's inline command traces are debugger instrumentation; the
+    // decompiler renders those regions from their captured words instead.
+    let trace_captures = unit
+        .commands
+        .iter()
+        .filter(|map| map.trace_inline)
+        .map(|map| tcld_decompile::InlineTraceCapture {
+            anchor_pc: map.anchor_pc as i32,
+            trace_pc: map.trace_pc as i32,
+            trace_end_pc: map.trace_end_pc as i32,
+            argv_count: map.trace_argv_count,
+        })
+        .collect();
     let snapshot = tcld_decompile::AnalysisSnapshot::from_loaded(tcld_decompile::LoadedBytecode {
-        bytecode: image.top_level().bytecode.clone(),
+        bytecode: unit.bytecode.clone(),
         provenance: tcld_decompile::LoadProvenance {
             kind: tcld_decompile::LoadKind::TclSourceText,
             label: label.into(),
@@ -1238,6 +1252,7 @@ pub fn do_load_source(source: &str, label: &str) -> Result<LoadResult, String> {
         },
         payload_text: String::new(),
         original_source: Some(source.into()),
+        trace_captures,
     })
     .map_err(|error| error.to_string())?;
     let mut result = snapshot_to_dto(&snapshot, "tree-sitter-tcl");

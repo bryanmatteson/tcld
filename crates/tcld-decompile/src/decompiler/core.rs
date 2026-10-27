@@ -154,12 +154,20 @@ impl Decompiler {
             bytecode,
             graph,
             fastpath_suppress,
+            trace_captures: Vec::new(),
             is_proc_body,
             pipeline_config,
             pass_trace: Vec::new(),
             pipeline_error: None,
             nested_render_issues: Vec::new(),
         })
+    }
+
+    /// Inline-traced command regions to render from their captured words;
+    /// see [`InlineTraceCapture`].
+    pub fn with_trace_captures(mut self, captures: Vec<InlineTraceCapture>) -> Self {
+        self.trace_captures = captures;
+        self
     }
 
     pub(super) fn stitch_ranges(&self, starts: &[i32], ends: &[i32]) -> Vec<Range<i32>> {
@@ -226,10 +234,29 @@ impl Decompiler {
             .collect();
         let mut reduced = true;
         for pop in pops {
-            if let Some(cmd_ref) = self.graph.single_source_of(&pop) {
+            // Walk back over single-predecessor no-ops (tcld's compiler puts a
+            // `Nop` step boundary between a command and its pop) to the value
+            // producer; the no-ops are absorbed with the pop.
+            let mut boundaries = Vec::new();
+            let mut source = self.graph.single_source_of(&pop);
+            while let Some(candidate) = source.clone() {
+                let is_noop = matches!(
+                    &*candidate.borrow(),
+                    Code::Instruction(inst) if is_ir_ignorable_inst(inst.opcode)
+                );
+                if !is_noop {
+                    break;
+                }
+                source = self.graph.single_source_of(&candidate);
+                boundaries.push(candidate);
+            }
+            if let Some(cmd_ref) = source {
                 let replaced = {
                     let mut borrowed = cmd_ref.borrow_mut();
                     if let Code::Command(cmd) = &mut *borrowed {
+                        for boundary in boundaries {
+                            cmd.merge_one(boundary);
+                        }
                         cmd.merge_one(pop);
                         cmd.destack();
                         true
@@ -1012,6 +1039,7 @@ impl Decompiler {
         if std::env::var("TCLD_DEBUG_FASTPATH").is_ok() {
             eprintln!("fastpath ranges: {:?}", self.fastpath_suppress);
         }
+        self.collapse_inline_trace_captures();
         self.process(range.clone());
         if let Some(error) = self.pipeline_error.take() {
             return Err(TcldError::Other(error));
@@ -1055,6 +1083,7 @@ impl Decompiler {
         if range.start >= range.end {
             return Ok(Vec::new());
         }
+        self.collapse_inline_trace_captures();
         self.process(range.clone());
         if let Some(error) = self.pipeline_error.take() {
             return Err(TcldError::Other(error));
@@ -1254,6 +1283,42 @@ impl Decompiler {
         } else {
             None
         }
+    }
+
+    /// The `argc` commands that end at `idx`, stepping over only semantic
+    /// no-ops (`Nop`, `StartCmd`). Source compiled by tcld places a `Nop`
+    /// stepping boundary before each invoke and before the following `pop`;
+    /// those must not stop a command from reducing. Unlike
+    /// `collect_args_skipping`, control-flow separators still end the search.
+    pub(super) fn collect_args_ignoring_noops(
+        &self,
+        codes: &[CodeRef],
+        idx: usize,
+        argc: usize,
+    ) -> Option<(usize, Vec<CodeRef>)> {
+        let mut args = Vec::with_capacity(argc);
+        let mut start_idx = idx;
+        let mut i = idx;
+        while i > 0 && args.len() < argc {
+            i -= 1;
+            let code = &codes[i];
+            if code.borrow().is_command() {
+                args.push(code.clone());
+                start_idx = i;
+                continue;
+            }
+            if let Code::Instruction(inst) = &*code.borrow()
+                && is_ir_ignorable_inst(inst.opcode)
+            {
+                continue;
+            }
+            return None;
+        }
+        if args.len() != argc {
+            return None;
+        }
+        args.reverse();
+        Some((start_idx, args))
     }
 
     pub(super) fn command_at_depth(

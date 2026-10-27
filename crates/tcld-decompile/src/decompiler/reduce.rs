@@ -126,13 +126,12 @@ impl Decompiler {
                 let children = codes[start_idx..=idx].to_vec();
                 (args, children)
             } else {
-                let args = &codes[idx - argc..idx];
-                if !args.iter().all(|c| c.borrow().is_command()) {
-                    continue;
-                }
-                let mut children: Vec<CodeRef> = args.to_vec();
-                children.push(code.clone());
-                (args.to_vec(), children)
+                let (start_idx, args) = match self.collect_args_ignoring_noops(&codes, idx, argc) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let children = codes[start_idx..=idx].to_vec();
+                (args, children)
             };
 
             let replacement: Option<CodeRef> = handle_load_opcodes(inst, &args, children.clone())
@@ -158,6 +157,74 @@ impl Decompiler {
         } else {
             Some(replacements)
         }
+    }
+
+    /// Render each inline-traced command region (see [`InlineTraceCapture`])
+    /// as one command built from its captured words. Regions inside another
+    /// region's implementation are absorbed by that outer command, so only
+    /// the rest are collapsed, innermost first so a capture nested in an
+    /// outer command's words is a finished word by the time the outer one is.
+    pub(super) fn collapse_inline_trace_captures(&mut self) {
+        let captures = std::mem::take(&mut self.trace_captures);
+        let mut pending: Vec<InlineTraceCapture> = captures
+            .iter()
+            .copied()
+            .filter(|capture| {
+                !captures.iter().any(|outer| {
+                    outer.trace_pc < capture.anchor_pc && capture.trace_end_pc < outer.trace_end_pc
+                })
+            })
+            .collect();
+        pending.sort_by_key(|capture| capture.trace_end_pc - capture.anchor_pc);
+        for capture in pending {
+            self.collapse_inline_trace_capture(capture);
+        }
+    }
+
+    /// Collapse one region, or leave it untouched when its shape doesn't
+    /// match the compiler's layout (words, `list argv_count`, then `Nop`s).
+    fn collapse_inline_trace_capture(&mut self, capture: InlineTraceCapture) -> bool {
+        let words = self
+            .graph
+            .code_in_range(capture.anchor_pc..capture.trace_pc);
+        let Some(list) = words.last().cloned() else {
+            return false;
+        };
+        let list_pc = {
+            let borrowed = list.borrow();
+            let Code::Instruction(inst) = &*borrowed else {
+                return false;
+            };
+            if inst.opcode != Opcode::List
+                || usize::try_from(inst.argc()).ok() != Some(capture.argv_count)
+            {
+                return false;
+            }
+            inst.location
+        };
+
+        self.process_instructions(capture.anchor_pc..list_pc);
+        let codes = self.graph.code_in_range(capture.anchor_pc..list_pc);
+        let Some((start_idx, args)) =
+            self.collect_args_ignoring_noops(&codes, codes.len(), capture.argv_count)
+        else {
+            return false;
+        };
+        // Anything else left on the stack ahead of the words means the region
+        // isn't the plain capture layout; don't guess.
+        let only_noops_before = codes[..start_idx].iter().all(|code| {
+            matches!(&*code.borrow(), Code::Instruction(inst) if is_ir_ignorable_inst(inst.opcode))
+        });
+        if !only_noops_before {
+            return false;
+        }
+
+        let children = self
+            .graph
+            .code_in_range(capture.anchor_pc..capture.trace_end_pc + 1);
+        let vals: Vec<SourceRef> = args.iter().map(code_as_source).collect();
+        self.graph.replace_code(cmd_proc_call(children, vals));
+        true
     }
 }
 
@@ -310,6 +377,61 @@ mod tests {
                 .values()
                 .any(|child| child.ptr_eq(&separator)),
             "reduction separators must remain attached for source mapping"
+        );
+    }
+
+    #[test]
+    fn invoke_reduces_across_compiler_step_boundaries() {
+        // tcld-compiled source: `nop` boundaries sit before the invoke and
+        // before the following pop (`puts hi` as a discarded statement).
+        let mut decompiler = Decompiler::new(empty_bytecode()).expect("decompiler");
+        let boundary = instruction(4, Opcode::Nop, Vec::new());
+        let replacements = decompiler
+            .reduce_instructions(vec![
+                literal(0, "puts"),
+                literal(2, "hi"),
+                boundary.clone(),
+                instruction(5, Opcode::InvokeStk1, vec![2]),
+            ])
+            .expect("invoke reduction");
+
+        assert_eq!(replacements.len(), 1);
+        let borrowed = replacements[0].borrow();
+        let Code::Command(command) = &*borrowed else {
+            panic!("invokeStk1 must reduce to a command");
+        };
+        let CommandKind::ProcCall { args } = &command.kind else {
+            panic!("invokeStk1 proc call");
+        };
+        assert_eq!(
+            args.iter()
+                .map(|arg| arg.repr_cow().into_owned())
+                .collect::<Vec<_>>(),
+            ["puts", "hi"]
+        );
+        assert!(
+            command
+                .base
+                .block
+                .children
+                .values()
+                .any(|child| child.ptr_eq(&boundary)),
+            "step boundaries must remain attached for source mapping"
+        );
+    }
+
+    #[test]
+    fn strict_reduction_still_stops_at_control_flow() {
+        let mut decompiler = Decompiler::new(empty_bytecode()).expect("decompiler");
+        assert!(
+            decompiler
+                .reduce_instructions(vec![
+                    literal(0, "puts"),
+                    instruction(2, Opcode::Jump1, vec![2]),
+                    literal(4, "hi"),
+                    instruction(6, Opcode::InvokeStk1, vec![2]),
+                ])
+                .is_none()
         );
     }
 

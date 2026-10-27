@@ -69,9 +69,9 @@ pub use loader::{LoadInput, LoadKind, LoadProvenance, LoadedBytecode, load_bytec
 pub use snapshot::{AnalysisSnapshot, build_instruction_group_map};
 
 // Plugin architecture exports
-pub use decompiler::Decompiler;
 pub use decompiler::pass_registry::{PassRegistry, global_registry, register_pass};
 pub use decompiler::pass_trait::DecompilerPass;
+pub use decompiler::{Decompiler, InlineTraceCapture};
 
 // Source mapping exports for interactive diffing
 pub use decompiler::source_map::{CommandPath, OriginalSourceStatus, SourceMap, SourceMapEntry};

@@ -21,10 +21,25 @@ pub mod pass_registry;
 pub mod pass_trait;
 pub mod source_map;
 
+/// A command the tcld compiler traced inline (`VerifiedCommandMap` with
+/// `trace_inline` in tcld-compile). Its words are evaluated and packed by
+/// `list argv_count` ahead of the `Nop` at `trace_pc`, where the VM pops them
+/// as the command's argv; the implementation then runs up to the `Nop` at
+/// `trace_end_pc`. The source command is exactly that argv, so the decompiler
+/// renders the region from its words and treats the rest as instrumentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InlineTraceCapture {
+    pub anchor_pc: i32,
+    pub trace_pc: i32,
+    pub trace_end_pc: i32,
+    pub argv_count: usize,
+}
+
 pub struct Decompiler {
     bytecode: ByteCode,
     graph: CodeGraph,
     fastpath_suppress: Vec<Range<i32>>,
+    trace_captures: Vec<InlineTraceCapture>,
     is_proc_body: bool,
     pipeline_config: DecompilePipelineConfig,
     pass_trace: Vec<crate::diagnostics::PassDecision>,

@@ -111,3 +111,34 @@ fn instruction_successors_match_trace_successors_for_terminal_and_multiway_contr
         "terminal instructions must not advertise fallthrough"
     );
 }
+
+#[test]
+fn trace_capture_hints_that_do_not_match_the_bytecode_change_nothing() {
+    let baseline =
+        AnalysisSnapshot::from_input(LoadInput::path(fixture("expr.tbc"))).expect("snapshot loads");
+    let mut loaded =
+        tcld_decompile::load_bytecode(LoadInput::path(fixture("expr.tbc"))).expect("loads");
+    let end = baseline.instructions.last().expect("instructions").pc;
+    // Tcl-compiled bytecode has no `list N` capture before these boundaries,
+    // so every hint must be rejected rather than reshaping the output.
+    loaded.trace_captures = vec![
+        tcld_decompile::InlineTraceCapture {
+            anchor_pc: 0,
+            trace_pc: end / 2,
+            trace_end_pc: end,
+            argv_count: 2,
+        },
+        tcld_decompile::InlineTraceCapture {
+            anchor_pc: 0,
+            trace_pc: end,
+            trace_end_pc: end,
+            argv_count: 99,
+        },
+    ];
+    let hinted = AnalysisSnapshot::from_loaded(loaded).expect("snapshot loads");
+    assert_eq!(hinted.decompile.text, baseline.decompile.text);
+    assert_eq!(
+        hinted.diagnostics.reconstruction,
+        baseline.diagnostics.reconstruction
+    );
+}
