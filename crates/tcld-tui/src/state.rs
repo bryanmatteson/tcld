@@ -52,35 +52,6 @@ pub const DEFAULT_MODE_SPECS: &[ModeSpec] = &[
     },
 ];
 
-pub(crate) fn format_affordances(affordances: &[&str]) -> String {
-    let mut formatted = Vec::new();
-    let mut index = 0;
-    while index < affordances.len() {
-        if affordances[index] == "Command"
-            && affordances
-                .get(index + 1)
-                .is_some_and(|next| *next == "Palette")
-        {
-            formatted.push("Command Palette".to_string());
-            index += 2;
-        } else {
-            formatted.push(display_affordance_label(affordances[index]).to_string());
-            index += 1;
-        }
-    }
-    formatted.join(" | ")
-}
-
-fn display_affordance_label(affordance: &str) -> &str {
-    match affordance {
-        "Diff" => "Open",
-        "Diff Close" | "Close" => "Close",
-        "Next" => "Next change",
-        "Previous" => "Previous change",
-        other => other,
-    }
-}
-
 /// Cursor position and scroll offsets per view.
 #[derive(Debug, Default)]
 pub struct NavigationState {
@@ -90,8 +61,13 @@ pub struct NavigationState {
     pub selections: HashMap<ViewId, usize>,
     /// Per-view scroll offset (for list views).
     pub list_scrolls: HashMap<ViewId, usize>,
-    /// Per-view scroll offset (for document views).
+    /// Per-view scroll offset (for document views): the first visible line.
     pub doc_scrolls: HashMap<ViewId, usize>,
+    /// Per-view cursor line (for document views). The inspector, the outline
+    /// and links describe this line; the renderer scrolls to keep it visible.
+    pub doc_cursors: HashMap<ViewId, usize>,
+    /// Where to return to: positions left by following links and jumping.
+    pub back_stack: Vec<NavPoint>,
     /// Scroll offset for the detail/context panel.
     pub detail_scroll: usize,
     /// Whether the detail panel is expanded.
@@ -119,6 +95,18 @@ impl NavigationState {
     pub fn doc_scroll(&self, view: ViewId) -> usize {
         self.doc_scrolls.get(&view).copied().unwrap_or(0)
     }
+
+    /// Get the document cursor line for the given view, defaulting to 0.
+    pub fn doc_cursor(&self, view: ViewId) -> usize {
+        self.doc_cursors.get(&view).copied().unwrap_or(0)
+    }
+}
+
+/// A position to return to with Back: a view and the entry or line in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NavPoint {
+    pub view: ViewId,
+    pub position: usize,
 }
 
 /// Command line state.
@@ -165,11 +153,11 @@ pub struct SearchState {
 /// Which pane has focus in multi-view layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneFocus {
-    /// The list panel (instructions, literals, etc.).
+    /// The navigation rail: the view list and, for documents, their outline.
     List,
-    /// The decompile panel (center pane).
+    /// The canvas (center pane) showing the current view.
     Decompile,
-    /// The detail/context panel (right pane).
+    /// The inspector (right pane).
     Context,
 }
 
@@ -203,7 +191,7 @@ impl Default for LayoutState {
     fn default() -> Self {
         Self {
             decompile_map_visible: true,
-            focused_pane: PaneFocus::List,
+            focused_pane: PaneFocus::Decompile,
             rail_mode: RailMode::Adaptive,
             rail_contrast: 1,
             mode_index: 0,
@@ -257,6 +245,10 @@ pub struct HitTestState {
     pub decompile_text_area: Option<Rect>,
     pub decompile_rail_area: Option<Rect>,
     pub decompile_rail_groups: Vec<usize>,
+    /// Rows of the navigation rail: views to open and outline lines to jump to.
+    pub rail_targets: Vec<(Rect, RailTarget)>,
+    /// The document text area, its view, and the line at its top row.
+    pub document_target: Option<(Rect, ViewId, usize)>,
     pub last_frame_area: Rect,
 }
 
@@ -272,9 +264,18 @@ impl Default for HitTestState {
             decompile_text_area: None,
             decompile_rail_area: None,
             decompile_rail_groups: Vec::new(),
+            rail_targets: Vec::new(),
+            document_target: None,
             last_frame_area: Rect::new(0, 0, 0, 0),
         }
     }
+}
+
+/// What a click on a rail row does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RailTarget {
+    View(ViewId),
+    OutlineLine(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

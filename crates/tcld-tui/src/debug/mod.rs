@@ -17,12 +17,13 @@ pub mod state;
 pub mod types;
 
 pub use bindings::{
-    BindingContext, DEBUG_BINDINGS, DebugAction, compact_hints, help_lines, resolve_binding,
-    verify_bindings,
+    BindingContext, DEBUG_BINDINGS, DebugAction, HelpSection, help_lines, help_sections,
+    resolve_binding, verify_bindings,
 };
 pub use render::{panel_block, render, render_in};
 pub use state::{
-    DebugUiState, HitTargets, Pane, PaneHit, PaneSelections, PromptInput, PromptStep, prompt_step,
+    DebugUiState, HitTargets, Pane, PaneHit, PaneSelections, PromptInput, PromptStep, ValuePopup,
+    prompt_step,
 };
 pub use types::{
     AppState, BreakpointKindLabel, CoverageRow, DebugSnapshot, EventLine, EventSeverity,

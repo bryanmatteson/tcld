@@ -34,6 +34,17 @@ pub struct DocumentAnchor {
     pub parent_path: Option<String>,
     pub label: String,
     pub line_span: (usize, usize),
+    /// Command group whose instructions produced these lines, when known.
+    pub group: Option<usize>,
+}
+
+/// Where following an entry leads: another entry, possibly in another view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    pub view: ViewId,
+    pub index: usize,
+    /// What the target is, in a few words (`jump target pc 42`).
+    pub label: String,
 }
 
 pub const MAX_RETAINED_SEARCH_HITS: usize = 1_000;
@@ -135,6 +146,13 @@ pub trait DataSource {
             total_matches,
             hit_indices,
         }
+    }
+
+    /// Where Enter on a list entry leads, if anywhere: a jump's target, the
+    /// first instruction that uses a literal, and so on. Entries without a
+    /// link of their own fall back to revealing their decompiled source.
+    fn list_link(&self, _view: ViewId, _index: usize) -> Option<Link> {
+        None
     }
 
     /// Jump to a value (e.g. PC or line number). Returns the target list index.

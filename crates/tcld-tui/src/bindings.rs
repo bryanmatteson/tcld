@@ -14,7 +14,6 @@ pub enum BindingContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindingAction {
     QuitImmediate,
-    QuitConfirm,
     Help,
     Command,
     Palette,
@@ -27,6 +26,8 @@ pub enum BindingAction {
     ToggleTrace,
     RevealDecompile,
     NavigateGroup(i8),
+    Follow,
+    Back,
     ToggleInspector,
     FocusNext,
     FocusPrevious,
@@ -59,6 +60,7 @@ impl KeyChord {
         let key = match self.code {
             KeyCode::Char(c) => c.to_string(),
             KeyCode::Enter => "Enter".to_string(),
+            KeyCode::Backspace => "Backspace".to_string(),
             KeyCode::Esc => "Esc".to_string(),
             KeyCode::Tab => "Tab".to_string(),
             KeyCode::BackTab => "Shift-Tab".to_string(),
@@ -91,7 +93,7 @@ pub fn normal_bindings<D: DataSource>(app: &TuiApp<D>) -> Vec<Binding> {
         binding(
             KeyCode::Char('q'),
             KeyModifiers::empty(),
-            BindingAction::QuitConfirm,
+            BindingAction::QuitImmediate,
         ),
         binding(
             KeyCode::Char('?'),
@@ -178,8 +180,19 @@ pub fn normal_bindings<D: DataSource>(app: &TuiApp<D>) -> Vec<Binding> {
             KeyModifiers::empty(),
             BindingAction::NavigateGroup(1),
         ),
+        binding(KeyCode::Enter, KeyModifiers::empty(), BindingAction::Follow),
         binding(
-            KeyCode::Enter,
+            KeyCode::Backspace,
+            KeyModifiers::empty(),
+            BindingAction::Back,
+        ),
+        binding(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+            BindingAction::Back,
+        ),
+        binding(
+            KeyCode::Char('z'),
             KeyModifiers::empty(),
             BindingAction::ToggleInspector,
         ),

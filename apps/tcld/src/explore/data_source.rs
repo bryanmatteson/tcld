@@ -2,7 +2,7 @@ use crate::explore::model::{ExplorerCore, ExplorerView};
 use std::fmt::Write as _;
 use tcld_explore::{ExplorerCommandRequest, ExplorerCommandResult};
 use tcld_tui::data::{
-    DataSource, DecompileRenderContext, DocumentAnchor, ListEntry, OperationAvailability,
+    DataSource, DecompileRenderContext, DocumentAnchor, Link, ListEntry, OperationAvailability,
     SemanticDiff, ViewId,
 };
 use tcld_tui::style;
@@ -221,6 +221,58 @@ impl DataSource for ExplorerCore {
         self.core().list_detail(ev, index)
     }
 
+    fn list_link(&self, view: ViewId, index: usize) -> Option<Link> {
+        let snapshot = self.core().snapshot()?;
+        let instruction_at = |pc: i32| {
+            snapshot
+                .instructions
+                .iter()
+                .position(|instruction| instruction.pc == pc)
+        };
+        match view {
+            VIEW_INSTRUCTIONS => {
+                let instruction = snapshot.instructions.get(index)?;
+                let target = instruction.jump_target.filter(|_| instruction.is_jump)?;
+                Some(Link {
+                    view: VIEW_INSTRUCTIONS,
+                    index: instruction_at(target)?,
+                    label: format!("jump target pc {target}"),
+                })
+            }
+            VIEW_LITERALS => {
+                let literal = i32::try_from(index).ok()?;
+                let (position, instruction) =
+                    snapshot
+                        .instructions
+                        .iter()
+                        .enumerate()
+                        .find(|(_, instruction)| {
+                            instruction.op.starts_with("push")
+                                && instruction.operands.first() == Some(&literal)
+                        })?;
+                Some(Link {
+                    view: VIEW_INSTRUCTIONS,
+                    index: position,
+                    label: format!("first use of literal {index} at pc {}", instruction.pc),
+                })
+            }
+            VIEW_EXCEPTIONS => {
+                let range = snapshot.exceptions.get(index)?;
+                let start = range.code_range[0];
+                let position = snapshot
+                    .instructions
+                    .iter()
+                    .position(|instruction| instruction.pc >= start)?;
+                Some(Link {
+                    view: VIEW_INSTRUCTIONS,
+                    index: position,
+                    label: format!("start of exception range {index} at pc {start}"),
+                })
+            }
+            _ => None,
+        }
+    }
+
     fn jump_index(&self, view: ViewId, value: i32) -> Option<usize> {
         let ev = to_explorer_view(view)?;
         let mut core = self.core().clone();
@@ -262,6 +314,7 @@ impl DataSource for ExplorerCore {
                     parent_path,
                     label: anchor.snippet,
                     line_span: anchor.source_lines,
+                    group: anchor.parent_root_group,
                 }
             })
             .collect())

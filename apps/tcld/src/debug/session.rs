@@ -23,7 +23,7 @@ use super::config::NubPaths;
 
 pub struct Session {
     ctrl: Controller,
-    _nub: NubChild,
+    nub: NubChild,
     last_paused: Option<WireEvent>,
     last_error: Option<WireEvent>,
     bound_port: u16,
@@ -113,7 +113,7 @@ impl Session {
 
         Ok(Self {
             ctrl,
-            _nub: nub,
+            nub,
             last_paused: None,
             last_error: None,
             bound_port: port,
@@ -171,6 +171,11 @@ impl Session {
             Err(ControllerError::Wire(w)) => Err(format!("{}: {}", w.code.as_str(), w.message)),
             Err(other) => Err(other.to_string()),
         }
+    }
+
+    /// Lines the debugged program wrote since the last call.
+    pub fn drain_output(&mut self) -> Vec<tcld_debug_wire::NubOutput> {
+        self.nub.drain_output()
     }
 
     pub fn drain_events(&mut self) -> Vec<WireEvent> {
@@ -687,6 +692,7 @@ fn parse_bp_list(payload: &str) -> Vec<ProcBreakpoint> {
                 ignore_count: dict.get("ignore").and_then(|s| s.parse().ok()).unwrap_or(0),
                 condition: dict.get("condition").cloned(),
                 kind,
+                location_label: None,
             });
         }
     }
@@ -745,6 +751,7 @@ fn parse_stack(payload: &str) -> Vec<StackFrame> {
             line: dict.get("line").and_then(|s| s.parse().ok()),
             offset_start: dict.get("offset_start").and_then(|s| s.parse().ok()),
             offset_end: dict.get("offset_end").and_then(|s| s.parse().ok()),
+            location_label: None,
         });
     }
     out

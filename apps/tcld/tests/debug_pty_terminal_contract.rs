@@ -220,11 +220,11 @@ fn debug_tui_tracks_sourced_proc_and_eval_units_with_durable_pending_intent() {
     );
     pty.capture("multi_unit_entry", Duration::from_secs(8), |text| {
         require(text, "[Paused]")?;
-        require(text, "entry.tcl [user script]")?;
+        require(text, "Source · entry.tcl")?;
         require(text, "bp0")?;
         require(text, "bp1")?;
         require(text, "child.tcl:2 [pending]")?;
-        require(text, "child::work:5 [pending]")
+        require(text, "child::work +5 [pending]")
     });
 
     pty.send(b"c");
@@ -233,7 +233,7 @@ fn debug_tui_tracks_sourced_proc_and_eval_units_with_durable_pending_intent() {
         Duration::from_secs(8),
         |text| {
             require(text, "[Paused]")?;
-            require(text, "child.tcl [sourced file]")?;
+            require(text, "Source · child.tcl · sourced file")?;
             require(text, "bp0")?;
             require(text, "set ::child::file_marker child_file")?;
             require(text, "▶●    2")
@@ -245,26 +245,27 @@ fn debug_tui_tracks_sourced_proc_and_eval_units_with_durable_pending_intent() {
         "dynamic_proc_pending_resolved",
         Duration::from_secs(8),
         |text| {
+            // The proc opens inside child.tcl, at the file's own line 4.
             require(text, "[Paused]")?;
-            require(text, "proc child::work [proc body]")?;
+            require(text, "Source · child.tcl · in child::work · sourced file")?;
+            require(text, "at child::work · child.tcl:4")?;
+            require(text, "child.tcl:4 · child::work")?;
             require(text, "bp1")?;
             require(text, "set proc_marker child_proc")?;
-            require(text, "▶●    2")
+            require(text, "▶●    4")
         },
     );
 
     pty.send(b"\x1b[23;2~");
     pty.capture("return_to_eval_callsite", Duration::from_secs(8), |text| {
         require(text, "[Paused]")?;
-        require(text, "entry.tcl [user script]")?;
+        require(text, "Source · entry.tcl")?;
         require(text, "eval {set dynamic_marker eval_unit")
     });
     pty.send(b"\x1b[23~");
     pty.capture("anonymous_eval_identity", Duration::from_secs(8), |text| {
         require(text, "[Paused]")?;
-        require(text, "eval anon:")?;
-        require(text, "[eval session-only]")?;
-        require(text, "Source · eval (session-only)")?;
+        require(text, "Source · generated code · eval, session-only")?;
         require(text, "set dynamic_marker eval_unit")
     });
 
@@ -274,7 +275,7 @@ fn debug_tui_tracks_sourced_proc_and_eval_units_with_durable_pending_intent() {
         Duration::from_secs(8),
         |text| {
             require(text, "[Paused]")?;
-            require(text, "entry.tcl [user script]")?;
+            require(text, "Source · entry.tcl")?;
             require(text, "bp0")?;
             require(text, "bp1")?;
             require(text, "set completed 1")
@@ -287,9 +288,9 @@ fn debug_tui_tracks_sourced_proc_and_eval_units_with_durable_pending_intent() {
         Duration::from_secs(10),
         |text| {
             require(text, "[Paused]")?;
-            require(text, "entry.tcl [user script]")?;
+            require(text, "Source · entry.tcl")?;
             require(text, "child.tcl:2 [pending]")?;
-            require(text, "child::work:5 [pending]")?;
+            require(text, "child::work +5 [pending]")?;
             require(text, "session-only")
         },
     );
@@ -299,7 +300,7 @@ fn debug_tui_tracks_sourced_proc_and_eval_units_with_durable_pending_intent() {
         Duration::from_secs(8),
         |text| {
             require(text, "[Paused]")?;
-            require(text, "child.tcl [sourced file]")?;
+            require(text, "Source · child.tcl · sourced file")?;
             require(text, "bp0")?;
             require(text, "set ::child::file_marker child_file")?;
             require(text, "▶●    2")
@@ -404,7 +405,7 @@ fn debug_tui_nested_controls_update_visible_state() {
         Duration::from_secs(3),
         |text| {
             require(text, "●")?;
-            require(text, "breakpoint @")?;
+            require(text, "Breakpoint bp0 set at")?;
             require(text, "line 8, inner")?;
             require(text, "bp0")?;
             require(text, "inner")
@@ -415,7 +416,7 @@ fn debug_tui_nested_controls_update_visible_state() {
     pty.send(b"\x1b");
     pty.capture("nested_prompt_cancelled", Duration::from_secs(2), |text| {
         require(text, "[Paused]")?;
-        if text.contains("eval >") {
+        if text.contains(" eval › ") {
             return Err("Esc did not cancel eval prompt".to_string());
         }
         Ok(())
@@ -424,7 +425,7 @@ fn debug_tui_nested_controls_update_visible_state() {
     pty.send(b"\x1b[15~");
     pty.capture("nested_f5_breakpoint", Duration::from_secs(6), |text| {
         require(text, "[Paused]")?;
-        require(text, "outer : line 3")?;
+        require(text, "at outer · nested.tcl:8")?;
         require(text, "outer_value = ready")?;
         require(text, "Δ proc_count")?;
         require(text, "→ 1")?;
@@ -439,24 +440,25 @@ fn debug_tui_nested_controls_update_visible_state() {
 
     pty.send(b"1eformat {first\\nsecond}\r");
     pty.capture("nested_multiline_eval", Duration::from_secs(3), |text| {
-        require(text, "eval@")?;
-        require(text, "first")?;
+        require(text, "» format")?;
+        require(text, "← first")?;
         require(text, "second")
     });
 
     pty.send(b"\x1b[23~");
     pty.capture("nested_f11_step_into", Duration::from_secs(6), |text| {
         require(text, "[Paused]")?;
-        require(text, "inner : line 2")?;
+        require(text, "at inner · nested.tcl:2")?;
         require(text, "set inner_value 41")
     });
 
-    pty.send(b"2k");
+    // The Stack pane lists the paused frame first; its caller is below.
+    pty.send(b"2j");
     pty.capture("nested_parent_frame", Duration::from_secs(3), |text| {
         require(text, "outer_value = ready")?;
         require(text, "inner")
     });
-    pty.send(b"j");
+    pty.send(b"k");
     pty.capture(
         "nested_top_frame_restored",
         Duration::from_secs(3),
@@ -472,7 +474,7 @@ fn debug_tui_nested_controls_update_visible_state() {
     pty.send(b"\x1b[21~");
     pty.capture("nested_f10_step_over", Duration::from_secs(6), |text| {
         require(text, "[Paused]")?;
-        require(text, "inner : line 3")?;
+        require(text, "at inner · nested.tcl:3")?;
         require(text, "inner_value = 41")
     });
 
@@ -482,7 +484,7 @@ fn debug_tui_nested_controls_update_visible_state() {
         Duration::from_secs(6),
         |text| {
             require(text, "[Paused]")?;
-            require(text, "outer : line 4")?;
+            require(text, "at outer · nested.tcl:9")?;
             require(text, "set result 42")
         },
     );
@@ -501,7 +503,7 @@ fn debug_tui_nested_controls_update_visible_state() {
     pty.send(b"c");
     pty.capture("nested_c_breakpoint", Duration::from_secs(6), |text| {
         require(text, "[Paused]")?;
-        require(text, "outer : line 3")
+        require(text, "at outer · nested.tcl:8")
     });
     pty.send(b"c");
     pty.capture("nested_second_completion", Duration::from_secs(5), |text| {
@@ -543,16 +545,78 @@ fn debug_tui_breaks_on_a_nested_command_sharing_its_source_line() {
         "same_line_expr_breakpoint",
         Duration::from_secs(3),
         |text| {
-            require(text, "breakpoint @ line 1, expr")?;
+            require(text, "set at line 1, expr")?;
             require(text, "bp0")
         },
     );
     pty.send(b"c");
     pty.capture("same_line_expr_pause", Duration::from_secs(6), |text| {
         require(text, "[Paused]")?;
-        require(text, "demo : line 1")?;
-        require(text, "hits=1")
+        require(text, "at demo · same-line.tcl:1")?;
+        require(text, "hits 1")
     });
+    pty.send(b"\x03");
+    pty.wait_for_exit(Duration::from_secs(5));
+}
+
+#[test]
+#[cfg(feature = "integration_tclsh")]
+fn debug_tui_steps_into_procs_called_from_top_level_substitutions() {
+    let session_dir = tempfile::tempdir().expect("create substitution PTY directory");
+    let target = session_dir.path().join("subst.tcl");
+    fs::write(
+        &target,
+        "proc double {x} {\n    set doubled [expr {$x * 2}]\n    return $doubled\n}\nset answer [double 21]\nputs \"answer=$answer\"\n",
+    )
+    .expect("write top-level substitution fixture");
+    let target = target
+        .canonicalize()
+        .expect("canonical substitution fixture");
+    let mut pty = DebugPty::spawn_debug(
+        &target,
+        Path::new("/tmp/tcld-debug-unused-entry"),
+        Path::new("/tmp/tcld-debug-unused-breakpoint"),
+        None,
+    );
+    pty.capture("subst_entry", Duration::from_secs(8), |text| {
+        require(text, "[Paused]")?;
+        require(text, "▶     1")
+    });
+
+    // Tcl runs `[double 21]` before the `set` around it, so stepping over the
+    // definition stops at that call, where F11 can still enter it.
+    pty.send(b"\x1b[21~");
+    pty.capture("subst_step_over_to_call", Duration::from_secs(8), |text| {
+        require(text, "[Paused]")?;
+        require(text, "▶     5")?;
+        require(text, "command 2/2: double")
+    });
+    pty.send(b"\x1b[23~");
+    pty.capture("subst_step_into_call", Duration::from_secs(8), |text| {
+        require(text, "[Paused]")?;
+        require(text, "at double · subst.tcl:2")?;
+        require(text, "x = 21")
+    });
+    pty.send(b"\x1b[23;2~");
+    pty.capture(
+        "subst_step_out_to_assignment",
+        Duration::from_secs(8),
+        |text| {
+            require(text, "[Paused]")?;
+            require(text, "▶     5")?;
+            require(text, "command 1/2: set")
+        },
+    );
+    pty.send(b"\x1b[21~");
+    pty.capture(
+        "subst_step_over_to_next_statement",
+        Duration::from_secs(8),
+        |text| {
+            require(text, "[Paused]")?;
+            require(text, "▶     6")?;
+            require(text, "answer = 42")
+        },
+    );
     pty.send(b"\x03");
     pty.wait_for_exit(Duration::from_secs(5));
 }
@@ -636,7 +700,7 @@ fn hybrid_debug_tui_exposes_dual_code_frames_eval_watch_and_nested_controls() {
             return Err("TurtleTap Shell chrome leaked into the hybrid viewport".to_string());
         }
         require(text, "[Paused]")?;
-        require(text, "Source · synthetic")?;
+        require(text, "Source · proc.tbc · synthetic")?;
         require(text, "Source · companion (unverified)")?;
         require(text, "tbcload::bcproc")
     });
@@ -655,8 +719,8 @@ fn hybrid_debug_tui_exposes_dual_code_frames_eval_watch_and_nested_controls() {
     pty.send(b"e");
     pty.send(b"set hybrid_probe 41\r");
     pty.capture("hybrid_eval", Duration::from_secs(3), |text| {
-        require(text, "eval(level=0) code=0")?;
-        require(text, "41")
+        require(text, "» set hybrid_probe 41")?;
+        require(text, "← 41")
     });
 
     pty.send(b"w");
@@ -681,7 +745,7 @@ fn hybrid_debug_tui_exposes_dual_code_frames_eval_watch_and_nested_controls() {
     pty.send(b"\x07");
     pty.capture("hybrid_run_to_cursor", Duration::from_secs(4), |text| {
         require(text, "[Paused]")?;
-        require(text, "RunToLocation")
+        require(text, "reached the cursor")
     });
 
     pty.send(b"\x1b[21~");
@@ -726,7 +790,7 @@ fn compiled_source_hybrid_pty_keeps_source_and_pc_truth_in_one_debugger() {
     let mut pty = DebugPty::spawn_vm_strict_debug(&target);
     pty.capture("compiled_source_entry", Duration::from_secs(8), |text| {
         require(text, "compiled-source.tcl [compiled source]")?;
-        require(text, "Source · compiled source")?;
+        require(text, "Source · compiled-source.tcl · compiled source")?;
         require(text, "Disassembly · executable")?;
         require(text, "set value 1")?;
         require(text, "(0) nop")?;
@@ -741,7 +805,7 @@ fn compiled_source_hybrid_pty_keeps_source_and_pc_truth_in_one_debugger() {
         "compiled_source_line_breakpoint",
         Duration::from_secs(3),
         |text| {
-            require(text, "breakpoint @ line 5")?;
+            require(text, "set at line 5")?;
             require(text, "line 5")
         },
     );
@@ -769,7 +833,7 @@ fn compiled_source_hybrid_pty_keeps_source_and_pc_truth_in_one_debugger() {
     pty.send(b"\x1b[23~");
     pty.capture("compiled_source_f11_proc", Duration::from_secs(5), |text| {
         require(text, "[Paused]")?;
-        require(text, "inc : line 2")?;
+        require(text, "inc · line 2")?;
         require(text, "x = 1")
     });
 
@@ -820,6 +884,215 @@ fn compiled_source_hybrid_pty_keeps_source_and_pc_truth_in_one_debugger() {
 
 #[test]
 #[cfg(feature = "hybrid")]
+fn compiled_regex_commands_finish_in_the_real_debugger_in_both_modes() {
+    let dir = tempfile::tempdir().expect("native regexp PTY dir");
+    let target = dir.path().join("native-regexp.tcl");
+    fs::write(
+        &target,
+        "set line ticket=42\n\
+         regexp {ticket=(\\d+)} $line whole id\n\
+         regsub {\\d+} $line X replaced\n\
+         proc replacement {digits} {return [string repeat X [string length $digits]]}\n\
+         set callback [regsub -command {\\d+} $line replacement]\n\
+         set matches [lsearch -all -regexp {ticket=42 no ticket=7} {^ticket=}]\n\
+         puts [list regex-ok $id $replaced $matches $callback]\n",
+    )
+    .unwrap();
+    for strict in [true, false] {
+        let mut pty = if strict {
+            DebugPty::spawn_vm_strict_debug(&target)
+        } else {
+            DebugPty::spawn_hybrid_debug(&target)
+        };
+        pty.capture("native_regexp_entry", Duration::from_secs(8), |text| {
+            require(text, "native-regexp.tcl [compiled source]")?;
+            require(text, "[Paused]")
+        });
+        pty.send(b"c");
+        pty.capture("native_regexp_result", Duration::from_secs(5), |text| {
+            require(text, "regex-ok 42 ticket=X {0 2} ticket=XX")
+        });
+        pty.send(b"\x03");
+        pty.wait_for_exit(Duration::from_secs(5));
+    }
+}
+
+#[test]
+#[cfg(feature = "hybrid")]
+fn compiled_sort_callbacks_finish_in_the_real_debugger_in_both_modes() {
+    let dir = tempfile::tempdir().expect("native sort PTY dir");
+    let target = dir.path().join("native-sort.tcl");
+    fs::write(
+        &target,
+        "proc compare {a b} {return [string compare $a $b]}\n\
+         set sorted [lsort -command compare {c a b}]\n\
+         set positions [lsort -indices -command compare {c b a}]\n\
+         set unique [lsort -unique -command compare {c a b a c}]\n\
+         puts [list sort-ok $sorted $positions $unique]\n",
+    )
+    .unwrap();
+    for strict in [true, false] {
+        let mut pty = if strict {
+            DebugPty::spawn_vm_strict_debug(&target)
+        } else {
+            DebugPty::spawn_hybrid_debug(&target)
+        };
+        pty.capture("native_sort_entry", Duration::from_secs(8), |text| {
+            require(text, "native-sort.tcl [compiled source]")?;
+            require(text, "[Paused]")
+        });
+        pty.send(b"c");
+        pty.capture("native_sort_result", Duration::from_secs(5), |text| {
+            require(text, "sort-ok {a b c} {2 1 0} {a b c}")
+        });
+        pty.send(b"\x03");
+        pty.wait_for_exit(Duration::from_secs(5));
+    }
+}
+
+#[test]
+#[cfg(feature = "hybrid")]
+fn compiled_try_callback_bodies_finish_in_the_real_debugger_in_both_modes() {
+    let dir = tempfile::tempdir().expect("native try PTY dir");
+    let target = dir.path().join("native-try.tcl");
+    fs::write(&target,
+        "set out {}; set handled [try {error missing {} {APP MISSING}} trap APP {m o} {lappend out handler; list $m [dict get $o -errorcode]} finally {lappend out cleanup}]\n\
+         set sorted [lsort -command {apply {{a b} {try {expr {$a-$b}} finally {set cleaned yes}}}} {3 1 2}]\n\
+         set replaced [regsub -all -command . abc {apply {{m} {try {string toupper $m} finally {set cleaned yes}}}}]\n\
+         puts [list try-ok $handled $out $sorted $replaced]\n\
+         set c [catch {try {error body {} {APP BODY}} finally {error cleanup {} {APP CLEANUP}}} m o]\n\
+         puts [list during $c $m [dict get $o -errorcode] [dict get $o -during -errorcode]]\n",
+    ).unwrap();
+    for strict in [true, false] {
+        let mut pty = if strict {
+            DebugPty::spawn_vm_strict_debug(&target)
+        } else {
+            DebugPty::spawn_hybrid_debug(&target)
+        };
+        pty.capture("native_try_entry", Duration::from_secs(8), |text| {
+            require(text, "native-try.tcl [compiled source]")?;
+            require(text, "[Paused]")
+        });
+        pty.send(b"c");
+        pty.capture("native_try_result", Duration::from_secs(5), |text| {
+            require(
+                text,
+                "try-ok {missing {APP MISSING}} {handler cleanup} {1 2 3} ABC",
+            )?;
+            require(text, "during 1 cleanup {APP CLEANUP} {APP BODY}")
+        });
+        pty.send(b"\x03");
+        pty.wait_for_exit(Duration::from_secs(5));
+    }
+}
+
+#[test]
+#[cfg(feature = "hybrid")]
+fn compiled_lmap_callback_bodies_finish_in_the_real_debugger_in_both_modes() {
+    let dir = tempfile::tempdir().expect("native lmap PTY dir");
+    let target = dir.path().join("native-lmap.tcl");
+    fs::write(
+        &target,
+        "set mapped [lmap x {1 2 3 4} {if {$x == 2} {continue}; if {$x == 4} {break}; expr {$x*10}}]\n\
+         set sorted [lsort -command {apply {{a b} {lindex [lmap once {go} {expr {$a-$b}}] 0}}} {3 1 2}]\n\
+         set replaced [regsub -all -command . abc {apply {{m} {lindex [lmap x [list $m] {string toupper $x}] 0}}}]\n\
+         puts [list lmap-ok $mapped $sorted $replaced]\n\
+         set code [catch {lmap {} {1} {error wrong}} message options]\n\
+         puts [list completion $code [dict get $options -errorcode]]\n",
+    ).unwrap();
+    for strict in [true, false] {
+        let mut pty = if strict {
+            DebugPty::spawn_vm_strict_debug(&target)
+        } else {
+            DebugPty::spawn_hybrid_debug(&target)
+        };
+        pty.capture("native_lmap_entry", Duration::from_secs(8), |text| {
+            require(text, "native-lmap.tcl [compiled source]")?;
+            require(text, "[Paused]")
+        });
+        pty.send(b"c");
+        pty.capture("native_lmap_result", Duration::from_secs(5), |text| {
+            require(text, "lmap-ok {10 30} {1 2 3} ABC")?;
+            require(text, "completion 1 {TCL OPERATION LMAP NEEDVARS}")
+        });
+        pty.send(b"\x03");
+        pty.wait_for_exit(Duration::from_secs(5));
+    }
+}
+
+#[test]
+#[cfg(feature = "hybrid")]
+fn compiled_switch_callback_bodies_finish_in_the_real_debugger_in_both_modes() {
+    let dir = tempfile::tempdir().expect("native switch PTY dir");
+    let target = dir.path().join("native-switch.tcl");
+    fs::write(
+        &target,
+        "set sorted [lsort -command {apply {{a b} {switch compare {compare {expr {$a-$b}}}}}} {3 1 2}]\n\
+         set replaced [regsub -all -command . abc {apply {{m} {switch $m {a {list X} default {string toupper $m}}}}}]\n\
+         switch -r -m m -i i abc {(a)(bc)} {set selected [list $m $i]}\n\
+         puts [list switch-ok $sorted $replaced]\n\
+         puts [list captures $selected]\n\
+         set code [catch {switch a {a -}} message options]\n\
+         puts [list completion $code [dict get $options -errorcode]]\n",
+    ).unwrap();
+    for strict in [true, false] {
+        let mut pty = if strict {
+            DebugPty::spawn_vm_strict_debug(&target)
+        } else {
+            DebugPty::spawn_hybrid_debug(&target)
+        };
+        pty.capture("native_switch_entry", Duration::from_secs(8), |text| {
+            require(text, "native-switch.tcl [compiled source]")?;
+            require(text, "[Paused]")
+        });
+        pty.send(b"c");
+        pty.capture("native_switch_result", Duration::from_secs(5), |text| {
+            require(text, "switch-ok {1 2 3} XBC")?;
+            require(text, "captures {{abc a bc} {{0 2} {0 0} {1 2}}}")?;
+            require(
+                text,
+                "completion 1 {TCL OPERATION SWITCH BADARM FALLTHROUGH}",
+            )
+        });
+        pty.send(b"\x03");
+        pty.wait_for_exit(Duration::from_secs(5));
+    }
+}
+
+#[test]
+#[cfg(feature = "hybrid")]
+fn compiled_lambda_callbacks_finish_in_the_real_debugger_in_both_modes() {
+    let dir = tempfile::tempdir().expect("native lambda PTY dir");
+    let target = dir.path().join("native-lambda.tcl");
+    fs::write(
+        &target,
+        "set sorted [lsort -command {apply {{a b} {expr {$a-$b}}}} {3 1 2}]\n\
+         set replaced [regsub -all -command . abc {apply {{m} {string toupper $m}}}]\n\
+         set code [catch {apply {{x} {set x}}} message options]\n\
+         puts [list lambda-ok $sorted $replaced $code [dict get $options -errorcode]]\n",
+    )
+    .unwrap();
+    for strict in [true, false] {
+        let mut pty = if strict {
+            DebugPty::spawn_vm_strict_debug(&target)
+        } else {
+            DebugPty::spawn_hybrid_debug(&target)
+        };
+        pty.capture("native_lambda_entry", Duration::from_secs(8), |text| {
+            require(text, "native-lambda.tcl [compiled source]")?;
+            require(text, "[Paused]")
+        });
+        pty.send(b"c");
+        pty.capture("native_lambda_result", Duration::from_secs(5), |text| {
+            require(text, "lambda-ok {1 2 3} ABC 1 {TCL WRONGARGS}")
+        });
+        pty.send(b"\x03");
+        pty.wait_for_exit(Duration::from_secs(5));
+    }
+}
+
+#[test]
+#[cfg(feature = "hybrid")]
 fn compiled_source_hybrid_worldhost_output_and_error_keep_canonical_location() {
     let dir = tempfile::tempdir().expect("compiled hybrid PTY dir");
     let target = dir.path().join("compiled-hybrid.tcl");
@@ -848,7 +1121,7 @@ fn compiled_source_hybrid_worldhost_output_and_error_keep_canonical_location() {
         Duration::from_secs(5),
         |text| {
             require(text, "[Paused]")?;
-            require(text, "line 2")?;
+            require(text, "compiled-hybrid.tcl:2")?;
             require(text, "boom")
         },
     );
@@ -907,6 +1180,8 @@ impl DebugPty {
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_tcld"));
         command.arg("debug");
         command.arg(target);
+        command.arg("--backend");
+        command.arg("host");
         command.arg("--tclsh");
         command.arg(tclsh_wrapper);
         command.arg("--dylib");

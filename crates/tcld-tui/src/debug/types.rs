@@ -95,6 +95,10 @@ pub struct StackFrame {
     pub line: Option<u32>,
     pub offset_start: Option<u64>,
     pub offset_end: Option<u64>,
+    /// Where the frame is, phrased for a reader (`demo.tcl:12`). The driver
+    /// fills this when it can map a proc-relative line back to its file;
+    /// otherwise the renderer falls back to `line`.
+    pub location_label: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +127,9 @@ pub struct ProcBreakpoint {
     pub condition: Option<String>,
     /// Var-write watchpoints carry a name instead of a line offset.
     pub kind: BreakpointKindLabel,
+    /// Where the breakpoint is, phrased for a reader (`demo.tcl:12`). The
+    /// driver fills this when it can resolve the requested span to a line.
+    pub location_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +166,13 @@ pub enum EventSeverity {
     Pause,
     Warn,
     Error,
+    /// Text the debugged program wrote to stdout.
+    Output,
+    /// Text the debugged program wrote to stderr.
+    ErrorOutput,
+    /// Debugger bookkeeping (source registration, action echoes). Kept in
+    /// the transcript and visible while filtering, hidden otherwise.
+    Trace,
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +194,9 @@ impl EventLine {
     }
     pub fn error(text: impl Into<String>) -> Self {
         Self::new(EventSeverity::Error, text)
+    }
+    pub fn trace(text: impl Into<String>) -> Self {
+        Self::new(EventSeverity::Trace, text)
     }
     pub fn new(severity: EventSeverity, text: impl Into<String>) -> Self {
         Self {
@@ -278,6 +295,9 @@ pub struct LocalRow {
     pub name: String,
     pub value: String,
     pub changed: bool,
+    /// A variable Tcl itself defines (`tcl_version`, `env`, …). The renderer
+    /// lists these after the program's own variables, dimmed.
+    pub builtin: bool,
 }
 
 /// Live source-search state. The driver populates `query` /
@@ -304,7 +324,12 @@ pub struct PickerOverlay<'a> {
 /// borrowed from the frontend's owned state — no cloning required.
 pub struct DebugSnapshot<'a> {
     pub title: &'a str,
+    /// The program being debugged, as the user named it.
+    pub target_path: &'a str,
     pub source_path: &'a str,
+    /// What the source pane shows, phrased for its title (`demo.tcl`,
+    /// `greet · demo.tcl`). Empty falls back to `source_path`.
+    pub source_label: &'a str,
     pub source_origin: SourceOrigin,
     /// Proc body currently presented in the source pane. This can differ from
     /// the paused proc when the user browses another procedure.
@@ -315,6 +340,13 @@ pub struct DebugSnapshot<'a> {
     /// 1-based highlighted line in the secondary source pane.
     pub secondary_highlight_line: Option<u32>,
     pub focused_proc: Option<&'a FocusedProc>,
+    /// 1-based line of the source pane where execution is paused, after any
+    /// mapping from a proc body onto its defining file. `None` when the
+    /// paused command is not in the displayed text.
+    pub paused_line: Option<u32>,
+    /// Where execution is paused, phrased for the title bar
+    /// (`greet · demo.tcl:4`).
+    pub location_label: Option<&'a str>,
     pub app_state: AppState,
     pub stack: &'a [StackFrame],
     /// Currently-inspected stack-frame level (not necessarily the
@@ -334,4 +366,6 @@ pub struct DebugSnapshot<'a> {
     pub source_search: SourceSearch<'a>,
     pub picker: Option<PickerOverlay<'a>>,
     pub theme_label: &'a str,
+    /// Opcode table the debugged bytecode is decoded with (`tcl9.0`, …).
+    pub instruction_set: Option<&'a str>,
 }

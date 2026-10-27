@@ -5,7 +5,7 @@ use crate::views;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use std::collections::HashSet;
 
 /// Render a document panel for the current view.
@@ -48,24 +48,10 @@ fn render_text_panel<D: DataSource>(
     view: ViewId,
     is_decompile: bool,
 ) {
-    let title = views::title(app.specs(), view);
+    let title = views::title(app.specs(), view).to_string();
     let focused = app.layout.focused_pane == PaneFocus::Decompile;
 
-    let border_style = if focused {
-        app.theme.border_focused()
-    } else {
-        app.theme.border()
-    };
-    let title_style = if focused {
-        app.theme.panel_title_focused()
-    } else {
-        app.theme.panel_title()
-    };
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Span::styled(format!(" Canvas - {title} "), title_style));
+    let block = super::panel_block(format!(" {title} "), focused, &app.theme);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -88,10 +74,23 @@ fn render_text_panel<D: DataSource>(
         return;
     }
 
-    let scroll = app.nav.doc_scroll(view);
+    // The cursor is the line the inspector and links describe; the viewport
+    // follows it with a few lines of context instead of the other way round.
+    let total = document.lines.len();
+    let visible_height = inner.height as usize;
+    let cursor = app.nav.doc_cursor(view).min(total.saturating_sub(1));
+    let scroll = follow_cursor(cursor, app.nav.doc_scroll(view), visible_height, total);
+    app.nav.doc_cursors.insert(view, cursor);
+    app.nav.doc_scrolls.insert(view, scroll);
+    // One cell of margin carries the cursor bar, as list rows do.
+    let text_area = Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(1),
+        ..inner
+    };
+    app.hit.document_target = Some((text_area, view, scroll));
 
     let rendered = if is_decompile {
-        let visible_height = inner.height as usize;
         let rendered = app.data.render_decompile_window(DecompileRenderContext {
             lines: &document.lines,
             anchors: &document.decompile_anchors,
@@ -102,32 +101,68 @@ fn render_text_panel<D: DataSource>(
             start_line: scroll,
             end_line: scroll + visible_height,
         });
-        Text::from(
-            rendered
-                .lines
-                .into_iter()
-                .map(|line| fit_line_ellipsis(line, inner.width as usize))
-                .collect::<Vec<_>>(),
-        )
+        rendered.lines
     } else {
         let start = scroll.min(document.lines.len());
         let end = start
             .saturating_add(inner.height as usize)
             .min(document.lines.len());
-        let visible =
-            app.data
-                .render_document_window(view, &document.lines, &app.theme, start, end);
-        Text::from(
-            visible
-                .lines
-                .into_iter()
-                .map(|line| fit_line_ellipsis(line, inner.width as usize))
-                .collect::<Vec<_>>(),
-        )
+        app.data
+            .render_document_window(view, &document.lines, &app.theme, start, end)
+            .lines
     };
 
-    let paragraph = Paragraph::new(rendered);
-    frame.render_widget(paragraph, inner);
+    let cursor_row = cursor.checked_sub(scroll);
+    let line_style = app.theme.focused_line_bg();
+    let lines = rendered
+        .into_iter()
+        .enumerate()
+        .map(|(row, line)| {
+            let line = fit_line_ellipsis(line, text_area.width as usize);
+            if Some(row) != cursor_row {
+                let mut spans = vec![Span::raw(" ")];
+                spans.extend(line.spans);
+                return Line::from(spans);
+            }
+            let mut spans = vec![Span::styled(
+                crate::theme::ACCENT_BAR,
+                app.theme.accent_bar(),
+            )];
+            let used: usize = line
+                .spans
+                .iter()
+                .map(|span| cell_width(span.content.as_ref()))
+                .sum();
+            spans.extend(line.spans.into_iter().map(|span| {
+                let style = span.style.patch(line_style);
+                Span::styled(span.content, style)
+            }));
+            spans.push(Span::styled(
+                " ".repeat((text_area.width as usize).saturating_sub(used)),
+                line_style,
+            ));
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+/// Viewport top that keeps `cursor` visible with some context, moving no
+/// further than needed from `previous`.
+fn follow_cursor(cursor: usize, previous: usize, height: usize, total: usize) -> usize {
+    if height == 0 || total == 0 {
+        return 0;
+    }
+    let margin = (height / 4).min(3);
+    let max_top = total.saturating_sub(height);
+    let mut top = previous.min(max_top);
+    if cursor < top + margin {
+        top = cursor.saturating_sub(margin);
+    } else if cursor + margin >= top + height {
+        top = (cursor + margin + 1).saturating_sub(height);
+    }
+    top.min(max_top)
 }
 
 fn fit_line_ellipsis<'a>(line: Line<'a>, max_width: usize) -> Line<'a> {

@@ -122,15 +122,15 @@ fn plain_source_workspace_exposes_only_source_oriented_contract() {
 fn plain_source_goto_is_one_based_source_line_navigation() {
     let mut app = tcld_tui::TuiApp::new(ExplorerCore::new(args("expr.tcl")).unwrap(), false);
     app.execute_command("goto 1");
-    assert_eq!(app.nav.doc_scroll(VIEW_SOURCE), 0);
+    assert_eq!(app.nav.doc_cursor(VIEW_SOURCE), 0);
     assert_eq!(app.nav.group_focus, None);
 
     app.execute_command("goto 2");
-    assert_eq!(app.nav.doc_scroll(VIEW_SOURCE), 1);
+    assert_eq!(app.nav.doc_cursor(VIEW_SOURCE), 1);
     assert_eq!(app.nav.group_focus, None);
 
     app.execute_command("goto 999999");
-    assert_eq!(app.nav.doc_scroll(VIEW_SOURCE), 1);
+    assert_eq!(app.nav.doc_cursor(VIEW_SOURCE), 1);
     assert!(
         app.cmd
             .output

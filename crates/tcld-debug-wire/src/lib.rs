@@ -29,7 +29,7 @@ pub mod op;
 pub mod tcl_list;
 
 pub use codec::{decode_frame, encode_frame};
-pub use controller::{Controller, ControllerError, ControllerState, NubChild};
+pub use controller::{Controller, ControllerError, ControllerState, NubChild, NubOutput};
 pub use error::{ErrorCode, WireError};
 pub use event::{PauseReason, SourceUnitChange, WireEvent};
 pub use frame::{FrameKind, WireFrame};

@@ -8,13 +8,42 @@ pub mod tab_bar;
 use crate::app::TuiApp;
 use crate::chrome;
 use crate::data::DataSource;
-use crate::state::{HitRegion, ModeLayoutProfile, PaneFocus};
+use crate::state::{HitRegion, ModeLayoutProfile, PaneFocus, RailTarget};
 use crate::tokens;
 use crate::views;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap};
 use std::path::Path;
+
+/// A bordered panel whose focus reads from the border's weight as well as its
+/// color, so it survives monochrome terminals and `--no-colors`.
+pub(crate) fn panel_block<'a>(
+    title: String,
+    focused: bool,
+    theme: &crate::theme::Theme,
+) -> Block<'a> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(if focused {
+            BorderType::Thick
+        } else {
+            BorderType::Plain
+        })
+        .border_style(if focused {
+            theme.border_focused()
+        } else {
+            theme.border()
+        })
+        .title(Span::styled(
+            title,
+            if focused {
+                theme.panel_title_focused()
+            } else {
+                theme.panel_title()
+            },
+        ))
+}
 
 pub const MIN_TERMINAL_WIDTH: u16 = 72;
 pub const MIN_TERMINAL_HEIGHT: u16 = 20;
@@ -75,9 +104,6 @@ pub fn draw_in<D: DataSource>(frame: &mut ratatui::Frame<'_>, area: Rect, app: &
     if app.overlay.show_summary {
         overlays::render_summary_modal(frame, area, app);
     }
-    if app.overlay.quit_confirm {
-        overlays::render_quit_modal(frame, area, app);
-    }
 }
 
 fn reset_hit_state<D: DataSource>(app: &mut TuiApp<D>, area: Rect) {
@@ -91,6 +117,8 @@ fn reset_hit_state<D: DataSource>(app: &mut TuiApp<D>, area: Rect) {
     app.hit.decompile_text_area = None;
     app.hit.decompile_rail_area = None;
     app.hit.decompile_rail_groups.clear();
+    app.hit.rail_targets.clear();
+    app.hit.document_target = None;
 }
 
 fn render_product_header<D: DataSource>(
@@ -275,14 +303,17 @@ fn render_workspace_rail<D: DataSource>(
     app: &mut TuiApp<D>,
 ) {
     let content_width = area.width.saturating_sub(2);
-    let available = app.data.available_views();
+    let available = app.data.available_views().to_vec();
     let current = app.current_view();
-    let specs = app.specs();
-    let mut items = available
+    let specs = app.specs().to_vec();
+    let rail_views: Vec<_> = available
         .iter()
-        .filter_map(|view| views::spec(specs, *view))
+        .filter_map(|view| views::spec(&specs, *view))
+        .collect();
+    let mut items = rail_views
+        .iter()
         .map(|spec| {
-            let marker = if spec.view == current { ">" } else { " " };
+            let marker = if spec.view == current { "▸" } else { " " };
             rail_view_item(
                 marker,
                 spec.icon,
@@ -293,6 +324,12 @@ fn render_workspace_rail<D: DataSource>(
             )
         })
         .collect::<Vec<_>>();
+    for (row, spec) in rail_views.iter().enumerate() {
+        app.hit.rail_targets.push((
+            Rect::new(area.x + 1, area.y + 1 + row as u16, content_width, 1),
+            RailTarget::View(spec.view),
+        ));
+    }
     let switcher_rows = items.len();
     let outline_capacity = (area.height as usize)
         .saturating_sub(switcher_rows + 3)
@@ -301,9 +338,9 @@ fn render_workspace_rail<D: DataSource>(
     // The rail navigates; it never restates canvas content. List views are fully
     // rendered — and own their selection and hit targets — in `list_panel`, so
     // they get no outline at all. Document views get their structural anchors.
-    if !views::is_list_view(specs, current) && outline_capacity > 0 {
+    if !views::is_list_view(&specs, current) && outline_capacity > 0 {
         let before = items.len();
-        render_rail_outline(
+        let outline_rows = render_rail_outline(
             &mut items,
             app,
             current,
@@ -312,6 +349,13 @@ fn render_workspace_rail<D: DataSource>(
         );
         if items.len() > before {
             items.insert(before, ListItem::new(Line::from("")));
+            for (offset, line) in outline_rows.into_iter().enumerate() {
+                let row = (before + 1 + offset) as u16;
+                app.hit.rail_targets.push((
+                    Rect::new(area.x + 1, area.y + 1 + row, content_width, 1),
+                    RailTarget::OutlineLine(line),
+                ));
+            }
         }
     }
 
@@ -321,82 +365,50 @@ fn render_workspace_rail<D: DataSource>(
     let area = Rect::new(area.x, area.y, area.width, height);
     app.hit.regions.insert(HitRegion::BrowseRail, area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(if app.layout.focused_pane == PaneFocus::List {
-            app.theme.border_focused()
-        } else {
-            app.theme.border()
-        })
-        .title(Span::styled(" Workspace ", app.theme.panel_title()));
+    let rail_focused =
+        app.layout.focused_pane == PaneFocus::List && !views::is_list_view(app.specs(), current);
+    let block = panel_block(" Views ".to_string(), rail_focused, &app.theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(List::new(items), inner);
 }
 
-/// Reduce an anchor line to what distinguishes it. `proc ` leads every entry in a
-/// procedure outline and the argument list rarely survives the rail's width.
-fn outline_label(line: &str) -> String {
-    match line.strip_prefix("proc ") {
-        Some(rest) => rest
-            .split_whitespace()
-            .next()
-            .unwrap_or(rest)
-            .trim_end_matches('{')
-            .to_string(),
-        None => line.to_string(),
-    }
-}
-
 /// Structural outline for a document view: the anchors a reader navigates by.
+/// Returns the document line each pushed row jumps to.
 fn render_rail_outline<D: DataSource>(
     items: &mut Vec<ListItem<'static>>,
     app: &mut TuiApp<D>,
     view: crate::data::ViewId,
     width: usize,
     capacity: usize,
-) {
-    let Ok(document) = app.cached_document(view) else {
-        return;
-    };
-
-    // Command groups are the outline. `document.anchors` is statement-level
-    // (`c057/n011`) — listing those would just make the rail a second canvas.
-    let mut outline = document
-        .decompile_anchors
-        .iter()
-        .copied()
-        .filter(|line| *line != usize::MAX && *line < document.lines.len())
-        .map(|line| (line, outline_label(document.lines[line].trim())))
-        .filter(|(_, label)| !label.is_empty())
-        .collect::<Vec<_>>();
+) -> Vec<usize> {
+    let outline = app.outline(view);
     if outline.is_empty() {
-        outline = document
-            .anchors
-            .iter()
-            .map(|anchor| (anchor.line_span.0, anchor.label.clone()))
-            .collect();
-    }
-    if outline.is_empty() {
+        let lines = app
+            .cached_document(view)
+            .map(|document| document.lines.len())
+            .unwrap_or(0);
         items.push(ListItem::new(Line::from(Span::styled(
-            format!("{} lines", document.lines.len()),
+            format!("{lines} lines"),
             app.theme.fg_muted(),
         ))));
-        return;
+        return Vec::new();
     }
 
-    // Follow the viewport: keep the anchor covering the current scroll position
-    // visible so the outline tracks the canvas instead of pinning to the top.
-    let scroll = app.nav.doc_scroll(view);
+    // Follow the cursor: keep the entry containing it visible so the outline
+    // tracks the canvas instead of pinning to the top.
+    let cursor = app.nav.doc_cursor(view);
     let current = outline
         .iter()
-        .rposition(|(line, _)| *line <= scroll)
+        .rposition(|(line, _)| *line <= cursor)
         .unwrap_or(0);
     let start = current
         .saturating_sub(capacity / 2)
         .min(outline.len().saturating_sub(capacity));
 
-    for (index, (_, label)) in outline.iter().enumerate().skip(start).take(capacity) {
+    let mut rows = Vec::new();
+    for (index, (line, label)) in outline.iter().enumerate().skip(start).take(capacity) {
+        rows.push(*line);
         let selected = index == current;
         let marker = if selected { "▸ " } else { "  " };
         let style = if selected {
@@ -409,6 +421,7 @@ fn render_rail_outline<D: DataSource>(
             Span::styled(fit_text(label, width.saturating_sub(2)), style),
         ])));
     }
+    rows
 }
 
 fn render_canvas<D: DataSource>(frame: &mut ratatui::Frame<'_>, area: Rect, app: &mut TuiApp<D>) {
@@ -597,7 +610,10 @@ fn render_mode_footer<D: DataSource>(
     // Hints are guaranteed their tersest form and nothing more, so the left side
     // is fitted against that floor rather than against whatever the hints would
     // prefer. Only then do the hints expand into what the left side left behind.
-    let key_variants = footer_key_variants(&affordances);
+    let key_variants = match profile {
+        ModeLayoutProfile::Browse => browse_hint_variants(&browse_hints(app)),
+        ModeLayoutProfile::Compare => footer_key_variants(&affordances),
+    };
     let reserved = key_variants
         .last()
         .map(|compact| chrome::fit(std::slice::from_ref(compact), width, &app.theme).width)
@@ -636,6 +652,89 @@ fn render_mode_footer<D: DataSource>(
     );
 
     frame.render_widget(Paragraph::new(chrome::justify(left, keys, width)), row);
+}
+
+/// One key hint in the Browse footer: key, label, and a shorter label.
+struct BrowseHint {
+    key: &'static str,
+    label: &'static str,
+    short: &'static str,
+}
+
+const fn browse_hint(key: &'static str, label: &'static str, short: &'static str) -> BrowseHint {
+    BrowseHint { key, label, short }
+}
+
+/// What the keyboard can do from here, most useful first.
+fn browse_hints<D: DataSource>(app: &mut TuiApp<D>) -> Vec<BrowseHint> {
+    let view = app.current_view();
+    let is_list = views::is_list_view(app.specs(), view);
+    let has_groups = app.data.command_group_count() > 0;
+    let mut hints = Vec::new();
+    if is_list {
+        let index = app.nav.selection(view);
+        if app.data.list_link(view, index).is_some()
+            || (has_groups && app.data.group_for_index(index).is_some())
+        {
+            hints.push(browse_hint("Enter", "follow", "follow"));
+        }
+    } else if has_groups {
+        hints.push(browse_hint("Enter", "instructions", "insns"));
+    }
+    if !app.nav.back_stack.is_empty() {
+        hints.push(browse_hint("Bksp", "back", "back"));
+    }
+    if app.search.query.is_some() && !app.search.hits.is_empty() {
+        hints.push(browse_hint("n/N", "next match", "match"));
+    } else {
+        hints.push(browse_hint("/", "search", "search"));
+    }
+    if is_list && has_groups {
+        hints.push(browse_hint("v", "decompile", "dec"));
+    }
+    if !is_list && !app.outline(view).is_empty() {
+        hints.push(browse_hint("Tab", "outline", "outline"));
+    }
+    if app.data.trace_len() > 0 {
+        hints.push(browse_hint("t", "trace", "trace"));
+    }
+    hints.push(browse_hint("Ctrl-P", "palette", "palette"));
+    hints.push(browse_hint("?", "help", "help"));
+    hints
+}
+
+fn browse_hint_variants(hints: &[BrowseHint]) -> Vec<chrome::Variant> {
+    let variant = |label: &dyn Fn(&BrowseHint) -> Option<&'static str>| {
+        let mut variant = chrome::Variant::new();
+        for (index, hint) in hints.iter().enumerate() {
+            if index > 0 {
+                variant = variant.push(tokens::FG_MUTED, "  ");
+            }
+            variant = variant.push(tokens::HELP_KEY, hint.key);
+            if let Some(label) = label(hint) {
+                variant = variant.push(tokens::FG_DIM, format!(" {label}"));
+            }
+        }
+        variant
+    };
+    // The tightest phrasing drops labels and spacing; help keeps its word,
+    // since it is the way to everything that was dropped.
+    let mut keys_only = chrome::Variant::new();
+    for (index, hint) in hints.iter().enumerate() {
+        if index > 0 {
+            keys_only = keys_only.push(tokens::FG_MUTED, " ");
+        }
+        let key = if hint.key == "Ctrl-P" { "^P" } else { hint.key };
+        keys_only = keys_only.push(tokens::HELP_KEY, key);
+        if hint.key == "?" {
+            keys_only = keys_only.push(tokens::FG_DIM, format!(" {}", hint.label));
+        }
+    }
+    vec![
+        variant(&|hint| Some(hint.label)),
+        variant(&|hint| Some(hint.short)),
+        keys_only,
+    ]
 }
 
 /// Space kept between the row's two ends so they never abut.
@@ -683,7 +782,7 @@ fn footer_position<D: DataSource>(
     if lines == 0 {
         return None;
     }
-    let line = app.nav.doc_scroll(view).min(lines - 1) + 1;
+    let line = app.nav.doc_cursor(view).min(lines - 1) + 1;
     Some(format!("ln {line}/{lines}"))
 }
 
@@ -696,8 +795,12 @@ fn footer_active_fields<D: DataSource>(
     // Search, trace and pane focus describe the browse workspace. Carrying them
     // into Compare would report state that mode cannot act on.
     if matches!(profile, ModeLayoutProfile::Browse) {
-        if app.layout.focused_pane == PaneFocus::Context {
-            fields.push(("focus", "Inspector".to_string()));
+        match app.layout.focused_pane {
+            PaneFocus::Context => fields.push(("focus", "Inspector".to_string())),
+            PaneFocus::List if !views::is_list_view(app.specs(), app.current_view()) => {
+                fields.push(("focus", "Outline".to_string()));
+            }
+            _ => {}
         }
         if let Some(query) = app.search.query.as_deref().filter(|q| !q.is_empty()) {
             fields.push((
@@ -1405,7 +1508,7 @@ pub mod tests {
             "search",
             "trace",
             "c000",
-            ":export",
+            "? help",
             "exported generated",
         ] {
             assert!(text.contains(needle), "missing {needle:?}\n{text}");
@@ -1482,18 +1585,18 @@ pub mod tests {
             .expect("render expanded inspector");
         let text = buffer_text(terminal.backend().buffer());
 
-        assert!(text.contains("Inspector Expanded"), "{text}");
+        assert!(text.contains("Inspector · zoomed"), "{text}");
         assert!(text.contains("detail panel"), "{text}");
-        assert!(!text.contains("Workspace"), "{text}");
-        assert!(!text.contains("Canvas"), "{text}");
+        assert!(!text.contains("Views"), "{text}");
+        assert!(!text.contains("Items ·"), "{text}");
     }
 
     #[test]
     fn responsive_domain_app_layout() {
         for (width, height, expected) in [
-            (72, 24, "Workspace"),
+            (72, 24, "Views"),
             (120, 32, "Inspector"),
-            (100, 28, "Canvas"),
+            (100, 28, "Items ·"),
         ] {
             let mut app = crate::app::TuiApp::new_with_theme(
                 RenderData {
@@ -1520,7 +1623,7 @@ pub mod tests {
             let text = buffer_text(terminal.backend().buffer());
             assert!(text.contains("tcld"));
             assert!(
-                text.lines().last().unwrap_or_default().contains("Search"),
+                text.lines().last().unwrap_or_default().contains("? help"),
                 "every width should keep the footer key hints\n{text}"
             );
             assert!(text.contains(expected), "missing {expected:?}\n{text}");
@@ -1538,7 +1641,7 @@ pub mod tests {
             assert!(frame.contains("Terminal too small"), "{frame}");
             assert!(frame.contains("Required: 72x20"), "{frame}");
             assert!(frame.contains("Ctrl-C exit | q quit"), "{frame}");
-            assert!(!frame.contains("Workspace"), "{frame}");
+            assert!(!frame.contains("Views"), "{frame}");
             assert!(!frame.contains("Inspector"), "{frame}");
         }
     }
@@ -1552,8 +1655,8 @@ pub mod tests {
         // One header row, one footer row: the panels own everything between.
         assert_geometry_token(&frame, "tcld explore", 0, 0);
         assert_geometry_token(&frame, "[b] Browse", 0, 0);
-        assert_geometry_token(&frame, "Workspace", 1, 0);
-        assert_geometry_token(&frame, "Canvas", 1, 20);
+        assert_geometry_token(&frame, "Views", 1, 0);
+        assert_geometry_token(&frame, "Items ·", 1, 20);
         assert_geometry_token(&frame, "Inspector", 1, 80);
         assert!(!frame.contains("Tabs:"), "{frame}");
         assert!(!frame.contains("\u{250c} Instructions"));
@@ -1566,9 +1669,9 @@ pub mod tests {
             "footer should name the active view\n{frame}"
         );
 
-        let canvas_x = first_col(&frame, "Canvas").expect("canvas label");
+        let canvas_x = first_col(&frame, "Items ·").expect("canvas label");
         let inspector_x = first_col(&frame, "Inspector").expect("inspector label");
-        let workspace_x = first_col(&frame, "Workspace").expect("workspace label");
+        let workspace_x = first_col(&frame, "Views").expect("rail label");
         assert!(
             workspace_x < canvas_x && canvas_x < inspector_x,
             "expected rail < canvas < inspector\n{frame}"
@@ -1585,17 +1688,16 @@ pub mod tests {
         compact.switch_mode(ModeId("browse"));
         compact.data.capabilities = &["bytecode", "source", "generated-export", "semantic-diff"];
         let compact_frame = render_text(&mut compact, 72, 24);
-        let compact_workspace_x =
-            first_char_col(&compact_frame, "Workspace").expect("compact rail");
-        let compact_canvas_x = first_char_col(&compact_frame, "Canvas").expect("compact canvas");
+        let compact_workspace_x = first_char_col(&compact_frame, "Views").expect("compact rail");
+        let compact_canvas_x = first_char_col(&compact_frame, "Items ·").expect("compact canvas");
         let compact_rail_span = compact_canvas_x - compact_workspace_x;
 
         let mut wide = shell_app();
         wide.switch_mode(ModeId("browse"));
         wide.data.capabilities = &["bytecode", "source", "generated-export", "semantic-diff"];
         let wide_frame = render_text(&mut wide, 120, 32);
-        let wide_workspace_x = first_char_col(&wide_frame, "Workspace").expect("wide rail");
-        let wide_canvas_x = first_char_col(&wide_frame, "Canvas").expect("wide canvas");
+        let wide_workspace_x = first_char_col(&wide_frame, "Views").expect("wide rail");
+        let wide_canvas_x = first_char_col(&wide_frame, "Items ·").expect("wide canvas");
         let wide_inspector_x = first_char_col(&wide_frame, "Inspector").expect("wide inspector");
         let wide_rail_span = wide_canvas_x - wide_workspace_x;
         let wide_canvas_span = wide_inspector_x - wide_canvas_x;
@@ -1617,8 +1719,8 @@ pub mod tests {
         app.data.source_line = Some("set value [expr {1 + 2}]");
 
         let frame = render_text(&mut app, 120, 32);
-        let workspace_x = first_char_col(&frame, "Workspace").expect("workspace");
-        let canvas_x = first_char_col(&frame, "Canvas").expect("canvas");
+        let workspace_x = first_char_col(&frame, "Views").expect("rail");
+        let canvas_x = first_char_col(&frame, "Source").expect("canvas");
         let inspector_x = first_char_col(&frame, "Inspector").expect("inspector");
         let rail_span = canvas_x - workspace_x;
         let canvas_span = inspector_x - canvas_x;
@@ -1709,8 +1811,8 @@ pub mod tests {
             );
         }
         assert!(
-            footer.contains(": Command") && footer.contains("/ Search"),
-            "footer should keep always-available browse actions\n{frame}"
+            footer.contains("n/N") && footer.contains("? help"),
+            "footer should keep the actions available here\n{frame}"
         );
     }
 
@@ -1837,16 +1939,17 @@ pub mod tests {
             );
         }
         assert!(
-            footer.contains(":export"),
+            footer.contains("? help"),
             "key hints must survive alongside a message, even compacted\n{frame}"
         );
 
         // With no message competing for the row, hints render at full length.
         app.cmd.output = None;
+        app.search = Default::default();
         let quiet = render_text(&mut app, 120, 32);
         let quiet_footer = quiet.lines().last().unwrap_or_default();
         assert!(
-            quiet_footer.contains(": Command") && quiet_footer.contains("/ Search"),
+            quiet_footer.contains("Enter follow") && quiet_footer.contains("/ search"),
             "an uncontested footer should use descriptive key labels\n{quiet}"
         );
         app.cmd.output = Some("exported generated source to /tmp/out.tcl".to_string());
@@ -1860,7 +1963,7 @@ pub mod tests {
             "compact footer should keep the active view\n{compact}"
         );
         assert!(
-            compact_footer.contains(":export"),
+            compact_footer.contains("? help"),
             "key hints are guaranteed their compact form at any width\n{compact}"
         );
         assert!(
@@ -2042,8 +2145,8 @@ pub mod tests {
         compact.layout.focused_pane = PaneFocus::Decompile;
         let compact_frame = render_text(&mut compact, 72, 24);
         assert!(compact_frame.contains("[b] Browse"), "{compact_frame}");
-        assert!(compact_frame.contains("Workspace"), "{compact_frame}");
-        assert!(compact_frame.contains("Canvas"), "{compact_frame}");
+        assert!(compact_frame.contains("Views"), "{compact_frame}");
+        assert!(compact_frame.contains("Items ·"), "{compact_frame}");
         assert!(
             compact_frame
                 .lines()
@@ -2062,30 +2165,26 @@ pub mod tests {
         app.overlay.show_help = true;
         let help = render_text(&mut app, 100, 28);
         assert!(help.contains("Quick Reference"), "{help}");
-        assert!(help.contains("Modes"), "{help}");
-        assert!(help.contains("Movement"), "{help}");
-        assert!(help.contains("Views"), "{help}");
-        assert!(help.contains("Commands"), "{help}");
-        assert!(help.contains("Browse"), "{help}");
-        assert!(help.contains("Compare"), "{help}");
+        for section in ["Moving around", "Following links", "Views", "Searching"] {
+            assert!(
+                help.contains(section),
+                "missing section {section:?}\n{help}"
+            );
+        }
         assert!(
-            help.contains("Browse - Command | Search | Trace | Export"),
-            "help mode summaries should separate affordances for scanning\n{help}"
+            help.contains("go back to where you were"),
+            "help should explain Back next to following links\n{help}"
         );
         assert!(
             !help.contains("Runtime Debug") && !help.contains("rdebug"),
             "help must not advertise the removed Explore debugger\n{help}"
         );
         assert!(
-            !help.contains("Command Search Trace Export"),
-            "help should not collapse mode affordances into a word run\n{help}"
-        );
-        assert!(
             !help.contains("Registered Commands"),
             "help should avoid duplicate command dumps\n{help}"
         );
         assert!(
-            help.contains("PgUp/PgDn  Page"),
+            help.contains("PgUp / PgDn"),
             "help movement legend should spell out both page keys\n{help}"
         );
         assert!(
@@ -2097,14 +2196,15 @@ pub mod tests {
         source_help_app.data.source_line = Some("set value [expr {1 + 2}]");
         source_help_app.data.capabilities = &["source"];
         source_help_app.overlay.show_help = true;
+        source_help_app.overlay.help_scroll = 0;
         let source_help = render_text(&mut source_help_app, 100, 28);
         assert!(
-            source_help.contains("Browse - Command | Search"),
-            "source-only help should keep available browse actions visible\n{source_help}"
+            source_help.contains("search this view"),
+            "source-only help should keep available actions visible\n{source_help}"
         );
         assert!(
-            !source_help.contains("Browse - Command | Search | Trace | Export"),
-            "source-only help should not advertise unavailable trace or export actions\n{source_help}"
+            !source_help.contains("stack effect"),
+            "source-only help should not advertise an unavailable trace\n{source_help}"
         );
 
         app.overlay.show_help = false;

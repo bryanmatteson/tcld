@@ -1,32 +1,32 @@
  tcld explore │ expr.tbc  │  [b] Browse  [C] Compare  │  tcl 8.0 · source: generated from tests/fixtures/expr.tbc
-┌ Workspace ───────────────┐┌ Canvas - Instructions (23) ────────────────────────────┐┌ Inspector Trace ───────────────┐
-│> ⊞ Instructions       [i]││▎▸      (0) push1 0             # result ◂              ││instruction: 0                  │
-┌ Quick Reference ─────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│Artifact                                                                                                              │
-│  Source   tcl 8.0 | source: generated from tests/fixtures/expr.tbc                                                   │
-│  Supports bytecode · source · export · diff                                                                          │
-│                                                                                                                      │
-│Modes                                                                                                                 │
-│  b       Browse - Command Palette | Help | Search | Trace | Export                                                   │
-│  C       Compare - Open                                                                                              │
-│                                                                                                                      │
-│Movement                                                                                                              │
-│  j/k      Move   g/G      Top/bottom   PgUp/PgDn  Page                                                               │
-│  Tab      Next pane  Enter    Open detail  /        Search                                                           │
-│                                                                                                                      │
-│Views                                                                                                                 │
-│  i Instructions   l Literals   e Exceptions                                                                          │
-│  c Source   d Decompile   s Summary                                                                                  │
-│                                                                                                                      │
-│Commands                                                                                                              │
-│  Ctrl-p   Open palette   :        Enter command   ?        Toggle help                                               │
-│  :        search <text>             Search current view                                                              │
-│  :        view <name>               Open a view                                                                      │
-│  :        mode <browse|compare>       Switch app mode                                                                │
-│  :        help                      Show help                                                                        │
-│  :        summary                   Show summary                                                                     │
-│  :        views                     List views                                                                       │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-                            │                                                        ││                                │
-                            └────────────────────────────────────────────────────────┘└────────────────────────────────┘
- Instructions  #1/23  search 1/1 expr  trace on #0              : Cmd | Ctrl-P | ? | / Search | t Trace | :export Export
+┌ Views ───────────────────┐┏ Instructions · 23 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ Inspector · trace ─────────────┐
+│▸ ⊞ Instructions       [i]│┃▎▸      (0) push1 0             # result ◂              ┃│instruction: 0                  │
+┏ Quick Reference ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃This file                                                  Trace                                                      ┃
+┃  Source    tcl 8.0 | source: generated from tests/fixtur…   t       show the stack effect of each instruction        ┃
+┃  Supports  bytecode · source · export · diff                                                                         ┃
+┃                                                           Modes                                                      ┃
+┃Moving around                                                b       Browse                                           ┃
+┃  j / k        move down / up                                C       Compare (needs :diff <path>)                     ┃
+┃  g / G        first / last                                                                                           ┃
+┃  PgUp / PgDn  page up / down                              General                                                    ┃
+┃  Tab          next pane (outline · canvas · inspector)      Ctrl-p      command palette                              ┃
+┃  [ / ]        previous / next command group                 :           command line                                 ┃
+┃                                                             ?           show or hide this help                       ┃
+┃Following links                                              q / Ctrl-c  quit (your place is saved)                   ┃
+┃  Enter          jump to what the selection refers to                                                                 ┃
+┃  Bksp / Ctrl-o  go back to where you were                 Commands                                                   ┃
+┃  v              show the selection in Decompile             :search <text>              Search current view          ┃
+┃                                                             :view <name>                Open a view                  ┃
+┃Views                                                        :mode <browse|compare>      Switch app mode              ┃
+┃  i       Instructions                                       :help                       Show help                    ┃
+┃  l       Literals                                           :summary                    Show summary                 ┃
+┃  e       Exceptions                                         :views                      List views                   ┃
+┃  c       Source                                             :next [count]               Move current view forward    ┃
+┃  d       Decompile                                          :prev [count]               Move current view backward   ┃
+┃  s       Summary                                            :goto <pc|line>             Jump by pc/line              ┃
+┃                                                             :show [row]                 Open inspector at a one-bas… ┃
+┗ j/k scroll · Esc or ? closes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                            ┃                                                        ┃│                                │
+                            ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────┘
+ Instructions  #1/23  search 1/1 expr  trace on #0       Enter follow  n/N match  v dec  t trace  Ctrl-P palette  ? help

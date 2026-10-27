@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 use tcld_tui::Theme;
 use tcld_tui::debug::{
     AppState, BindingContext, CoverageRow, DebugAction, DebugSnapshot, DebugUiState, EventLine,
-    FocusedProc, LocalRow, Pane, PickerOverlay, ProcBreakpoint, PromptInput, PromptStep,
-    SourceCommand, SourceLine, SourceOrigin, SourceSearch, StackFrame, WatchEntry, prompt_step,
-    render_in, resolve_binding,
+    EventSeverity, FocusedProc, LocalRow, Pane, PickerOverlay, ProcBreakpoint, PromptInput,
+    PromptStep, SourceCommand, SourceLine, SourceOrigin, SourceSearch, StackFrame, ValuePopup,
+    WatchEntry, prompt_step, render_in, resolve_binding,
 };
 use tcld_tui::terminal::{Event, Frame, Rect, RuntimeAction, RuntimeEvent, TerminalApplication};
 
@@ -64,7 +64,6 @@ enum PromptKind {
     EventFilter,
     ProcPicker,
     PreInstrument,
-    StatusInspect,
     SearchSource,
 }
 
@@ -103,12 +102,36 @@ struct SourceCache {
     secondary_highlight_line: Option<u32>,
     pc_to_line: HashMap<u64, u32>,
     line_to_code: HashMap<u32, super::contract::DebugCodeLocation>,
+    /// Where each proc's body sits among the files the debugger has text
+    /// for, by qname. `None` records that no loaded file defines the proc
+    /// with the body the runtime reports (it was generated, redefined, or
+    /// its file has not been loaded).
+    proc_placements: HashMap<String, Option<ProcPlacement>>,
+    /// The proc whose paused body is being shown inside its file, and where.
+    /// Showing a proc in its file keeps real line numbers and surrounding
+    /// context instead of a detached, renumbered body.
+    mapped_proc: Option<(String, ProcPlacement)>,
+}
+
+/// Where a proc's body sits in a file the debugger has text for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcPlacement {
+    /// The file's runtime source unit. `None` is the main script read from
+    /// disk before the runtime registered it.
+    file_block: Option<String>,
+    path: PathBuf,
+    /// Body line N is file line N + offset.
+    offset: u32,
 }
 
 struct CachedSourceUnit {
     registration: super::contract::RegisteredSource,
     lines: Vec<SourceLine>,
 }
+
+/// Locals last seen per frame, keyed by the frame's depth from the outermost
+/// frame and its proc.
+type LocalsByFrame = HashMap<(i64, Option<String>), Vec<(String, String)>>;
 
 pub struct DebugApp {
     user_script: PathBuf,
@@ -130,9 +153,9 @@ pub struct DebugApp {
     inspected_frame: i64,
     stack: Vec<StackFrame>,
     locals: Vec<LocalRow>,
-    /// Snapshot of the previous pause's locals at this frame level —
-    /// used to compute the `changed` flag for the current pass.
-    locals_prev: HashMap<i64, Vec<(String, String)>>,
+    /// Snapshot of the previous pause's locals per frame — used to compute
+    /// the `changed` flag for the current pass.
+    locals_prev: LocalsByFrame,
     breakpoints: Vec<ProcBreakpoint>,
     watches: Vec<WatchEntry>,
     coverage: Vec<CoverageRow>,
@@ -167,6 +190,8 @@ pub struct DebugApp {
 
     theme: Theme,
     theme_name: String,
+    /// Opcode table of the debugged bytecode, from the backend's disassembly.
+    instruction_set: Option<String>,
 }
 
 /// Actions safe to replay via `.` (no destructive prompts, no
@@ -242,7 +267,7 @@ impl DebugApp {
             load_source_highlighted(&runtime_path, &theme)
         };
         let theme_name = theme.name().to_string();
-        let mut initial_status = "press ? for help, F5 to continue once paused".to_string();
+        let mut initial_status = "Starting the debugger… press ? for help".to_string();
         let mut initial_event: Option<EventLine> = None;
         if let Some(orig) = decompiled_from.as_ref() {
             let version = bytecode_tcl_version
@@ -267,7 +292,15 @@ impl DebugApp {
         if let Some(line) = initial_event {
             events.push_back(line);
         }
-        events.push_back(EventLine::info(format!("backend: {backend_label}")));
+        // The nub path matters when something is wrong, not every launch.
+        let (backend_summary, backend_detail) = match backend_label.split_once("; ") {
+            Some((summary, detail)) => (summary.to_string(), Some(detail.to_string())),
+            None => (backend_label.clone(), None),
+        };
+        events.push_back(EventLine::info(format!("Debugging with {backend_summary}")));
+        if let Some(detail) = backend_detail {
+            events.push_back(EventLine::trace(detail));
+        }
         Ok(Self {
             user_script: runtime_path,
             display_path,
@@ -287,6 +320,8 @@ impl DebugApp {
                 secondary_highlight_line: None,
                 pc_to_line: HashMap::new(),
                 line_to_code: HashMap::new(),
+                proc_placements: HashMap::new(),
+                mapped_proc: None,
             },
             app_state: AppState::Dead,
             focused_proc: None,
@@ -321,6 +356,7 @@ impl DebugApp {
             quitting: false,
             theme,
             theme_name,
+            instruction_set: None,
         })
     }
 
@@ -353,7 +389,7 @@ impl DebugApp {
             Ok(()) => {
                 self.app_state = AppState::Loading;
                 self.set_status("Loading");
-                self.push_event(EventLine::info("target scheduled"));
+                self.push_event(EventLine::trace("target scheduled"));
                 self.tick();
             }
             Err(error) => {
@@ -364,6 +400,11 @@ impl DebugApp {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        // Labels are computed before the event ring is borrowed below.
+        let source_label = self.source_label();
+        let location_label = self.location_label();
+        let paused_line = self.displayed_pause_line();
+        let target_path = self.display_path.display().to_string();
         let displayed_unit = self
             .cache
             .showing_block_id
@@ -396,7 +437,7 @@ impl DebugApp {
             Some(PromptKind::ProcPicker)
         ) {
             Some(PickerOverlay {
-                title: "proc picker — type to filter, Enter selects",
+                title: "Go to proc — type to filter, ↑/↓ choose, Enter opens",
                 entries: &self.proc_picker_filtered,
                 selected: self.proc_picker_selected,
             })
@@ -410,13 +451,17 @@ impl DebugApp {
         };
         let snapshot = DebugSnapshot {
             title: APP_TITLE,
+            target_path: &target_path,
             source_path: &source_path_label,
+            source_label: &source_label,
             source_origin: self.cache.origin,
             source_qname,
             source_lines,
             secondary_source_lines: &self.cache.secondary,
             secondary_highlight_line: self.cache.secondary_highlight_line,
             focused_proc: self.focused_proc.as_ref(),
+            paused_line,
+            location_label: location_label.as_deref(),
             app_state: self.app_state,
             stack: &self.stack,
             inspected_frame: self.inspected_frame,
@@ -431,10 +476,208 @@ impl DebugApp {
             source_search,
             picker: picker_overlay,
             theme_label: &self.theme_name,
+            instruction_set: self.instruction_set.as_deref(),
             error_banner: self.error_banner.as_deref(),
         };
         let prompt = self.prompt.as_ref().map(|p| &p.input);
         render_in(frame, area, &snapshot, &mut self.ui, prompt, &self.theme);
+    }
+
+    /// What the source pane shows, for its title.
+    fn source_label(&self) -> String {
+        if let Some((qname, placement)) = &self.cache.mapped_proc {
+            return format!("{} · in {qname}", self.file_display_name(&placement.path));
+        }
+        match self.displayed_source_unit() {
+            Some(unit) => match &unit.registration.identity {
+                DebugSourceUnitIdentity::File(path) => self.file_display_name(path),
+                DebugSourceUnitIdentity::Procedure(qname) => qname.clone(),
+                DebugSourceUnitIdentity::Anonymous { .. } => "generated code".to_string(),
+            },
+            None => match &self.cache.showing_qname {
+                Some(qname) => qname.clone(),
+                None => self.file_display_name(&self.user_script),
+            },
+        }
+    }
+
+    /// How a file is named in labels: the main script by the name the user
+    /// gave, any other file by its own name.
+    fn file_display_name(&self, path: &std::path::Path) -> String {
+        let shown = if same_file(path, &self.user_script) {
+            self.display_path.as_path()
+        } else {
+            path
+        };
+        shown
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| shown.display().to_string())
+    }
+
+    /// Where execution is paused (or the selected frame is), for the title bar.
+    fn location_label(&self) -> Option<String> {
+        let focus = self.focused_proc.as_ref()?;
+        // Bytecode pauses are addressed by code object and PC.
+        if focus.block_id.starts_with("code:") {
+            return Some(format!("{} pc {}", focus.block_id, focus.offset_start));
+        }
+        let place = self.place_label(
+            focus.block_id.as_str(),
+            (!focus.qname.is_empty()).then_some(focus.qname.as_str()),
+            focus.source_path.as_deref(),
+            Some(focus.line).filter(|line| *line > 0),
+        )?;
+        Some(match focus.qname.as_str() {
+            "" => place,
+            qname => format!("{qname} · {place}"),
+        })
+    }
+
+    /// `demo.tcl:12` for a source location, mapping proc-relative lines back
+    /// onto the file that defines the proc.
+    fn place_label(
+        &self,
+        block_id: &str,
+        qname: Option<&str>,
+        source_path: Option<&str>,
+        line: Option<u32>,
+    ) -> Option<String> {
+        let line = line?;
+        if let Some(qname) = qname.filter(|_| block_id.starts_with("proc:"))
+            && let Some(Some(placement)) = self.cache.proc_placements.get(qname)
+        {
+            return Some(format!(
+                "{}:{}",
+                self.file_display_name(&placement.path),
+                line + placement.offset
+            ));
+        }
+        // A proc or eval unit not found in its file only knows its own line
+        // numbers; claiming a file line would point at the wrong text.
+        if block_id.starts_with("proc:") || block_id.starts_with("anon:") || qname.is_some() {
+            return Some(format!("line {line}"));
+        }
+        if block_id.starts_with("code:") {
+            return Some(format!("disassembly line {line}"));
+        }
+        let path = source_path
+            .map(std::path::Path::new)
+            .or_else(|| block_id.strip_prefix("file:").map(std::path::Path::new));
+        Some(match path {
+            Some(path) => format!("{}:{line}", self.file_display_name(path)),
+            None => format!("line {line}"),
+        })
+    }
+
+    /// The source-pane line holding the paused (or selected-frame) command,
+    /// if the pane is showing the unit that command belongs to.
+    fn displayed_pause_line(&self) -> Option<u32> {
+        let focus = self.focused_proc.as_ref()?;
+        if focus.line == 0 {
+            return None;
+        }
+        if let Some((qname, placement)) = &self.cache.mapped_proc {
+            return (qname == &focus.qname).then_some(focus.line + placement.offset);
+        }
+        if self.cache.origin == SourceOrigin::Synthetic
+            || self.cache.showing_block_id.as_deref() == Some(focus.block_id.as_str())
+        {
+            return Some(focus.line);
+        }
+        let shows_paused_unit = match (&self.cache.showing_block_id, &self.cache.showing_qname) {
+            (None, Some(qname)) => qname == &focus.qname && focus.block_id.starts_with("proc:"),
+            (None, None) => {
+                let in_script = |path: Option<&str>| {
+                    path.is_some_and(|path| {
+                        same_file(std::path::Path::new(path), &self.user_script)
+                    })
+                };
+                in_script(focus.block_id.strip_prefix("file:"))
+                    || (in_script(focus.source_path.as_deref())
+                        && !focus.block_id.starts_with("proc:"))
+            }
+            _ => false,
+        };
+        shows_paused_unit.then_some(focus.line)
+    }
+
+    /// Where `qname`'s body sits among the loaded files, if one of them
+    /// defines that proc with exactly the body the runtime reports.
+    fn proc_placement(&mut self, qname: &str) -> Option<ProcPlacement> {
+        if let Some(cached) = self.cache.proc_placements.get(qname) {
+            return cached.clone();
+        }
+        let placement = self.locate_proc(qname);
+        self.cache
+            .proc_placements
+            .insert(qname.to_string(), placement.clone());
+        placement
+    }
+
+    fn locate_proc(&self, qname: &str) -> Option<ProcPlacement> {
+        let body = join_source_lines(self.cache.proc_bodies.get(qname)?);
+        let bare = qname.trim_start_matches("::");
+        // The runtime records which script was being sourced when the proc
+        // was defined. When that is known, only that file may claim it: the
+        // same body text defined somewhere else is not this proc.
+        let defined_in = self
+            .cache
+            .source_units
+            .values()
+            .find(|unit| {
+                unit.registration
+                    .qualified_proc
+                    .as_deref()
+                    .is_some_and(|proc| proc.trim_start_matches("::") == bare)
+            })
+            .and_then(|unit| unit.registration.definition_path.clone());
+        let unit_for = |path: &std::path::Path| {
+            self.cache
+                .source_units
+                .iter()
+                .find(|(_, unit)| {
+                    matches!(&unit.registration.identity,
+                        DebugSourceUnitIdentity::File(unit_path) if same_file(unit_path, path))
+                })
+                .map(|(block, _)| block.clone())
+        };
+        let mut files = vec![(
+            unit_for(&self.user_script),
+            self.user_script.clone(),
+            join_source_lines(&self.cache.user_script),
+        )];
+        let mut sourced: Vec<_> = self
+            .cache
+            .source_units
+            .iter()
+            .filter_map(|(block, unit)| match &unit.registration.identity {
+                DebugSourceUnitIdentity::File(path) if !same_file(path, &self.user_script) => {
+                    Some((
+                        Some(block.clone()),
+                        path.clone(),
+                        join_source_lines(&unit.lines),
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        sourced.sort_by(|left, right| left.1.cmp(&right.1));
+        files.extend(sourced);
+        files
+            .into_iter()
+            .filter(|(_, path, _)| {
+                defined_in
+                    .as_deref()
+                    .is_none_or(|defined| same_file(path, defined))
+            })
+            .find_map(|(file_block, path, text)| {
+                proc_body_line_offset(&text, qname, &body).map(|offset| ProcPlacement {
+                    file_block,
+                    path,
+                    offset,
+                })
+            })
     }
 
     fn current_source_lines(&self) -> &[SourceLine] {
@@ -493,10 +736,17 @@ impl DebugApp {
                 }
                 DebugEvent::Completed { result } => {
                     self.app_state = AppState::Completed;
-                    self.set_status(result.filter(|value| !value.is_empty()).map_or_else(
-                        || "Completed".to_owned(),
-                        |value| format!("Completed · {value}"),
-                    ));
+                    let result = result.filter(|value| !value.is_empty());
+                    self.push_event(EventLine::pause(match &result {
+                        Some(value) => format!("■ Program finished · result: {value}"),
+                        None => "■ Program finished".to_owned(),
+                    }));
+                    self.set_status(match result {
+                        Some(value) => {
+                            format!("Completed · {value} — r restarts, q quits")
+                        }
+                        None => "Completed — r restarts, q quits".to_owned(),
+                    });
                     self.error_banner = None;
                     self.clear_execution_state();
                 }
@@ -513,15 +763,12 @@ impl DebugApp {
                     needs_refresh = true;
                 }
                 DebugEvent::Output { stream, text } => {
-                    let label = match stream {
-                        DebugOutputStream::Stdout => "stdout",
-                        DebugOutputStream::Stderr => "stderr",
-                        DebugOutputStream::Console => "console",
+                    let severity = match stream {
+                        DebugOutputStream::Stdout => EventSeverity::Output,
+                        DebugOutputStream::Stderr => EventSeverity::ErrorOutput,
+                        DebugOutputStream::Console => EventSeverity::Info,
                     };
-                    self.push_event_text(
-                        tcld_tui::debug::EventSeverity::Info,
-                        &format!("{label}: {text}"),
-                    );
+                    self.push_event_text(severity, text.trim_end_matches('\n'));
                 }
                 DebugEvent::Diagnostic { severity, message } => {
                     let severity = match severity {
@@ -551,7 +798,7 @@ impl DebugApp {
                     );
                 }
                 DebugEvent::SourceRegistered(source) => {
-                    self.push_event(EventLine::info(format!(
+                    self.push_event(EventLine::trace(format!(
                         "source unit registered: {} generation {}",
                         source.identity.display_label(),
                         source.generation
@@ -559,7 +806,7 @@ impl DebugApp {
                     needs_revalidate.push(source.block_id);
                 }
                 DebugEvent::SourceRevalidated(source) => {
-                    self.push_event(EventLine::info(format!(
+                    self.push_event(EventLine::trace(format!(
                         "source unit revalidated: {} generation {}",
                         source.identity.display_label(),
                         source.generation
@@ -589,7 +836,7 @@ impl DebugApp {
                         source.reason
                     )))
                 }
-                DebugEvent::CodeRegistered(code) => self.push_event(EventLine::info(format!(
+                DebugEvent::CodeRegistered(code) => self.push_event(EventLine::trace(format!(
                     "code object {} registered{}",
                     code.id.0,
                     code.name
@@ -621,6 +868,7 @@ impl DebugApp {
     }
 
     fn clear_execution_state(&mut self) {
+        self.cache.mapped_proc = None;
         self.focused_proc = None;
         self.paused_focus = None;
         self.inspected_frame = 0;
@@ -634,8 +882,14 @@ impl DebugApp {
     }
 
     fn invalidate_block(&mut self, block: &str) {
+        // A file that is new or has new text can change where any proc
+        // lives, not just the procs it defined last time.
+        if block.starts_with("file:") {
+            self.cache.proc_placements.clear();
+        }
         if let Some(qname) = block.strip_prefix("proc:") {
             self.cache.proc_bodies.remove(qname);
+            self.cache.proc_placements.remove(qname);
             if self.cache.showing_qname.as_deref() == Some(qname) {
                 // The currently-displayed body is stale; trigger a re-fetch
                 // on the next refresh by clearing the showing flag.
@@ -737,16 +991,44 @@ impl DebugApp {
             },
             error_message: pause.error,
         };
+        let reason_text = match (&pause.reason, focus.breakpoint.as_deref()) {
+            (_, Some(id)) => format!("breakpoint {id}"),
+            (DebugPauseReason::Entry, _) => "entry".to_owned(),
+            (DebugPauseReason::Error, _) => "error".to_owned(),
+            (DebugPauseReason::Watchpoint, _) => "variable written".to_owned(),
+            (DebugPauseReason::Pause, _) => "paused by you".to_owned(),
+            (DebugPauseReason::RunToLocation, _) => "reached the cursor".to_owned(),
+            (DebugPauseReason::InstructionStep, _) => "instruction step".to_owned(),
+            (DebugPauseReason::InstructionBreakpoint, _) => "instruction breakpoint".to_owned(),
+            (DebugPauseReason::Breakpoint, None) => "breakpoint".to_owned(),
+            (
+                DebugPauseReason::Step | DebugPauseReason::StepOver | DebugPauseReason::StepOut,
+                _,
+            ) => "step".to_owned(),
+        };
+        let error = focus.error_message.clone();
+        let proc_block = focus
+            .block_id
+            .starts_with("proc:")
+            .then(|| focus.qname.clone());
         self.paused_focus = Some(focus.clone());
         self.focused_proc = Some(focus);
-        self.set_status(match pause.reason {
-            DebugPauseReason::Entry => "Paused at entry".to_owned(),
-            reason => format!("Paused · {reason:?}"),
+        self.ui.source_hscroll = 0;
+        if let Some(qname) = proc_block
+            && self.ensure_proc_body(&qname)
+        {
+            self.proc_placement(&qname);
+        }
+        let place = self
+            .location_label()
+            .unwrap_or_else(|| format_debug_location(&pause.location));
+        self.set_status(match (&pause.reason, &error) {
+            (DebugPauseReason::Entry, _) => "Paused before the first command".to_owned(),
+            (_, Some(error)) => format!("Stopped on error: {}", trim_status(error)),
+            (_, None) => format!("Paused · {reason_text}"),
         });
         self.push_event(EventLine::pause(format!(
-            "paused at {} · {:?}",
-            format_debug_location(&pause.location),
-            pause.reason
+            "⏸ paused at {place} · {reason_text}"
         )));
     }
 
@@ -793,7 +1075,7 @@ impl DebugApp {
                 }
             }
             if let Some(instruction_set) = disassembly.instruction_set.as_deref() {
-                self.theme_name = format!("{} · {instruction_set}", self.theme.name());
+                self.instruction_set = Some(instruction_set.to_owned());
             }
             if self
                 .capabilities
@@ -825,6 +1107,35 @@ impl DebugApp {
                 .lines()
                 .map(|line| SourceLine::raw(line.to_owned()))
                 .collect();
+        }
+    }
+
+    /// Re-read watch values for the inspected frame, keeping the change
+    /// markers the last execution action produced: switching frames is not
+    /// a change in the program.
+    fn reload_watches(&mut self) {
+        let Some(backend) = self.backend.as_mut() else {
+            return;
+        };
+        let fresh = if self.app_state == AppState::Stopped {
+            backend
+                .evaluate_watch_entries(self.inspected_frame)
+                .or_else(|_| backend.watch_entries())
+                .ok()
+        } else {
+            backend.watch_entries().ok()
+        };
+        match fresh {
+            Some(mut watches) => {
+                for watch in &mut watches {
+                    watch.changed = self
+                        .watches
+                        .iter()
+                        .any(|previous| previous.id == watch.id && previous.changed);
+                }
+                self.watches = watches;
+            }
+            None => self.evaluate_frontend_watches(),
         }
     }
 
@@ -870,24 +1181,37 @@ impl DebugApp {
         if self.backend.is_none() {
             return;
         }
+        // Hosts list frames outermost first; instruction backends list the
+        // paused frame first. The Stack pane always reads top-down from the
+        // paused frame, like every other debugger.
+        let paused_frame_first = self
+            .capabilities
+            .support(BackendOperation::InstructionBreakpoints)
+            .is_supported();
         let (state, stack, breakpoints, watches, coverage) = {
             let backend = self.backend.as_mut().unwrap();
             let state = backend.state().unwrap_or(DebugLifecycleState::Paused);
-            let stack = backend
+            let mut stack: Vec<StackFrame> = backend
                 .stack_frames()
                 .unwrap_or_default()
                 .into_iter()
                 .map(backend_stack_to_tui)
                 .collect();
+            if !paused_frame_first {
+                stack.reverse();
+            }
             let breakpoints = backend
                 .breakpoints()
                 .unwrap_or_default()
                 .into_iter()
                 .map(backend_breakpoint_to_tui)
                 .collect();
+            // Watches read the frame the user will be looking at: the paused
+            // one, which now leads the list.
+            let watch_level = stack.first().map_or(0, |frame| frame.level);
             let watches = if state == DebugLifecycleState::Paused {
                 backend
-                    .evaluate_watch_entries(0)
+                    .evaluate_watch_entries(watch_level)
                     .or_else(|_| backend.watch_entries())
                     .ok()
             } else {
@@ -929,20 +1253,10 @@ impl DebugApp {
         }
         self.coverage = coverage;
         self.refresh_source_artifacts();
-        // Reset inspected frame to bottom (most recent) on each refresh
-        // unless the user already pinned a frame in-pane.
-        let selected = if self
-            .capabilities
-            .support(BackendOperation::InstructionBreakpoints)
-            .is_supported()
-        {
-            self.stack.iter().enumerate().next()
-        } else {
-            self.stack.iter().enumerate().next_back()
-        };
-        if let Some((index, frame)) = selected {
+        // Each refresh inspects the paused frame again.
+        if let Some(frame) = self.stack.first() {
             self.inspected_frame = frame.level;
-            self.ui.selections.stack.select(Some(index));
+            self.ui.selections.stack.select(Some(0));
         } else {
             self.inspected_frame = 0;
             self.ui.selections.stack.select(None);
@@ -950,7 +1264,112 @@ impl DebugApp {
         self.update_locals();
         self.update_error_banner();
         self.update_source_view();
+        self.label_stack();
+        self.label_breakpoints();
         self.sync_selections();
+    }
+
+    /// Phrase each frame's location for the Stack pane, mapping proc lines
+    /// onto their files where possible.
+    fn label_stack(&mut self) {
+        let procs: Vec<String> = self
+            .stack
+            .iter()
+            .filter(|frame| {
+                frame
+                    .block
+                    .as_deref()
+                    .is_some_and(|b| b.starts_with("proc:"))
+            })
+            .filter_map(|frame| frame.proc_name.clone())
+            .collect();
+        for qname in procs {
+            if self.ensure_proc_body(&qname) {
+                self.proc_placement(&qname);
+            }
+        }
+        let labels: Vec<Option<String>> = self
+            .stack
+            .iter()
+            .map(|frame| match (frame.block.as_deref(), frame.offset_start) {
+                (Some(block), Some(pc)) if block.starts_with("code:") => {
+                    Some(format!("{block} pc {pc}"))
+                }
+                (block, _) => self.place_label(
+                    block.unwrap_or(""),
+                    frame.proc_name.as_deref(),
+                    frame.source_path.as_deref(),
+                    frame.line,
+                ),
+            })
+            .collect();
+        for (frame, label) in self.stack.iter_mut().zip(labels) {
+            frame.location_label = label;
+        }
+    }
+
+    /// Phrase each breakpoint's location (`demo.tcl:12`) from its requested
+    /// span: file lines directly, proc offsets through their file's text.
+    fn label_breakpoints(&mut self) {
+        let script = join_source_lines(&self.cache.user_script);
+        let labels: Vec<Option<String>> = self
+            .breakpoints
+            .iter()
+            .map(|bp| {
+                if bp.qname.starts_with("code:") {
+                    return Some(format!("pc {}", bp.offset));
+                }
+                if let Some(line) = bp.line {
+                    return bp.source_path.as_deref().map(|path| {
+                        format!(
+                            "{}:{line}",
+                            self.file_display_name(std::path::Path::new(path))
+                        )
+                    });
+                }
+                if bp.qname.is_empty() {
+                    // A command span in a file: byte offset into that file.
+                    let path = std::path::Path::new(bp.source_path.as_deref()?);
+                    let text = if same_file(path, &self.user_script) {
+                        Some(script.clone())
+                    } else {
+                        self.cache
+                            .source_units
+                            .values()
+                            .find(|unit| {
+                                unit.registration
+                                    .path
+                                    .as_deref()
+                                    .is_some_and(|unit_path| same_file(unit_path, path))
+                            })
+                            .map(|unit| join_source_lines(&unit.lines))
+                    }?;
+                    let line = line_for_offset(&text, bp.offset)?;
+                    return Some(format!("{}:{line}", self.file_display_name(path)));
+                }
+                let body_line = self
+                    .cache
+                    .proc_bodies
+                    .get(&bp.qname)
+                    .and_then(|body| line_for_offset(&join_source_lines(body), bp.offset));
+                Some(
+                    match (self.cache.proc_placements.get(&bp.qname), body_line) {
+                        (Some(Some(placement)), Some(line)) => format!(
+                            "{}:{} · {}",
+                            self.file_display_name(&placement.path),
+                            line + placement.offset,
+                            bp.qname
+                        ),
+                        (_, Some(line)) => format!("{} line {line}", bp.qname),
+                        // Not defined yet: all that is known is the offset.
+                        (_, None) => format!("{} +{}", bp.qname, bp.offset),
+                    },
+                )
+            })
+            .collect();
+        for (bp, label) in self.breakpoints.iter_mut().zip(labels) {
+            bp.location_label = label;
+        }
     }
 
     fn update_locals(&mut self) {
@@ -969,11 +1388,34 @@ impl DebugApp {
             .into_iter()
             .map(|variable| (variable.name, variable.value))
             .collect();
-        // Diff against the last snapshot for this frame level.
-        let prev = self.locals_prev.get(&level).cloned().unwrap_or_default();
+        // Diff against the last snapshot of this frame. A frame keeps its
+        // depth from the outermost frame across pauses, while some backends
+        // number levels from the innermost one.
+        let frame_key = self
+            .stack
+            .iter()
+            .position(|frame| frame.level == level)
+            .map_or((level, None), |index| {
+                (
+                    (self.stack.len() - 1 - index) as i64,
+                    self.stack[index].proc_name.clone(),
+                )
+            });
+        let prev = self
+            .locals_prev
+            .get(&frame_key)
+            .cloned()
+            .unwrap_or_default();
         let prev_map: HashMap<&str, &str> =
             prev.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        let rows: Vec<LocalRow> = fresh
+        // Tcl's own globals only crowd the global frame; inside a proc a
+        // variable called `env` is the program's.
+        let global_frame = self
+            .stack
+            .iter()
+            .find(|frame| frame.level == level)
+            .is_none_or(|frame| frame.proc_name.is_none());
+        let mut rows: Vec<LocalRow> = fresh
             .iter()
             .map(|(name, value)| {
                 let changed = !prev.is_empty()
@@ -985,10 +1427,17 @@ impl DebugApp {
                     name: name.clone(),
                     value: value.clone(),
                     changed,
+                    builtin: global_frame && is_tcl_builtin_global(name),
                 }
             })
             .collect();
-        self.locals_prev.insert(level, fresh);
+        // `info vars` order is hash order; a stable alphabetical list lets
+        // the eye find a variable again after every step.
+        rows.sort_by(|left, right| {
+            (left.builtin, left.name.to_lowercase())
+                .cmp(&(right.builtin, right.name.to_lowercase()))
+        });
+        self.locals_prev.insert(frame_key, fresh);
         self.locals = rows;
     }
 
@@ -1004,18 +1453,27 @@ impl DebugApp {
     /// current pause. If the paused block resolves to a proc whose body
     /// we've cached, show that; otherwise fall back to the user script.
     fn update_source_view(&mut self) {
+        self.place_source_view();
+        self.select_paused_command();
+    }
+
+    fn place_source_view(&mut self) {
+        self.cache.mapped_proc = None;
         let Some(focused) = self.focused_proc.clone() else {
             self.cache.showing_block_id = None;
             self.cache.showing_qname = None;
             self.cache.origin = self.cache.user_script_origin;
             return;
         };
+        if self.show_proc_in_file(&focused) {
+            return;
+        }
         if let Some(unit) = self.cache.source_units.get(&focused.block_id) {
             self.cache.showing_block_id = Some(focused.block_id.clone());
             self.cache.showing_qname = unit.registration.qualified_proc.clone();
             self.cache.origin = match &unit.registration.identity {
                 DebugSourceUnitIdentity::File(path) => {
-                    if path == &self.user_script {
+                    if same_file(path, &self.user_script) {
                         self.cache.user_script_origin
                     } else {
                         SourceOrigin::SourcedFile
@@ -1053,16 +1511,7 @@ impl DebugApp {
         }
 
         let qname = focused.qname.clone();
-        if !self.cache.proc_bodies.contains_key(&qname)
-            && let Some(backend) = self.backend.as_mut()
-            && let Ok(source) = backend.procedure_source(&qname)
-        {
-            let raw: Vec<String> = source.text.lines().map(str::to_string).collect();
-            let highlighted = highlight_lines(&raw, &self.theme);
-            self.cache.proc_bodies.insert(qname.clone(), highlighted);
-        }
-
-        if self.cache.proc_bodies.contains_key(&qname) {
+        if self.ensure_proc_body(&qname) {
             self.cache.showing_block_id = None;
             self.cache.showing_qname = Some(qname);
             self.cache.origin = SourceOrigin::ProcBody;
@@ -1078,6 +1527,89 @@ impl DebugApp {
             self.cache.showing_qname = None;
             self.cache.origin = self.cache.user_script_origin;
         }
+    }
+
+    /// Fetch and cache a proc's body if it is not cached yet. Returns
+    /// whether the body is available.
+    fn ensure_proc_body(&mut self, qname: &str) -> bool {
+        if qname.is_empty() {
+            return false;
+        }
+        // Fetching from a running program would interrupt it for something
+        // only needed once it pauses.
+        if !self.cache.proc_bodies.contains_key(qname)
+            && self.app_state != AppState::Running
+            && let Some(backend) = self.backend.as_mut()
+            && let Ok(source) = backend.procedure_source(qname)
+        {
+            let raw: Vec<String> = source.text.lines().map(str::to_string).collect();
+            let highlighted = highlight_lines(&raw, &self.theme);
+            self.cache
+                .proc_bodies
+                .insert(qname.to_string(), highlighted);
+        }
+        self.cache.proc_bodies.contains_key(qname)
+    }
+
+    /// Show a paused proc inside the file that defines it with the body being
+    /// executed: the main script or a file it sourced. Returns whether it did.
+    fn show_proc_in_file(&mut self, focused: &FocusedProc) -> bool {
+        if !focused.block_id.starts_with("proc:") || !self.ensure_proc_body(&focused.qname) {
+            return false;
+        }
+        let Some(placement) = self.proc_placement(&focused.qname) else {
+            return false;
+        };
+        self.cache.showing_block_id = placement.file_block.clone();
+        self.cache.showing_qname = None;
+        self.cache.origin = if same_file(&placement.path, &self.user_script) {
+            self.cache.user_script_origin
+        } else {
+            SourceOrigin::SourcedFile
+        };
+        let line = (focused.line + placement.offset).saturating_sub(1) as usize;
+        self.cache.mapped_proc = Some((focused.qname.clone(), placement));
+        if line < self.current_source_lines_len() {
+            self.ui.source_cursor = line;
+            self.ui.center_source_cursor = true;
+        }
+        true
+    }
+
+    /// Mark the paused command on its line. Tcl runs nested commands before
+    /// the command containing them, so one line can pause once per command;
+    /// the marker shows which of them runs next.
+    fn select_paused_command(&mut self) {
+        let Some(focus) = self.focused_proc.as_ref() else {
+            return;
+        };
+        let source_offsets = ["file:", "proc:", "anon:", "image:"]
+            .iter()
+            .any(|prefix| focus.block_id.starts_with(prefix));
+        if !source_offsets
+            || self.displayed_pause_line() != u32::try_from(self.ui.source_cursor + 1).ok()
+        {
+            return;
+        }
+        // A compiled image reports offsets in the file it shows. Otherwise a
+        // proc shown inside its file lists its commands under that proc, and
+        // any other view shows the paused unit's own top-level commands.
+        let in_image = focus.block_id.starts_with("image:");
+        let in_mapped_proc = self.cache.mapped_proc.is_some();
+        let offset = focus.offset_start;
+        let index = self
+            .current_source_lines()
+            .get(self.ui.source_cursor)
+            .and_then(|line| {
+                line.commands.iter().position(|command| {
+                    if in_image {
+                        command.offset == offset
+                    } else {
+                        command.target_offset == offset && command.qname.is_some() == in_mapped_proc
+                    }
+                })
+            });
+        self.ui.source_command_cursor = index.unwrap_or(0);
     }
 
     fn sync_selections(&mut self) {
@@ -1117,7 +1649,10 @@ impl DebugApp {
         match self.capabilities.support(operation) {
             super::contract::CapabilitySupport::Supported => true,
             super::contract::CapabilitySupport::Unsupported { reason } => {
-                self.set_status(format!("{action} unavailable: {reason}"));
+                let message = format!("{action} unavailable: {reason}");
+                // The footer may shorten a refusal; the console keeps it whole.
+                self.push_event(EventLine::warn(message.clone()));
+                self.set_status(message);
                 false
             }
         }
@@ -1132,6 +1667,18 @@ impl DebugApp {
             .into_iter()
             .map(backend_breakpoint_to_tui)
             .collect();
+        for qname in self
+            .breakpoints
+            .iter()
+            .filter(|bp| !bp.qname.is_empty() && !bp.qname.starts_with("code:"))
+            .map(|bp| bp.qname.clone())
+            .collect::<Vec<_>>()
+        {
+            if self.ensure_proc_body(&qname) {
+                self.proc_placement(&qname);
+            }
+        }
+        self.label_breakpoints();
     }
 
     fn toggle_instruction_breakpoint(&mut self, location: super::contract::DebugCodeLocation) {
@@ -1262,8 +1809,32 @@ impl DebugApp {
             BindingContext::Pane(self.ui.focus)
         };
         let action = resolve_binding(binding_context, key);
-        if action == Some(DebugAction::Quit) {
+        if action == Some(DebugAction::ForceQuit) {
             self.quitting = true;
+            return;
+        }
+        if self.ui.confirm_quit {
+            self.ui.confirm_quit = false;
+            if matches!(key.code, crossterm::event::KeyCode::Char('y' | 'Y')) {
+                self.quitting = true;
+            } else {
+                self.set_status("Still debugging");
+            }
+            return;
+        }
+        if let Some(popup) = self.ui.popup.as_mut() {
+            use crossterm::event::KeyCode;
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.ui.popup = None,
+                KeyCode::Char('j') | KeyCode::Down => popup.scroll = popup.scroll.saturating_add(1),
+                KeyCode::Char('k') | KeyCode::Up => popup.scroll = popup.scroll.saturating_sub(1),
+                KeyCode::PageDown | KeyCode::Char(' ') => {
+                    popup.scroll = popup.scroll.saturating_add(10);
+                }
+                KeyCode::PageUp => popup.scroll = popup.scroll.saturating_sub(10),
+                KeyCode::Home | KeyCode::Char('g') => popup.scroll = 0,
+                _ => {}
+            }
             return;
         }
         if self.ui.show_help {
@@ -1342,7 +1913,7 @@ impl DebugApp {
                     self.prompt = None;
                     self.proc_picker_filtered.clear();
                     self.proc_picker_selected = None;
-                    self.set_status("(prompt cancelled)");
+                    self.set_status("Cancelled");
                 }
                 PromptStep::Submit(value) => {
                     let active = self.prompt.take().unwrap();
@@ -1361,17 +1932,40 @@ impl DebugApp {
 
     fn dispatch_debug_action(&mut self, action: DebugAction) {
         match action {
-            DebugAction::Quit => self.quitting = true,
+            DebugAction::Quit => {
+                // Quitting kills the program being debugged; ask while it is
+                // still alive, not after it has finished.
+                if matches!(self.app_state, AppState::Stopped | AppState::Running) {
+                    self.ui.confirm_quit = true;
+                } else {
+                    self.quitting = true;
+                }
+            }
+            DebugAction::ForceQuit => self.quitting = true,
             DebugAction::ToggleHelp => self.ui.show_help = true,
             DebugAction::StatusInspect => self.open_status_inspect(),
-            DebugAction::FocusNext => self.ui.focus = self.ui.focus.next(),
-            DebugAction::FocusPrev => self.ui.focus = self.ui.focus.prev(),
-            DebugAction::FocusPane(pane) => self.ui.focus = pane,
+            DebugAction::InspectValue => self.inspect_selected_value(),
+            DebugAction::ScrollLeft => {
+                self.ui.source_hscroll = self.ui.source_hscroll.saturating_sub(8);
+            }
+            DebugAction::ScrollRight => {
+                self.ui.source_hscroll = self.ui.source_hscroll.saturating_add(8);
+            }
+            DebugAction::FocusNext => self.ui.focus_pane(self.next_pane(1)),
+            DebugAction::FocusPrev => self.ui.focus_pane(self.next_pane(-1)),
+            DebugAction::FocusPane(pane) => {
+                self.ui.focus_pane(pane);
+                if pane == Pane::Coverage && !self.coverage_enabled {
+                    self.set_status("Coverage is off — press C to start collecting it");
+                }
+            }
             DebugAction::Continue => self.do_continue(),
             DebugAction::StepOver => self.do_step_over(),
             DebugAction::StepInto => self.do_step_into(),
             DebugAction::StepOut => self.do_step_out(),
-            DebugAction::NextOrStepOver if !self.search_query.is_empty() => self.search_next(1),
+            DebugAction::NextOrStepOver if !self.search_query.is_empty() => {
+                self.search_next(1);
+            }
             DebugAction::NextOrStepOver => self.do_step_over(),
             DebugAction::PreviousSearch if !self.search_query.is_empty() => self.search_next(-1),
             DebugAction::PreviousSearch => {}
@@ -1380,7 +1974,7 @@ impl DebugApp {
             DebugAction::Refresh => {
                 self.refresh_state();
                 self.last_action = Some(RepeatableAction::Refresh);
-                self.set_status("state refreshed");
+                self.set_status("State refreshed");
             }
             DebugAction::UserSource => self.reset_to_user_script(),
             DebugAction::Repeat => self.repeat_last_action(),
@@ -1391,44 +1985,30 @@ impl DebugApp {
             DebugAction::ListSlaves => self.do_list_slaves(),
             DebugAction::PreInstrument => {
                 if self.require_capability(BackendOperation::SourceAccess, "pre-instrument") {
-                    self.open_prompt_full(
-                        PromptKind::PreInstrument,
-                        "instrument <qname> <body…>",
-                        None,
-                        None,
-                    );
+                    self.open_prompt_full(PromptKind::PreInstrument, "instrument", None, None);
                 }
             }
             DebugAction::ToggleBreakpoint => self.toggle_breakpoint_at_cursor(),
             DebugAction::AddBreakpoint => {
-                let label = if self
-                    .capabilities
-                    .support(BackendOperation::InstructionBreakpoints)
-                    .is_supported()
-                {
-                    "bp add <pc> [condition]"
-                } else {
-                    "bp add <qname> <offset> [condition]"
-                };
-                self.open_prompt(PromptKind::AddBreakpoint, label);
+                self.open_prompt(PromptKind::AddBreakpoint, "breakpoint");
             }
             DebugAction::GotoProc => {
                 if self.require_capability(BackendOperation::ProcedureList, "go to procedure") {
-                    self.open_prompt(PromptKind::GotoProc, "goto proc");
+                    self.open_prompt(PromptKind::GotoProc, "go to proc");
                 }
             }
             DebugAction::RunToCursor => self.run_to_cursor(),
             DebugAction::ProcPicker => self.open_proc_picker(),
             DebugAction::AddWatch => {
                 if self.require_capability(BackendOperation::Watches, "add watch") {
-                    self.open_prompt(PromptKind::AddWatch, "watch add");
+                    self.open_prompt(PromptKind::AddWatch, "watch");
                 }
             }
             DebugAction::AddWatchpoint => {
                 if self
                     .require_capability(BackendOperation::SourceBreakpoints, "variable watchpoint")
                 {
-                    self.open_prompt(PromptKind::AddWatchpoint, "wp add");
+                    self.open_prompt(PromptKind::AddWatchpoint, "break on write");
                 }
             }
             DebugAction::Eval => {
@@ -1436,10 +2016,10 @@ impl DebugApp {
                     self.open_prompt(PromptKind::EvalExpr, "eval");
                 }
             }
-            DebugAction::Command => self.open_prompt(PromptKind::Command, "dbg"),
+            DebugAction::Command => self.open_prompt(PromptKind::Command, "command"),
             DebugAction::EventFilter => self.open_prompt_full(
                 PromptKind::EventFilter,
-                "filter events",
+                "filter console",
                 Some(self.event_filter.clone()),
                 None,
             ),
@@ -1470,15 +2050,78 @@ impl DebugApp {
         }
     }
 
+    /// The pane `delta` steps away in Tab order, skipping Coverage while it
+    /// is off.
+    fn next_pane(&self, delta: isize) -> Pane {
+        let mut pane = self.ui.focus;
+        loop {
+            pane = if delta > 0 { pane.next() } else { pane.prev() };
+            if pane != Pane::Coverage || self.coverage_enabled {
+                return pane;
+            }
+        }
+    }
+
+    /// Show the selected local or watch in full.
+    fn inspect_selected_value(&mut self) {
+        let popup = match self.ui.focus {
+            Pane::Locals => self
+                .ui
+                .selections
+                .locals
+                .selected()
+                .and_then(|index| self.locals.get(index))
+                .map(|row| ValuePopup {
+                    title: format!("{} · {} characters", row.name, row.value.chars().count()),
+                    body: row.value.clone(),
+                    scroll: 0,
+                }),
+            Pane::Watches => self
+                .ui
+                .selections
+                .watches
+                .selected()
+                .and_then(|index| self.watches.get(index))
+                .map(|watch| ValuePopup {
+                    title: if watch.name == watch.expr {
+                        watch.name.clone()
+                    } else {
+                        format!("{} = {}", watch.name, watch.expr)
+                    },
+                    body: match (&watch.last_value, &watch.last_error) {
+                        (_, Some(error)) => format!("error: {error}"),
+                        (Some(value), None) => value.clone(),
+                        (None, None) => "(not evaluated yet — pause the program)".to_string(),
+                    },
+                    scroll: 0,
+                }),
+            _ => None,
+        };
+        match popup {
+            Some(popup) => self.ui.popup = Some(popup),
+            None => self.set_status("Nothing selected"),
+        }
+    }
+
     fn handle_mouse(&mut self, m: MouseEvent) {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(tab) = self.ui.hit.inspector_tab_at(m.column, m.row) {
+                    self.ui.focus_pane(tab);
+                    return;
+                }
                 if let Some(pane) = self.ui.hit.pane_at(m.column, m.row) {
-                    self.ui.focus = pane;
+                    self.ui.focus_pane(pane);
                     if pane == Pane::Source {
                         if let Some(line_idx) = self.ui.hit.source_line_at(m.column, m.row) {
                             let max = self.current_source_lines().len().saturating_sub(1);
                             self.ui.source_cursor = line_idx.min(max);
+                            self.ui.source_command_cursor = 0;
+                            // The gutter is where breakpoints live, as in
+                            // every editor.
+                            if self.ui.hit.in_source_gutter(m.column) {
+                                self.toggle_breakpoint_at_cursor();
+                            }
                         }
                     } else if let Some(row) = list_row(pane, &self.ui.hit, m.row) {
                         self.set_selection_for_pane(pane, row);
@@ -1497,19 +2140,27 @@ impl DebugApp {
                     self.toggle_breakpoint_at_cursor();
                 }
             }
-            MouseEventKind::ScrollDown => {
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                let delta = if matches!(m.kind, MouseEventKind::ScrollDown) {
+                    3
+                } else {
+                    -3
+                };
                 if let Some(pane) = self.ui.hit.pane_at(m.column, m.row) {
                     let prior_focus = self.ui.focus;
                     self.ui.focus = pane;
-                    self.move_selection(3);
-                    self.ui.focus = prior_focus;
-                }
-            }
-            MouseEventKind::ScrollUp => {
-                if let Some(pane) = self.ui.hit.pane_at(m.column, m.row) {
-                    let prior_focus = self.ui.focus;
-                    self.ui.focus = pane;
-                    self.move_selection(-3);
+                    if pane == Pane::Source {
+                        // The wheel scrolls the view, not just the cursor.
+                        let max = self.current_source_lines_len().saturating_sub(1);
+                        self.ui.source_view_top = (self.ui.source_view_top as isize + delta)
+                            .clamp(0, max as isize)
+                            as usize;
+                        self.ui.source_cursor = (self.ui.source_cursor as isize + delta)
+                            .clamp(0, max as isize)
+                            as usize;
+                    } else {
+                        self.move_selection(delta);
+                    }
                     self.ui.focus = prior_focus;
                 }
             }
@@ -1556,7 +2207,13 @@ impl DebugApp {
                 DebugUiState::move_list(&mut self.ui.selections.watches, self.watches.len(), delta);
             }
             Pane::Events => {
-                DebugUiState::move_list(&mut self.ui.selections.events, self.events.len(), delta);
+                // The console reads bottom-up from the newest line: moving
+                // up scrolls back in time.
+                self.ui.console_scroll = if delta < 0 {
+                    self.ui.console_scroll.saturating_add(delta.unsigned_abs())
+                } else {
+                    self.ui.console_scroll.saturating_sub(delta.unsigned_abs())
+                };
             }
             Pane::Coverage => DebugUiState::move_list(
                 &mut self.ui.selections.coverage,
@@ -1589,7 +2246,8 @@ impl DebugApp {
                 DebugUiState::set_list(&mut self.ui.selections.watches, self.watches.len(), target);
             }
             Pane::Events => {
-                DebugUiState::set_list(&mut self.ui.selections.events, self.events.len(), target);
+                // Home is the oldest line, End follows new output.
+                self.ui.console_scroll = if target == 0 { usize::MAX } else { 0 };
             }
             Pane::Coverage => DebugUiState::set_list(
                 &mut self.ui.selections.coverage,
@@ -1686,16 +2344,11 @@ impl DebugApp {
         }
         self.update_source_view();
         self.update_locals();
+        self.reload_watches();
     }
 
     fn open_prompt(&mut self, kind: PromptKind, label: &'static str) {
-        self.prompt = Some(ActivePrompt {
-            kind,
-            input: PromptInput::new(label),
-            bp_target: None,
-            body_buffer: None,
-            history_pos: None,
-        });
+        self.open_prompt_full(kind, label, None, None);
     }
 
     fn open_prompt_full(
@@ -1705,23 +2358,77 @@ impl DebugApp {
         initial: Option<String>,
         bp_target: Option<String>,
     ) {
+        let input = match initial {
+            Some(text) => PromptInput::with_initial(label, text),
+            None => PromptInput::new(label),
+        };
+        let placeholder = self.prompt_placeholder(kind);
         self.prompt = Some(ActivePrompt {
             kind,
-            input: match initial {
-                Some(text) => PromptInput::with_initial(label, text),
-                None => PromptInput::new(label),
-            },
+            input: input.with_placeholder(placeholder),
             bp_target,
             body_buffer: None,
             history_pos: None,
         });
     }
 
+    /// What belongs in a prompt and how to finish it.
+    fn prompt_placeholder(&self, kind: PromptKind) -> String {
+        match kind {
+            PromptKind::Command => {
+                "debugger command · Tab completes · help lists them · ↑ history".into()
+            }
+            PromptKind::GotoProc => "proc name · Enter opens its body".into(),
+            PromptKind::AddWatch => {
+                "variable or expression (or: name expression) · Enter adds".into()
+            }
+            PromptKind::AddWatchpoint => "variable name, then optional r/w/u operations".into(),
+            PromptKind::EvalExpr => {
+                let scope = self
+                    .stack
+                    .iter()
+                    .find(|frame| frame.level == self.inspected_frame)
+                    .map(|frame| {
+                        frame
+                            .proc_name
+                            .clone()
+                            .unwrap_or_else(|| "the global scope".into())
+                    })
+                    .unwrap_or_else(|| "the global scope".into());
+                format!("Tcl script, run in {scope} · Enter runs")
+            }
+            PromptKind::AddBreakpoint => {
+                if self
+                    .capabilities
+                    .support(BackendOperation::InstructionBreakpoints)
+                    .is_supported()
+                {
+                    "<pc> [condition]".into()
+                } else {
+                    "<proc> <body offset> [condition]".into()
+                }
+            }
+            PromptKind::EditCondition => {
+                "stop only when this expression is true · empty clears".into()
+            }
+            PromptKind::SetIgnore => "hits to skip before stopping".into(),
+            PromptKind::EventFilter => "text to match · empty shows everything".into(),
+            PromptKind::ProcPicker => "type to filter · ↑/↓ choose · Enter opens".into(),
+            PromptKind::PreInstrument => "<proc> <body…>".into(),
+            PromptKind::SearchSource => {
+                "text · Enter keeps matches · n/N next/prev · Esc clears".into()
+            }
+        }
+    }
+
     fn open_status_inspect(&mut self) {
-        // Show the latest unclipped status / log line as a read-only
-        // prompt buffer the user can copy with terminal selection.
-        let initial = self.last_status_full.clone();
-        self.open_prompt_full(PromptKind::StatusInspect, "status", Some(initial), None);
+        // The status line clips long messages; this is where they are read
+        // in full (and can be selected with the terminal).
+        self.ui.popup = Some(ValuePopup {
+            title: "Last message".to_string(),
+            body: self.last_status_full.clone(),
+            scroll: 0,
+        });
     }
 
     fn open_edit_condition_prompt(&mut self) {
@@ -1735,7 +2442,7 @@ impl DebugApp {
         let initial = bp.condition.clone().unwrap_or_default();
         self.open_prompt_full(
             PromptKind::EditCondition,
-            "condition (empty clears)",
+            "condition",
             Some(initial),
             Some(bp.id),
         );
@@ -1751,8 +2458,8 @@ impl DebugApp {
         };
         self.open_prompt_full(
             PromptKind::SetIgnore,
-            "ignore count",
-            Some("0".to_string()),
+            "skip hits",
+            Some(bp.ignore_count.to_string()),
             Some(bp.id),
         );
     }
@@ -1769,17 +2476,12 @@ impl DebugApp {
             .unwrap_or_default();
         self.proc_picker = list;
         self.update_proc_picker_filter("");
-        self.open_prompt(PromptKind::ProcPicker, "proc filter");
+        self.open_prompt(PromptKind::ProcPicker, "go to proc");
     }
 
     fn open_source_search(&mut self) {
         let initial = self.search_query.clone();
-        self.open_prompt_full(
-            PromptKind::SearchSource,
-            "search source",
-            Some(initial),
-            None,
-        );
+        self.open_prompt_full(PromptKind::SearchSource, "search", Some(initial), None);
     }
 
     fn update_source_search(&mut self, query: &str) {
@@ -1790,20 +2492,14 @@ impl DebugApp {
             return;
         }
         let q = query.to_lowercase();
-        let lines: &[SourceLine] = match &self.cache.showing_qname {
-            Some(qname) => self
-                .cache
-                .proc_bodies
-                .get(qname)
-                .map(Vec::as_slice)
-                .unwrap_or(&self.cache.user_script),
-            None => &self.cache.user_script,
-        };
+        let lines = self.current_source_lines();
+        let mut matches = Vec::new();
         for (idx, line) in lines.iter().enumerate() {
             if line.raw.to_lowercase().contains(&q) {
-                self.search_match_lines.push(idx);
+                matches.push(idx);
             }
         }
+        self.search_match_lines = matches;
         // Pick the first match at-or-after the cursor; otherwise wrap.
         let cursor = self.ui.source_cursor;
         self.search_cursor = self
@@ -1898,16 +2594,16 @@ impl DebugApp {
     }
 
     fn complete_dbg_command(&mut self) {
-        const COMMANDS: &[&str] = &[
-            "events", "state", "stack", "vars", "get", "set", "eval", "procs", "ploc", "pbody",
-            "cont", "continue", "step", "over", "out", "pause", "coverage", "goto", "quit",
-        ];
         let Some(prompt) = self.prompt.as_mut() else {
             return;
         };
         let buf = prompt.input.buffer.clone();
         let typed = buf.split_whitespace().next().unwrap_or("");
-        let matches: Vec<&&str> = COMMANDS.iter().filter(|c| c.starts_with(typed)).collect();
+        let matches: Vec<&str> = DBG_COMMAND_NAMES
+            .iter()
+            .copied()
+            .filter(|name| name.starts_with(typed))
+            .collect();
         match matches.len() {
             0 => {}
             1 => {
@@ -1918,8 +2614,7 @@ impl DebugApp {
                 }
             }
             _ => {
-                let names: Vec<&str> = matches.iter().map(|c| **c).collect();
-                self.set_status(format!("matches: {}", names.join(" ")));
+                self.set_status(format!("matches: {}", matches.join(" ")));
             }
         }
     }
@@ -2106,7 +2801,7 @@ impl DebugApp {
                     watch.changed = false;
                 }
                 self.set_status(label);
-                self.push_event(EventLine::info(label));
+                self.push_event(EventLine::trace(label));
                 let processed_events = self.tick();
                 // A pause event refreshes the complete snapshot in `tick`.
                 // Refreshing again here erases one-frame change markers for
@@ -2133,6 +2828,7 @@ impl DebugApp {
             .collect();
         self.clear_execution_state();
         self.cache.proc_bodies.clear();
+        self.cache.proc_placements.clear();
         let result = self.backend.as_mut().unwrap().restart_target(true);
         match result {
             Ok(()) => {
@@ -2148,7 +2844,7 @@ impl DebugApp {
                         }
                     }
                 }
-                self.push_event(EventLine::info("restart"));
+                self.push_event(EventLine::pause("↻ restarted"));
                 self.tick();
                 self.refresh_state();
             }
@@ -2442,11 +3138,8 @@ impl DebugApp {
                     match backend.remove_breakpoint(&DebugBreakpointId(breakpoint.id.clone())) {
                         Ok(_) => (
                             format!(
-                                "removed {} @ line {line_no}, {} (bytes {}..{})",
-                                breakpoint.id,
-                                command.label,
-                                command.offset,
-                                command.offset + command.len
+                                "Breakpoint {} removed from line {line_no}, {}",
+                                breakpoint.id, command.label
                             ),
                             false,
                         ),
@@ -2471,12 +3164,15 @@ impl DebugApp {
                         condition: None,
                     });
                     match result {
-                        Ok(_breakpoint) => (
+                        Ok(breakpoint) => (
                             format!(
-                                "breakpoint @ line {line_no}, {} (bytes {}..{})",
+                                "Breakpoint {} set at line {line_no}, {}{}",
+                                breakpoint.id.0,
                                 command.label,
-                                command.offset,
-                                command.offset + command.len
+                                target_qname
+                                    .as_deref()
+                                    .map(|qname| format!(" in {qname}"))
+                                    .unwrap_or_default()
                             ),
                             false,
                         ),
@@ -2524,9 +3220,12 @@ impl DebugApp {
                     match backend.remove_breakpoint(&DebugBreakpointId(breakpoint.id.clone())) {
                         Ok(_) => (
                             format!(
-                                "removed {} @ {}:{line_no}",
+                                "Breakpoint {} removed from {}:{line_no}",
                                 breakpoint.id,
-                                self.display_path.display()
+                                target_file
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                                    .unwrap_or_default()
                             ),
                             false,
                         ),
@@ -2540,9 +3239,12 @@ impl DebugApp {
                 }) {
                     Ok(breakpoint) => (
                         format!(
-                            "breakpoint {} @ {}:{line_no}",
+                            "Breakpoint {} set at {}:{line_no}",
                             breakpoint.id.0,
-                            target_file.display(),
+                            target_file
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
                         ),
                         false,
                     ),
@@ -2574,9 +3276,9 @@ impl DebugApp {
             .set_breakpoint_enabled(&DebugBreakpointId(bp.id.clone()), target);
         match result {
             Ok(_) => self.set_status(format!(
-                "{} {} ",
-                if target { "enabled" } else { "disabled" },
-                bp.id
+                "Breakpoint {} {}",
+                bp.id,
+                if target { "enabled" } else { "disabled" }
             )),
             Err(e) => {
                 let message = format!("toggle failed: {e}");
@@ -2597,7 +3299,7 @@ impl DebugApp {
         let (status, failed) = {
             let backend = self.backend.as_mut().unwrap();
             match backend.remove_breakpoint(&DebugBreakpointId(bp.id.clone())) {
-                Ok(_) => (format!("removed {}", bp.id), false),
+                Ok(_) => (format!("Breakpoint {} deleted", bp.id), false),
                 Err(e) => (format!("delete failed: {e}"), true),
             }
         };
@@ -2626,11 +3328,11 @@ impl DebugApp {
         let backend_managed = self.backend.as_mut().unwrap().watch_entries().is_ok();
         let status = if backend_managed {
             match self.backend.as_mut().unwrap().remove_watch(&w.id) {
-                Ok(_) => format!("watch {} removed", w.id),
+                Ok(_) => format!("Watch {} removed", w.name),
                 Err(e) => format!("watch remove failed: {e}"),
             }
         } else {
-            format!("watch {} removed", w.id)
+            format!("Watch {} removed", w.name)
         };
         self.set_status(status);
         if backend_managed {
@@ -2918,10 +3620,6 @@ fn handle_prompt_submit(app: &mut DebugApp, prompt: ActivePrompt, value: String)
         });
         return;
     }
-    if matches!(kind, PromptKind::StatusInspect) {
-        // Read-only — submission is a no-op.
-        return;
-    }
     if matches!(kind, PromptKind::SearchSource) {
         // Submitting confirms the current match; cancelling clears.
         app.update_source_search(trimmed);
@@ -2959,7 +3657,7 @@ fn handle_prompt_submit(app: &mut DebugApp, prompt: ActivePrompt, value: String)
         PromptKind::SetIgnore => set_ignore(app, prompt.bp_target, trimmed),
         PromptKind::ProcPicker => proc_picker_select(app, trimmed),
         PromptKind::PreInstrument => pre_instrument(app, prompt.body_buffer, trimmed),
-        PromptKind::EventFilter | PromptKind::StatusInspect | PromptKind::SearchSource => {
+        PromptKind::EventFilter | PromptKind::SearchSource => {
             unreachable!()
         }
     }
@@ -2984,6 +3682,25 @@ fn execute_dbg_command(app: &mut DebugApp, line: &str) {
     let rest: Vec<String> = tokens.map(str::to_string).collect();
     if sub == "quit" {
         app.quitting = true;
+        return;
+    }
+    if sub == "help" {
+        let width = DBG_COMMANDS
+            .iter()
+            .map(|(name, _)| name.len())
+            .max()
+            .unwrap_or(0);
+        let mut body = String::from(
+            "Type these after `:`. Tab completes a command name; ↑/↓ recall earlier ones.\n\n",
+        );
+        for (name, description) in DBG_COMMANDS {
+            body.push_str(&format!("{name:<width$}  {description}\n"));
+        }
+        app.ui.popup = Some(ValuePopup {
+            title: "Debugger commands".to_string(),
+            body,
+            scroll: 0,
+        });
         return;
     }
     // Pure-client commands — no nub round-trip required.
@@ -3227,6 +3944,13 @@ fn add_watch_from_prompt(app: &mut DebugApp, raw: &str) {
         Some((n, e)) => (n.trim().to_string(), e.trim().to_string()),
         None => (raw.to_string(), raw.to_string()),
     };
+    // Watches are `expr` expressions, where a bare word is a syntax error.
+    // Someone typing a variable name means that variable.
+    let expr = if is_variable_reference(&expr) {
+        format!("${expr}")
+    } else {
+        expr
+    };
     if !app.require_capability(BackendOperation::Watches, "add watch") {
         return;
     }
@@ -3234,13 +3958,12 @@ fn add_watch_from_prompt(app: &mut DebugApp, raw: &str) {
     if backend_managed {
         match app.backend.as_mut().unwrap().add_watch(&name, &expr) {
             Ok(()) => {
-                app.watches = app
-                    .backend
-                    .as_mut()
-                    .unwrap()
-                    .watch_entries()
-                    .unwrap_or_default();
-                app.set_status(format!("watch added: {name} = {expr}"));
+                app.reload_watches();
+                app.set_status(if name == expr {
+                    format!("Watching {name}")
+                } else {
+                    format!("Watching {name} = {expr}")
+                });
             }
             Err(error) => app.set_status(format!("watch add failed: {error}")),
         }
@@ -3255,7 +3978,11 @@ fn add_watch_from_prompt(app: &mut DebugApp, raw: &str) {
             changed: false,
         });
         app.evaluate_frontend_watches();
-        app.set_status(format!("watch added: {name} = {expr}"));
+        app.set_status(if name == expr {
+            format!("Watching {name}")
+        } else {
+            format!("Watching {name} = {expr}")
+        });
     }
 }
 
@@ -3282,21 +4009,39 @@ fn eval_in_current_frame(app: &mut DebugApp, script: &str) {
     }
     let level = app.inspected_frame;
     let result = app.backend.as_mut().unwrap().evaluate(level, script);
+    app.push_event_text(EventSeverity::Info, &format!("» {script}"));
     match result {
         Ok(result) => {
-            app.set_status(format!(
-                "eval(level={level}) code={} → {}",
-                result.completion_code,
-                trim_status(&result.result)
+            let failed = result.completion_code != 0;
+            app.set_status(if failed {
+                format!(
+                    "eval returned code {}: {}",
+                    result.completion_code,
+                    trim_status(&result.result)
+                )
+            } else {
+                format!("= {}", trim_status(&result.result))
+            });
+            let mut lines = result.result.lines();
+            let first = lines.next().unwrap_or("");
+            app.push_event(EventLine::new(
+                if failed {
+                    EventSeverity::Error
+                } else {
+                    EventSeverity::Output
+                },
+                format!("← {first}"),
             ));
-            app.push_event_text(
-                tcld_tui::debug::EventSeverity::Info,
-                &format!("eval@{level} {script} = {}", result.result),
-            );
+            for line in lines {
+                app.push_event(EventLine::new(EventSeverity::Output, format!("  {line}")));
+            }
             app.update_locals();
-            app.evaluate_frontend_watches();
+            app.reload_watches();
         }
-        Err(e) => app.set_status(format!("eval failed: {e}")),
+        Err(e) => {
+            app.push_event(EventLine::error(format!("✗ {e}")));
+            app.set_status(format!("eval failed: {e}"));
+        }
     }
 }
 
@@ -3513,6 +4258,7 @@ fn backend_stack_to_tui(frame: super::contract::DebugStackFrame) -> StackFrame {
             .map(|location| location.offset_end)
             .or_else(|| code.map(|location| location.pc.saturating_add(1)))
             .or_else(|| frame.location.observed_pc.map(|pc| pc.saturating_add(1))),
+        location_label: None,
     }
 }
 
@@ -3599,7 +4345,146 @@ fn backend_breakpoint_to_tui(breakpoint: DebugBreakpoint) -> ProcBreakpoint {
         ignore_count: breakpoint.ignore_count,
         condition,
         kind: tcld_tui::debug::BreakpointKindLabel::Line,
+        location_label: None,
     }
+}
+
+/// Command words the `:` prompt completes.
+const DBG_COMMAND_NAMES: &[&str] = &[
+    "help", "goto", "events", "state", "stack", "vars", "get", "set", "eval", "procs", "ploc",
+    "pbody", "cont", "continue", "step", "over", "out", "pause", "coverage", "quit",
+];
+
+/// Commands accepted at the `:` prompt, with their arguments and what they do.
+const DBG_COMMANDS: &[(&str, &str)] = &[
+    ("help", "list these commands"),
+    (
+        "goto <line>",
+        "move the source cursor to a line (or just type the number)",
+    ),
+    ("events", "print the full console history"),
+    ("state", "show the debugger's state"),
+    ("stack", "dump the raw stack frames"),
+    ("vars [level]", "dump the variables of a frame"),
+    ("get <name> [level]", "print one variable"),
+    ("set <name> <value> [level]", "change a variable"),
+    ("eval <script>", "evaluate Tcl at the global level"),
+    ("procs", "list the procs the runtime knows"),
+    ("ploc <proc>", "show where a proc starts"),
+    ("pbody <proc>", "print a proc's body"),
+    ("cont | continue", "continue running"),
+    ("step | over | out", "step into, over, or out"),
+    ("pause", "pause a running program"),
+    ("coverage", "dump command coverage"),
+    ("quit", "quit immediately"),
+];
+
+/// Tcl's own global variables. They are real, but listed after the
+/// program's variables so they do not bury them.
+fn is_tcl_builtin_global(name: &str) -> bool {
+    matches!(
+        name,
+        "argc"
+            | "argv"
+            | "argv0"
+            | "auto_index"
+            | "auto_path"
+            | "env"
+            | "errorCode"
+            | "errorInfo"
+            | "tcl_interactive"
+            | "tcl_library"
+            | "tcl_libPath"
+            | "tcl_nonwordchars"
+            | "tcl_patchLevel"
+            | "tcl_pkgPath"
+            | "tcl_platform"
+            | "tcl_precision"
+            | "tcl_rcFileName"
+            | "tcl_traceCompile"
+            | "tcl_traceExec"
+            | "tcl_version"
+            | "tcl_wordchars"
+            | "tclDefaultLibrary"
+    )
+}
+
+/// Whether two paths name the same file, allowing for symlinked directories
+/// such as macOS's `/var` → `/private/var`, which the runtime resolves.
+fn same_file(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left == right
+        || matches!(
+            (std::fs::canonicalize(left), std::fs::canonicalize(right)),
+            (Ok(left), Ok(right)) if left == right
+        )
+}
+
+/// Whether `text` names a variable (`total`, `::ns::count`, `cfg(port)`)
+/// rather than being an expression.
+fn is_variable_reference(text: &str) -> bool {
+    let (name, index) = match text.split_once('(') {
+        Some((name, rest)) => match rest.strip_suffix(')') {
+            Some(index) if !index.contains(['(', ')']) => (name, Some(index)),
+            _ => return false,
+        },
+        None => (text, None),
+    };
+    let leading = name.trim_start_matches("::");
+    !leading.is_empty()
+        && !leading.starts_with(|c: char| c.is_ascii_digit())
+        && leading
+            .split("::")
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        && index.is_none_or(|index| !index.contains(['[', ']', '$', ' ']))
+}
+
+fn join_source_lines(lines: &[SourceLine]) -> String {
+    lines
+        .iter()
+        .map(|line| line.raw.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 1-based line holding byte `offset` of `text`.
+fn line_for_offset(text: &str, offset: u64) -> Option<u32> {
+    let offset = usize::try_from(offset).ok()?;
+    if offset > text.len() {
+        return None;
+    }
+    let newlines = text.as_bytes()[..offset]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count();
+    u32::try_from(newlines + 1).ok()
+}
+
+/// Where `qname`'s body sits in `script`: body line N is script line
+/// N + offset. `None` unless the script defines `qname` exactly once with
+/// exactly `body`, so a redefined or generated proc is never shown against
+/// text it does not run.
+fn proc_body_line_offset(script: &str, qname: &str, body: &str) -> Option<u32> {
+    let mut source = script.to_string();
+    if !source.is_empty() {
+        source.push('\n');
+    }
+    let wanted = qname.trim_start_matches("::");
+    let body = body.trim_end_matches('\n');
+    let mut spans = tcld_syntax::proc_body_spans(&source)
+        .ok()?
+        .into_iter()
+        .filter(|span| {
+            span.qname.trim_start_matches("::") == wanted
+                && source
+                    .get(span.start_byte..span.end_byte)
+                    .is_some_and(|text| text.trim_end_matches('\n') == body)
+        });
+    let span = spans.next()?;
+    if spans.next().is_some() {
+        return None;
+    }
+    let header_line = source[..span.start_byte].matches('\n').count();
+    u32::try_from(header_line).ok()
 }
 
 fn parse_disassembly_pc(line: &str) -> Option<u64> {
@@ -3991,6 +4876,197 @@ mod tests {
     }
 
     #[test]
+    fn quitting_a_live_session_asks_first() {
+        let mut app = fake_app();
+        app.app_state = AppState::Stopped;
+        app.handle_key(key(KeyCode::Char('q')));
+        assert!(!app.quitting, "a paused program is not killed on one key");
+        assert!(app.ui.confirm_quit);
+        app.handle_key(key(KeyCode::Char('x')));
+        assert!(
+            !app.quitting && !app.ui.confirm_quit,
+            "any other key keeps debugging"
+        );
+        app.handle_key(key(KeyCode::Char('q')));
+        app.handle_key(key(KeyCode::Char('y')));
+        assert!(app.quitting);
+
+        let mut app = fake_app();
+        app.app_state = AppState::Running;
+        app.handle_key(key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.quitting, "Ctrl-C never asks");
+    }
+
+    #[test]
+    fn watching_a_bare_variable_name_watches_its_value() {
+        assert!(is_variable_reference("total"));
+        assert!(is_variable_reference("::ns::count"));
+        assert!(is_variable_reference("cfg(port)"));
+        assert!(!is_variable_reference("40+2"));
+        assert!(!is_variable_reference("[llength $items]"));
+        assert!(!is_variable_reference("$total"));
+        assert!(!is_variable_reference("9lives"));
+
+        let mut app = fake_app();
+        add_watch_from_prompt(&mut app, "total");
+        assert_eq!(app.watches[0].expr, "$total");
+        assert_eq!(app.watches[0].name, "total");
+    }
+
+    #[test]
+    fn proc_bodies_map_onto_their_defining_script() {
+        let script = "# header\nproc greet {name} {\n    set g \"hi $name\"\n    return $g\n}\n";
+        let body = "\n    set g \"hi $name\"\n    return $g\n";
+        // Body line 2 (`set g …`) is script line 3.
+        assert_eq!(proc_body_line_offset(script, "greet", body), Some(1));
+        assert_eq!(proc_body_line_offset(script, "::greet", body), Some(1));
+        assert_eq!(
+            proc_body_line_offset(script, "greet", "\n    return other\n"),
+            None,
+            "a redefined body is never shown against text it does not run"
+        );
+        assert_eq!(proc_body_line_offset(script, "missing", body), None);
+        assert_eq!(line_for_offset("a\nbb\nccc", 5), Some(3));
+    }
+
+    #[test]
+    fn procs_defined_in_sourced_files_show_inside_those_files() {
+        // The main script defines an identical body, so only the recorded
+        // defining file can pick the right one.
+        let proc_text = "proc ::child::work {} {\n    set marker child\n    return $marker\n}\n";
+        let mut app = fake_app_with_source(&format!("{proc_text}child::work\n"));
+        let child_path = PathBuf::from("/tmp/tcld-debug-sourced-child.tcl");
+        let child_block = format!("file:{}", child_path.display());
+        let child_text = format!("namespace eval ::child {{}}\n{proc_text}");
+        let lines = |text: &str| {
+            let raw: Vec<String> = text.lines().map(str::to_string).collect();
+            highlight_lines(&raw, &app.theme)
+        };
+        let registration = |identity, block_id: &str, qname: Option<&str>, path| {
+            super::super::contract::RegisteredSource {
+                identity,
+                block_id: block_id.to_string(),
+                generation: 0,
+                path,
+                qualified_proc: qname.map(str::to_string),
+                definition_path: Some(child_path.clone()),
+                restart_limitation: None,
+            }
+        };
+        let child_unit = CachedSourceUnit {
+            registration: registration(
+                DebugSourceUnitIdentity::File(child_path.clone()),
+                &child_block,
+                None,
+                Some(child_path.clone()),
+            ),
+            lines: lines(&child_text),
+        };
+        let body = lines("\n    set marker child\n    return $marker\n");
+        let proc_unit = CachedSourceUnit {
+            registration: registration(
+                DebugSourceUnitIdentity::Procedure("child::work".into()),
+                "proc:child::work",
+                Some("child::work"),
+                None,
+            ),
+            lines: body.clone(),
+        };
+        app.cache
+            .source_units
+            .insert(child_block.clone(), child_unit);
+        app.cache
+            .source_units
+            .insert("proc:child::work".into(), proc_unit);
+        app.cache.proc_bodies.insert("child::work".into(), body);
+        app.focused_proc = Some(FocusedProc {
+            block_id: "proc:child::work".into(),
+            block_kind: tcld_tui::debug::SourceBlockKind::Proc,
+            source_path: None,
+            qname: "child::work".into(),
+            line: 2,
+            offset_start: 5,
+            offset_end: 21,
+            pause_reason: tcld_tui::debug::PauseReasonLabel::Step,
+            frame_count: 1,
+            breakpoint: None,
+            pause_kind: tcld_tui::debug::PauseKind::Normal,
+            error_message: None,
+        });
+
+        app.update_source_view();
+        // Body line 2 is line 3 of the child file, which starts one line later.
+        assert_eq!(
+            app.cache.showing_block_id.as_deref(),
+            Some(child_block.as_str())
+        );
+        assert_eq!(app.cache.origin, SourceOrigin::SourcedFile);
+        assert_eq!(app.displayed_pause_line(), Some(3));
+        assert_eq!(app.ui.source_cursor, 2);
+        assert_eq!(
+            app.source_label(),
+            "tcld-debug-sourced-child.tcl · in child::work"
+        );
+        assert_eq!(
+            app.location_label().as_deref(),
+            Some("child::work · tcld-debug-sourced-child.tcl:3")
+        );
+
+        // Without a recorded definition, the first file defining the body wins.
+        if let Some(unit) = app.cache.source_units.get_mut("proc:child::work") {
+            unit.registration.definition_path = None;
+        }
+        app.cache.proc_placements.clear();
+        app.update_source_view();
+        assert_eq!(app.cache.origin, SourceOrigin::UserScript);
+        assert_eq!(app.displayed_pause_line(), Some(2));
+    }
+
+    #[test]
+    fn the_paused_command_is_marked_on_its_line() {
+        let mut app = fake_app_with_source(
+            "proc ::calc::double {x} {\n    set y [expr {$x * 2}]\n    return $y\n}\ncalc::double 21\n",
+        );
+        let raw: Vec<String> = "\n    set y [expr {$x * 2}]\n    return $y\n"
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let body = highlight_lines(&raw, &app.theme);
+        app.cache.proc_bodies.insert("calc::double".into(), body);
+        let pause_at = |app: &mut DebugApp, offset_start| {
+            app.focused_proc = Some(FocusedProc {
+                block_id: "proc:calc::double".into(),
+                block_kind: tcld_tui::debug::SourceBlockKind::Proc,
+                source_path: None,
+                qname: "calc::double".into(),
+                line: 2,
+                offset_start,
+                offset_end: offset_start + 4,
+                pause_reason: tcld_tui::debug::PauseReasonLabel::Step,
+                frame_count: 1,
+                breakpoint: None,
+                pause_kind: tcld_tui::debug::PauseKind::Normal,
+                error_message: None,
+            });
+            app.update_source_view();
+        };
+
+        // Tcl runs the nested `expr` (body byte 12) before the `set` around it.
+        pause_at(&mut app, 12);
+        assert_eq!(app.ui.source_cursor, 1);
+        assert_eq!(app.ui.source_command_cursor, 1);
+        pause_at(&mut app, 5);
+        assert_eq!(app.ui.source_command_cursor, 0);
+    }
+
+    #[test]
+    fn locals_list_program_variables_before_tcl_globals() {
+        assert!(is_tcl_builtin_global("tcl_version"));
+        assert!(is_tcl_builtin_global("env"));
+        assert!(!is_tcl_builtin_global("results"));
+    }
+
+    #[test]
     fn quit_keys_set_quitting() {
         let mut app = fake_app();
         app.handle_key(key(KeyCode::Char('q')));
@@ -4052,9 +5128,10 @@ mod tests {
     fn b_in_target_source_uses_source_location() {
         let mut app = fake_app();
         app.handle_key(key(KeyCode::Char('b')));
+        let status = app.status.to_lowercase();
         assert!(
-            app.status.contains("breakpoint")
-                && (app.status.contains("line 1") || app.status.contains(".tcl:1")),
+            status.contains("breakpoint")
+                && (status.contains("line 1") || status.contains(".tcl:1")),
             "the canonical app should route b to a source breakpoint: {}",
             app.status
         );
@@ -4294,13 +5371,14 @@ mod tests {
     }
 
     fn fake_app_with_source(text: &str) -> DebugApp {
+        // Parallel tests must never share a script: a clock can tick
+        // coarser than the nanoseconds it reports.
+        static NEXT_SCRIPT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let theme = Theme::with_palette(true, "obsidian").unwrap();
         let user_script = std::env::temp_dir().join(format!(
-            "tcld-debug-test-{}.tcl",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "tcld-debug-test-{}-{}.tcl",
+            std::process::id(),
+            NEXT_SCRIPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::write(&user_script, text).unwrap();
         test_app(PreparedDebugTarget::user_script(user_script), theme)
@@ -4432,10 +5510,12 @@ mod tests {
         let mut app = fake_app_with_source("puts hi\n");
         app.app_state = AppState::Stopped;
         // Seed previous-locals snapshot manually.
-        app.locals_prev
-            .insert(0, vec![("x".into(), "1".into()), ("y".into(), "2".into())]);
+        app.locals_prev.insert(
+            (0, None),
+            vec![("x".into(), "1".into()), ("y".into(), "2".into())],
+        );
         // Build LocalRow input as if update_locals had run on (x=1, y=42).
-        let prev = app.locals_prev.get(&0).cloned().unwrap();
+        let prev = app.locals_prev.get(&(0, None)).cloned().unwrap();
         let prev_map: HashMap<&str, &str> =
             prev.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         let fresh = [
@@ -4451,6 +5531,7 @@ mod tests {
                     .get(name.as_str())
                     .map(|p| *p != value)
                     .unwrap_or(true),
+                builtin: false,
             })
             .collect();
         assert!(!rows[0].changed, "x stayed 1 — should not be flagged");
@@ -4677,17 +5758,17 @@ mod tests {
                 .expect("canonical debugger app");
         app.start_debug_target();
         let text = rendered_text(&mut app, 120, 32);
+        // Raw bytecode has no verified source, so its listing is synthetic.
         assert!(
-            text.contains("source-image.tcl [compiled source]"),
-            "compiled-source identity is explicit:\n{text}"
+            text.contains("tc1.tbc [synthetic]"),
+            "raw bytecode identity is explicit:\n{text}"
         );
         assert!(
-            text.contains("Source · compiled source"),
-            "compiled source pane label:\n{text}"
+            text.contains("Source · tc1.tbc · synthetic"),
+            "synthetic listing pane label:\n{text}"
         );
         assert!(
-            app.backend_label.contains("compiled Tcl source")
-                && app.backend_label.contains("VmStrict"),
+            app.backend_label.contains("VmStrict"),
             "backend mode is named: {}",
             app.backend_label
         );

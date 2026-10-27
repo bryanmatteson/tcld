@@ -27,7 +27,7 @@ fn explore_tui_handles_core_interactions_under_real_pty() {
         if text.contains("screen 1/1") {
             return Err("TurtleTap Shell chrome leaked into the product viewport".to_string());
         }
-        require(text, "Canvas - Instructions")?;
+        require(text, "Instructions · ")?;
         require(text, "Instructions  #1/")
     });
 
@@ -63,33 +63,33 @@ fn explore_tui_handles_core_interactions_under_real_pty() {
 
     pty.send(b"i");
     pty.capture("instructions_view", Duration::from_secs(2), |text| {
-        require(text, "Canvas - Instructions")?;
+        require(text, "Instructions · ")?;
         assert_token_in_canvas(text, "push1")
     });
 
     pty.send(b"l");
     pty.capture("literals_view", Duration::from_secs(2), |text| {
-        require(text, "Canvas - Literals")?;
+        require(text, "Literals · ")?;
         assert_token_in_canvas(text, "XString package")
     });
 
     pty.send(b"e");
     pty.capture("exceptions_view", Duration::from_secs(2), |text| {
-        require(text, "Canvas - Exceptions")?;
+        require(text, "Exceptions · ")?;
         assert_token_in_canvas(text, "No entries in Exceptions")
     });
 
     pty.send(b"d");
     pty.capture("decompile_view", Duration::from_secs(2), |text| {
         assert_browse(text)?;
-        require(text, "Canvas - Decompile")?;
+        require(text, "┏ Decompile ")?;
         assert_token_in_canvas(text, "package provide tcld_fixture")
     });
 
     pty.send(b"c");
     pty.capture("source_view", Duration::from_secs(2), |text| {
         assert_browse(text)?;
-        require(text, "Canvas - Source")?;
+        require(text, "┏ Source ")?;
         assert_token_in_canvas(text, "package provide tcld_fixture")
     });
 
@@ -120,7 +120,8 @@ fn explore_tui_handles_core_interactions_under_real_pty() {
         assert_static_only(text)?;
         require(text, "Quick Reference")?;
         require(text, "Modes")?;
-        require(text, "Movement")?;
+        require(text, "Moving around")?;
+        require(text, "Following links")?;
         require(text, "Views")?;
         require(text, "C       Compare")
     });
@@ -165,7 +166,7 @@ fn explore_large_repetitive_source_search_is_bounded_under_real_pty() {
     });
     pty.send(b"c");
     pty.capture("large_source_view", Duration::from_secs(2), |text| {
-        require(text, "Canvas - Source")
+        require(text, "┏ Source ")
     });
     pty.send(b":search repeated\r");
     pty.capture(
@@ -439,9 +440,9 @@ fn assert_browse(text: &str) -> CheckResult {
     assert_static_only(text)?;
     require(text, "tcld explore")?;
     require(text, "[b] Browse")?;
-    assert_after(text, "Workspace", "[b] Browse")?;
-    assert_same_row_order(text, "Workspace", "Canvas", "Inspector")?;
-    require(text, ": Command").or_else(|_| require(text, ": Cmd"))?;
+    assert_after(text, " Views ", "[b] Browse")?;
+    assert_same_row_order(text, " Views ", "━", "Inspector")?;
+    require(text, "? help")?;
     assert_no_old_grid(text)
 }
 
@@ -499,12 +500,16 @@ fn assert_same_row_order(text: &str, left: &str, middle: &str, right: &str) -> C
 }
 
 fn assert_token_in_canvas(text: &str, token: &str) -> CheckResult {
+    // The canvas begins where the Views rail's box closes.
     let canvas_line = text
         .lines()
-        .find(|line| line.contains("Canvas -"))
-        .ok_or_else(|| format!("missing canvas title\n{text}"))?;
-    let canvas_byte = canvas_line.find("Canvas -").expect("canvas title found");
-    let canvas_col = canvas_line[..canvas_byte].chars().count().saturating_sub(2);
+        .find(|line| line.contains(" Views "))
+        .ok_or_else(|| format!("missing views rail\n{text}"))?;
+    let canvas_col = canvas_line
+        .chars()
+        .position(|character| character == '┐')
+        .ok_or_else(|| format!("missing rail border\n{text}"))?
+        + 1;
     let inspector_line = text
         .lines()
         .find(|line| line.contains("Inspector"))

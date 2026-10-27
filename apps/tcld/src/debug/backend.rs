@@ -431,6 +431,7 @@ pub struct HybridInProcessBackend {
     next_breakpoint_id: u64,
     image: Option<std::rc::Rc<tcld_compile::DebugImage>>,
     image_bindings: BTreeMap<tcld_vm::load::CodeId, String>,
+    registered_source_codes: std::collections::BTreeSet<tcld_vm::load::CodeId>,
     captured_stdout_len: usize,
     captured_stderr_len: usize,
     runtime_error_paused: bool,
@@ -444,11 +445,11 @@ impl HybridInProcessBackend {
         engine
             .bootstrap(std::env::args().next().as_deref())
             .map_err(|e| BackendError::Message(e.to_string()))?;
-        if mode == tcld_vm::RuntimeMode::Hybrid {
-            engine
-                .begin_output_capture()
-                .map_err(|e| BackendError::Message(e.to_string()))?;
-        }
+        // The program's stdout and stderr become output events: the host's in
+        // hybrid mode, the VM's own in vm-strict.
+        engine
+            .begin_output_capture()
+            .map_err(|e| BackendError::Message(e.to_string()))?;
         Ok(Self {
             mode,
             engine,
@@ -467,6 +468,7 @@ impl HybridInProcessBackend {
             next_breakpoint_id: 1,
             image: None,
             image_bindings: BTreeMap::new(),
+            registered_source_codes: Default::default(),
             captured_stdout_len: 0,
             captured_stderr_len: 0,
             runtime_error_paused: false,
@@ -492,20 +494,25 @@ impl HybridInProcessBackend {
         Ok(backend)
     }
 
-    fn image_unit_for_code(
+    fn image_source_for_code(
         &self,
         code_id: tcld_vm::load::CodeId,
-    ) -> Option<&tcld_compile::DebugCodeUnit> {
-        let logical = self.image_bindings.get(&code_id)?;
-        self.image.as_ref()?.unit(logical)
+    ) -> Option<tcld_vm::DebugSource> {
+        self.engine
+            .debug_sources()
+            .into_iter()
+            .find(|s| s.code_id == code_id)
     }
-
-    fn image_block_id(&self, unit: &tcld_compile::DebugCodeUnit) -> Option<String> {
-        Some(format!(
-            "image:{}:{}",
-            self.image.as_ref()?.image_digest,
-            unit.logical_id
-        ))
+    fn image_block_id(source: &tcld_vm::DebugSource) -> String {
+        let unit = &source.image.units[source.unit_index];
+        if source.origin.is_none() {
+            format!("image:{}:{}", source.image.image_digest, unit.logical_id)
+        } else {
+            format!(
+                "image:{}:{}:{}",
+                source.image.image_digest, source.code_id.0, unit.logical_id
+            )
+        }
     }
 
     fn mapped_source_location(
@@ -522,8 +529,9 @@ impl HybridInProcessBackend {
     ) -> Option<(tcld_debug_wire::SourceLocation, u32)> {
         use tcld_compile::DebugCodeUnitKind;
         use tcld_debug_wire::SourceBlockKind;
-        let image = self.image.as_ref()?;
-        let unit = self.image_unit_for_code(address.code_id)?;
+        let source = self.image_source_for_code(address.code_id)?;
+        let image = &source.image;
+        let unit = &image.units[source.unit_index];
         let map = unit
             .commands
             .iter()
@@ -537,7 +545,7 @@ impl HybridInProcessBackend {
         };
         Some((
             tcld_debug_wire::SourceLocation {
-                block_id: self.image_block_id(unit)?,
+                block_id: Self::image_block_id(&source),
                 block_kind,
                 source_path: Some(image.source.path.display().to_string()),
                 qualified_proc,
@@ -549,7 +557,29 @@ impl HybridInProcessBackend {
         ))
     }
 
+    /// Every mapped command whose instructions contain `address`: the
+    /// innermost one executing there and each command enclosing it.
+    fn enclosing_source_commands(&self, address: tcld_vm::CodeAddress) -> Vec<(String, u64, u64)> {
+        let Some(source) = self.image_source_for_code(address.code_id) else {
+            return Vec::new();
+        };
+        let block_id = Self::image_block_id(&source);
+        source.image.units[source.unit_index]
+            .commands
+            .iter()
+            .filter(|map| map.pc_range.contains(&address.pc))
+            .map(|map| {
+                (
+                    block_id.clone(),
+                    map.source_span.start as u64,
+                    map.source_span.end as u64,
+                )
+            })
+            .collect()
+    }
+
     fn push_runtime_error(&mut self, error: impl ToString) {
+        self.register_image_events();
         self.push_captured_output();
         self.runtime_error_paused = true;
         let address = self
@@ -589,13 +619,14 @@ impl HybridInProcessBackend {
 
     fn register_image_events(&mut self) {
         use tcld_compile::DebugCodeUnitKind;
-        let Some(image) = self.image.clone() else {
-            return;
-        };
-        for (runtime_id, logical_id) in self.image_bindings.clone() {
-            let Some(unit) = image.unit(&logical_id) else {
+        for source in self.engine.debug_sources() {
+            let runtime_id = source.code_id;
+            if !self.registered_source_codes.insert(runtime_id) {
                 continue;
-            };
+            }
+            let image = &source.image;
+            let unit = &image.units[source.unit_index];
+            let logical_id = unit.logical_id.clone();
             let (identity, qname) = match &unit.kind {
                 DebugCodeUnitKind::TopLevel => (
                     DebugSourceUnitIdentity::File(image.source.path.clone()),
@@ -606,7 +637,7 @@ impl HybridInProcessBackend {
                     Some(qname.clone()),
                 ),
             };
-            let block_id = self.image_block_id(unit).expect("image block id");
+            let block_id = Self::image_block_id(&source);
             self.events
                 .push(DebugEvent::SourceRegistered(RegisteredSource {
                     identity,
@@ -615,7 +646,9 @@ impl HybridInProcessBackend {
                     path: Some(image.source.path.clone()),
                     qualified_proc: qname.clone(),
                     definition_path: Some(image.source.path.clone()),
-                    restart_limitation: None,
+                    restart_limitation: source
+                        .origin
+                        .map(|_| "Generated source belongs to this execution session".into()),
                 }));
             self.events.push(DebugEvent::CodeRegistered(RegisteredCode {
                 id: DebugCodeId(runtime_id.0),
@@ -626,19 +659,15 @@ impl HybridInProcessBackend {
     }
 
     fn source_step(&mut self, over: bool) -> Result<tcld_vm::DebugOutcome, BackendError> {
+        // A calling frame is still inside its call and every command around
+        // it, so a step that returns there resumes work already under way.
         let mut initially_active = self
             .engine
             .ui_stack_frames()
             .into_iter()
+            .skip(1)
             .filter_map(|frame| frame.address)
-            .filter_map(|address| self.mapped_source_command(address))
-            .map(|(location, _)| {
-                (
-                    location.block_id,
-                    location.offset_start,
-                    location.offset_end,
-                )
-            })
+            .flat_map(|address| self.enclosing_source_commands(address))
             .collect::<std::collections::BTreeSet<_>>();
         let initial = self
             .engine
@@ -699,9 +728,6 @@ impl HybridInProcessBackend {
         &self,
         spec: &DebugBreakpointSpec,
     ) -> Result<Vec<(tcld_vm::CodeAddress, tcld_debug_wire::SourceLocation)>, BackendError> {
-        let Some(image) = self.image.as_ref() else {
-            return Ok(Vec::new());
-        };
         let requested_path = match spec {
             DebugBreakpointSpec::SourceLine { path, .. } => {
                 Some(std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
@@ -711,18 +737,17 @@ impl HybridInProcessBackend {
                 .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone())),
             DebugBreakpointSpec::Instruction { .. } => None,
         };
-        if requested_path
-            .as_ref()
-            .is_some_and(|path| path != &image.source.path)
-        {
-            return Ok(Vec::new());
-        }
         let mut resolved = Vec::new();
-        for (code_id, logical_id) in &self.image_bindings {
-            let Some(unit) = image.unit(logical_id) else {
+        for source in self.engine.debug_sources() {
+            if requested_path
+                .as_ref()
+                .is_some_and(|path| path != &source.image.source.path)
+            {
                 continue;
-            };
-            let block_id = self.image_block_id(unit).expect("image block");
+            }
+            let code_id = source.code_id;
+            let unit = &source.image.units[source.unit_index];
+            let block_id = Self::image_block_id(&source);
             for map in &unit.commands {
                 let matches = match spec {
                     DebugBreakpointSpec::SourceLine { line, .. } => {
@@ -741,7 +766,7 @@ impl HybridInProcessBackend {
                 };
                 if matches {
                     let address = tcld_vm::CodeAddress {
-                        code_id: *code_id,
+                        code_id,
                         pc: map.anchor_pc,
                     };
                     if let Some(source) = self.mapped_source_location(address) {
@@ -944,9 +969,7 @@ impl HybridInProcessBackend {
     }
 
     fn push_captured_output(&mut self) {
-        if self.mode == tcld_vm::RuntimeMode::Hybrid
-            && let Ok((stdout, stderr)) = self.engine.captured_output()
-        {
+        if let Ok((stdout, stderr)) = self.engine.captured_output() {
             if stdout.len() > self.captured_stdout_len {
                 self.events.push(DebugEvent::Output {
                     stream: super::contract::DebugOutputStream::Stdout,
@@ -965,6 +988,7 @@ impl HybridInProcessBackend {
     }
 
     fn push_outcome(&mut self, outcome: tcld_vm::DebugOutcome) {
+        self.register_image_events();
         self.push_captured_output();
         match outcome {
             tcld_vm::DebugOutcome::Paused(s) => {
@@ -1090,6 +1114,7 @@ impl DebugBackend for HybridInProcessBackend {
         self.current_code_id = None;
         self.current_bytecode = None;
         self.current_proc_qname = None;
+        self.registered_source_codes.clear();
         self.image_bindings.clear();
         let outcome = if let Some(image) = self.image.clone() {
             let requested = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -1502,13 +1527,13 @@ impl DebugBackend for HybridInProcessBackend {
     }
 
     fn sources(&mut self) -> Result<Vec<SourceSnapshot>, BackendError> {
-        let Some(image) = self.image.clone() else {
-            return Ok(Vec::new());
-        };
-        Ok(image
-            .units
-            .iter()
-            .map(|unit| {
+        Ok(self
+            .engine
+            .debug_sources()
+            .into_iter()
+            .map(|source| {
+                let image = &source.image;
+                let unit = &image.units[source.unit_index];
                 let (identity, qname) = match &unit.kind {
                     tcld_compile::DebugCodeUnitKind::TopLevel => (
                         DebugSourceUnitIdentity::File(image.source.path.clone()),
@@ -1522,12 +1547,14 @@ impl DebugBackend for HybridInProcessBackend {
                 SourceSnapshot {
                     source: RegisteredSource {
                         identity,
-                        block_id: self.image_block_id(unit).expect("image block"),
+                        block_id: Self::image_block_id(&source),
                         generation: 1,
                         path: Some(image.source.path.clone()),
                         qualified_proc: qname,
                         definition_path: Some(image.source.path.clone()),
-                        restart_limitation: None,
+                        restart_limitation: source
+                            .origin
+                            .map(|_| "Generated source belongs to this execution session".into()),
                     },
                     text: image.source.content.to_string(),
                 }
@@ -1562,8 +1589,8 @@ impl DebugBackend for HybridInProcessBackend {
                 id: DebugCodeId(code_id.0),
                 name: self.current_proc_qname.clone(),
                 source_block_id: self
-                    .image_unit_for_code(code_id)
-                    .and_then(|unit| self.image_block_id(unit)),
+                    .image_source_for_code(code_id)
+                    .map(|source| Self::image_block_id(&source)),
             },
             instruction_set: self.instruction_set_name().map(str::to_owned),
             lines: self.disassembly.clone(),
@@ -1587,18 +1614,20 @@ impl DebugBackend for HybridInProcessBackend {
     }
 
     fn procedures(&mut self) -> Result<Vec<DebugProcedure>, BackendError> {
-        let Some(image) = self.image.as_ref() else {
+        if self.image.is_none() {
             return Err(self.unsupported(BackendOperation::ProcedureList, "procedure list"));
-        };
+        }
         let active = self
             .engine
             .vm_proc_names()
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>();
-        Ok(image
-            .units
-            .iter()
-            .filter_map(|unit| {
+        Ok(self
+            .engine
+            .debug_sources()
+            .into_iter()
+            .filter_map(|source| {
+                let unit = &source.image.units[source.unit_index];
                 let tcld_compile::DebugCodeUnitKind::Procedure { qname, .. } = &unit.kind else {
                     return None;
                 };
@@ -1607,7 +1636,7 @@ impl DebugBackend for HybridInProcessBackend {
                 }
                 Some(DebugProcedure {
                     qualified_name: qname.clone(),
-                    block_id: self.image_block_id(unit),
+                    block_id: Some(Self::image_block_id(&source)),
                     first_offset: unit
                         .commands
                         .first()
@@ -1911,6 +1940,21 @@ impl DebugBackend for WireSessionBackend {
 
     fn drain_events(&mut self) -> Vec<DebugEvent> {
         let mut events = std::mem::take(&mut self.pending_events);
+        // Output usually precedes the pause it led up to: the program wrote
+        // it before reaching the command boundary that reported the pause.
+        events.extend(
+            self.session
+                .drain_output()
+                .into_iter()
+                .map(|output| DebugEvent::Output {
+                    stream: if output.stderr {
+                        super::contract::DebugOutputStream::Stderr
+                    } else {
+                        super::contract::DebugOutputStream::Stdout
+                    },
+                    text: output.text,
+                }),
+        );
         let translated: Vec<_> = self
             .session
             .drain_events()
@@ -2622,6 +2666,7 @@ mod contract_tests {
             ignore_count: 6,
             condition: Some("$x > 2".into()),
             kind: tcld_tui::debug::BreakpointKindLabel::Line,
+            location_label: None,
         };
         let breakpoint = wire_breakpoint_to_backend(row);
         assert_eq!(breakpoint.id, DebugBreakpointId("bp3".into()));
@@ -2675,6 +2720,7 @@ mod contract_tests {
             ignore_count: 0,
             condition: None,
             kind: tcld_tui::debug::BreakpointKindLabel::Line,
+            location_label: None,
         });
         assert!(matches!(
             breakpoint.spec,
@@ -2841,6 +2887,61 @@ mod contract_tests {
             breakpoint.resolution,
             DebugBreakpointResolution::Resolved { .. }
         )));
+    }
+
+    #[cfg(feature = "hybrid")]
+    #[test]
+    fn generated_source_backend_maps_source_steps_and_qualified_breakpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dynamic.tcl");
+        std::fs::write(&path, "set x 0; set body {incr x\nset x}; eval $body").unwrap();
+        let path = path.canonicalize().unwrap();
+        let image = std::rc::Rc::new(
+            tcld_compile::compile_path(&path, tcld_compile::CompileMode::Hybrid).unwrap(),
+        );
+        let mut backend =
+            HybridInProcessBackend::new_with_image(tcld_vm::RuntimeMode::Hybrid, image).unwrap();
+        backend.start_target(&path, true).unwrap();
+        backend.drain_events();
+        let mut generated = None;
+        for _ in 0..8 {
+            backend.step(DebugStepKind::Into).unwrap();
+            for e in backend.drain_events() {
+                if let DebugEvent::Paused(p) = e
+                    && let Some(s) = p.location.source
+                    && s.source_path
+                        .as_ref()
+                        .is_some_and(|p| p.contains(".tcld-generated"))
+                {
+                    generated = Some(s);
+                }
+            }
+            if generated.is_some() {
+                break;
+            }
+        }
+        let generated = generated.expect("source step enters generated image");
+        assert!(
+            backend
+                .sources()
+                .unwrap()
+                .iter()
+                .any(|s| s.text == "incr x\nset x")
+        );
+        let bp = backend
+            .add_breakpoint(DebugBreakpointSpec::SourceLine {
+                path: generated.source_path.unwrap().into(),
+                line: 2,
+                condition: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            bp.resolution,
+            DebugBreakpointResolution::Resolved { .. }
+        ));
+        backend.continue_execution().unwrap();
+        let events = backend.drain_events();
+        assert!(events.iter().any(|e|matches!(e,DebugEvent::Paused(p) if p.location.source.as_ref().is_some_and(|s|s.line==2)&&p.reason==DebugPauseReason::Breakpoint)));
     }
 
     #[cfg(feature = "hybrid")]

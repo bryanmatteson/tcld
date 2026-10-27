@@ -5,20 +5,38 @@
 //! the explorer's palette switching for free. The renderer fills
 //! [`HitTargets`] each frame so mouse events can be resolved without
 //! re-running layout in the driver.
+//!
+//! The source pane is the point of the screen, so it gets the width and the
+//! height; the inspector panes on the right are sized to what they hold, and
+//! the console along the bottom carries program output and debugger messages
+//! in the order they happened.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 use crate::Theme;
+use crate::chrome;
 use crate::tokens;
 
-use super::state::{DebugUiState, HitTargets, Pane, PaneHit, PromptInput};
-use super::types::{AppState, DebugSnapshot, EventSeverity, PauseKind, SourceLine, SourceOrigin};
+use super::state::{DebugUiState, HitTargets, Pane, PaneHit, PromptInput, ValuePopup};
+use super::types::{
+    AppState, DebugSnapshot, EventLine, EventSeverity, PauseKind, PauseReasonLabel, SourceLine,
+    SourceOrigin, StackFrame,
+};
 
 pub const MIN_DEBUG_WIDTH: u16 = 80;
 pub const MIN_DEBUG_HEIGHT: u16 = 24;
+
+/// Below this width the inspector panes fold into one tabbed pane under the
+/// source instead of a column beside it.
+const NARROW_WIDTH: u16 = 100;
+
+/// Cells taken by the source gutter: ` ▶●` pointer and breakpoint marker,
+/// a right-aligned line number, and a separating space.
+const SOURCE_GUTTER_CELLS: u16 = 10;
 
 /// Render one frame of the debugger TUI. Pass an active prompt iff
 /// the user is editing a command line; pass `None` for the normal
@@ -66,19 +84,16 @@ pub fn render_in(
         );
         return;
     }
-    let banner_height = if snapshot.error_banner.is_some() {
-        1
-    } else {
-        0
-    };
+    let banner_height = u16::from(snapshot.error_banner.is_some());
+    let console_height = if area.height >= 30 { 7 } else { 5 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),             // titlebar
-            Constraint::Length(banner_height), // optional error banner
-            Constraint::Min(8),                // body
-            Constraint::Length(7),             // events / log
-            Constraint::Length(1),             // hint / prompt line
+            Constraint::Length(1),              // titlebar
+            Constraint::Length(banner_height),  // optional error banner
+            Constraint::Min(8),                 // body
+            Constraint::Length(console_height), // console
+            Constraint::Length(1),              // hint / prompt line
         ])
         .split(area);
 
@@ -87,107 +102,125 @@ pub fn render_in(
         render_error_banner(frame, chunks[1], banner, theme);
     }
     render_body(frame, chunks[2], snapshot, ui, theme);
-    render_events(frame, chunks[3], snapshot, ui, theme);
-    render_hintline(frame, chunks[4], snapshot, prompt, theme);
+    render_console(frame, chunks[3], snapshot, ui, theme);
+    render_hintline(frame, chunks[4], snapshot, ui, prompt, theme);
 
     if let Some(picker) = snapshot.picker.as_ref() {
         render_picker_overlay(frame, chunks[2], picker, theme);
     }
-
+    if let Some(popup) = ui.popup.as_mut() {
+        render_value_popup(frame, area, popup, theme);
+    }
     if ui.show_help {
-        render_help_overlay(frame, area, theme, ui.help_scroll);
+        render_help_overlay(frame, area, theme, &mut ui.help_scroll);
     }
 }
+
+// ── Title bar ───────────────────────────────────────────────────────────
 
 fn render_titlebar(frame: &mut Frame<'_>, area: Rect, snapshot: &DebugSnapshot<'_>, theme: &Theme) {
     let pause_kind = snapshot.focused_proc.map(|p| p.pause_kind);
     let crashed = snapshot.app_state == AppState::Dead && pause_kind == Some(PauseKind::Error);
     let state_label = if crashed {
-        "Crashed".to_string()
+        " Crashed ".to_string()
     } else {
         format!("[{}]", snapshot.app_state.label())
     };
-    let state_style = match (snapshot.app_state, pause_kind) {
-        (AppState::Stopped, Some(PauseKind::Error)) => theme.style(&tokens::DEBUG_STATE_ERROR),
-        (AppState::Stopped, _) => theme.command_prompt(),
-        (AppState::Ready | AppState::Starting | AppState::Loading, _) => theme.detail_value(),
-        (AppState::Running, _) => theme.success(),
-        (AppState::Completed, _) => theme.style(&tokens::DEBUG_STATE_COMPLETED),
-        (AppState::Dead | AppState::LoadFailed, _) => theme.error(),
+    let state_token = match (snapshot.app_state, pause_kind) {
+        (_, _) if crashed => tokens::DEBUG_STATE_ERROR,
+        (AppState::Stopped, Some(PauseKind::Error)) => tokens::DEBUG_STATE_ERROR,
+        (AppState::Stopped, _) => tokens::COMMAND_PROMPT,
+        (AppState::Ready | AppState::Starting | AppState::Loading, _) => tokens::DETAIL_VALUE,
+        (AppState::Running, _) => tokens::SUCCESS,
+        (AppState::Completed, _) => tokens::DEBUG_STATE_COMPLETED,
+        (AppState::Dead | AppState::LoadFailed, _) => tokens::ERROR,
     };
-    let mut spans = vec![
-        Span::styled(
-            format!(" {} ", snapshot.title),
-            theme.style(&tokens::DEBUG_TITLE),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            file_label(snapshot.source_path),
-            theme.detail_value_accent(),
-        ),
-        Span::styled(
-            format!(" [{}]", snapshot.source_origin.label()),
-            theme.detail_label(),
-        ),
-        Span::styled("  ·  ", theme.detail_separator()),
-        Span::styled(
-            if crashed {
-                state_label.clone()
+    let target = if snapshot.target_path.is_empty() {
+        snapshot.source_path
+    } else {
+        snapshot.target_path
+    };
+    let origin = matches!(
+        snapshot.source_origin,
+        SourceOrigin::CompiledSource | SourceOrigin::Synthetic
+    )
+    .then(|| format!(" [{}]", snapshot.source_origin.label()));
+    let paused = snapshot.app_state == AppState::Stopped || crashed;
+    let location = snapshot
+        .location_label
+        .filter(|label| paused && !label.is_empty())
+        .map(|label| format!("  at {label}"));
+    let reason = snapshot.focused_proc.filter(|_| paused).map(|focus| {
+        match (focus.pause_reason, focus.breakpoint.as_deref()) {
+            (_, Some(id)) => format!("breakpoint {id}"),
+            (PauseReasonLabel::Entry, _) => "entry".to_string(),
+            (PauseReasonLabel::Step, _) => "step".to_string(),
+            (PauseReasonLabel::Breakpoint, None) => "breakpoint".to_string(),
+            (PauseReasonLabel::Watchpoint, _) => "variable written".to_string(),
+            (PauseReasonLabel::Pause, _) => "paused by you".to_string(),
+            (PauseReasonLabel::InstructionStep, _) => "instruction step".to_string(),
+            (PauseReasonLabel::InstructionBreakpoint, _) => "instruction breakpoint".to_string(),
+            (PauseReasonLabel::Error, _) => "error".to_string(),
+        }
+    });
+
+    let base = || {
+        let mut variant = chrome::Variant::new()
+            .push(tokens::DEBUG_TITLE, format!(" {} ", snapshot.title))
+            .push(tokens::FG, " ")
+            .push(tokens::DETAIL_VALUE_ACCENT, file_label(target));
+        if let Some(origin) = &origin {
+            variant = variant.push(tokens::DETAIL_LABEL, origin.clone());
+        }
+        variant
+            .push(tokens::DETAIL_SEPARATOR, "  ")
+            .push(state_token.clone(), state_label.clone())
+    };
+    let with_location = |variant: chrome::Variant| match &location {
+        Some(location) => variant.push(tokens::DETAIL_VALUE, location.clone()),
+        None => variant,
+    };
+    let with_reason = |variant: chrome::Variant| match &reason {
+        Some(reason) => variant.push(tokens::DETAIL_SEPARATOR, "  ·  ").push(
+            if reason.starts_with("breakpoint") || reason == "error" {
+                tokens::ERROR
             } else {
-                state_label
+                tokens::DETAIL_LABEL
             },
-            state_style,
+            reason.clone(),
         ),
-    ];
-    if let Some(p) = snapshot.focused_proc {
-        // Suppress the location chunk when there's nothing real to
-        // show — without this an early-startup pause renders as
-        // noisy `   : line 0`.
-        if !p.qname.is_empty() || p.line > 0 {
-            let location = if p.qname.is_empty() {
-                format!("  line {}", p.line)
-            } else if p.line > 0 {
-                format!("  {} : line {}", p.qname, p.line)
-            } else {
-                format!("  {}", p.qname)
-            };
-            spans.push(Span::styled(location, theme.detail_value()));
-        }
-        if let Some(bp) = p.breakpoint.as_deref() {
-            spans.push(Span::styled("  hit:", theme.detail_label()));
-            spans.push(Span::styled(bp.to_string(), theme.error()));
-        }
-    }
-    spans.push(Span::styled("  ·  ", theme.detail_separator()));
-    spans.push(Span::styled(
-        format!("{} bp", snapshot.breakpoints.len()),
-        theme.detail_label(),
-    ));
-    spans.push(Span::styled(
-        format!(" · {} watch", snapshot.watches.len()),
-        theme.detail_label(),
-    ));
-    if snapshot.coverage_enabled {
-        spans.push(Span::styled(" · cov", theme.success()));
-    }
-    if !snapshot.theme_label.is_empty() {
-        spans.push(Span::styled("  ·  ", theme.detail_separator()));
-        spans.push(Span::styled(
-            format!("theme:{}", snapshot.theme_label),
-            theme.detail_label(),
-        ));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        None => variant,
+    };
+    let with_opcodes = |variant: chrome::Variant| match snapshot.instruction_set {
+        Some(set) => variant
+            .push(tokens::DETAIL_SEPARATOR, "  ·  ")
+            .push(tokens::DETAIL_LABEL, format!("{set} opcodes")),
+        None => variant,
+    };
+    let row = chrome::fit(
+        &[
+            with_opcodes(with_reason(with_location(base()))),
+            with_reason(with_location(base())),
+            with_location(base()),
+            base(),
+        ],
+        area.width as usize,
+        theme,
+    );
+    frame.render_widget(Paragraph::new(Line::from(row.spans)), area);
 }
 
 fn render_error_banner(frame: &mut Frame<'_>, area: Rect, msg: &str, theme: &Theme) {
+    let room = (area.width as usize).saturating_sub(8);
     let line = Line::from(vec![
         Span::styled(" error ", theme.style(&tokens::DEBUG_BANNER_ERROR)),
         Span::raw(" "),
-        Span::styled(msg.to_string(), theme.error()),
+        Span::styled(truncate_cells(&single_line(msg), room), theme.error()),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
+
+// ── Body layout ─────────────────────────────────────────────────────────
 
 fn render_body(
     frame: &mut Frame<'_>,
@@ -196,69 +229,183 @@ fn render_body(
     ui: &mut DebugUiState,
     theme: &Theme,
 ) {
-    // Reflow: when the terminal is narrow, drop the right column and
-    // fold the inspector panes under the source.
-    let narrow = area.width < 100;
-
-    if narrow {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(8),
-                Constraint::Length(6),
-                Constraint::Length(6),
-                Constraint::Length(6),
-                Constraint::Length(6),
-                Constraint::Length(6),
-            ])
-            .split(area);
-        render_code_panes(frame, rows[0], snapshot, ui, theme);
-        render_stack(frame, rows[1], snapshot, ui, theme);
-        render_locals(frame, rows[2], snapshot, ui, theme);
-        render_breakpoints(frame, rows[3], snapshot, ui, theme);
-        render_watches(frame, rows[4], snapshot, ui, theme);
-        render_coverage(frame, rows[5], snapshot, ui, theme);
+    if area.width < NARROW_WIDTH {
+        render_narrow_body(frame, area, snapshot, ui, theme);
         return;
     }
 
     let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(area);
+    render_code_panes(frame, columns[0], snapshot, ui, theme);
+    render_side_column(frame, columns[1], snapshot, ui, theme);
+}
+
+/// Stack, Locals, Breakpoints, Watches (and Coverage) stacked beside the
+/// source. Panes holding a few rows shrink to them; Locals takes the rest.
+fn render_side_column(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: &DebugSnapshot<'_>,
+    ui: &mut DebugUiState,
+    theme: &Theme,
+) {
+    let mut fixed = vec![
+        snapshot.stack.len(),
+        snapshot.breakpoints.len(),
+        watch_rows(snapshot),
+    ];
+    if snapshot.coverage_enabled {
+        fixed.push(snapshot.coverage.len());
+    }
+    let (heights, locals_height) = side_heights(area.height, &fixed);
+    let mut constraints = vec![
+        Constraint::Length(heights[0]),
+        Constraint::Length(locals_height),
+        Constraint::Length(heights[1]),
+        Constraint::Length(heights[2]),
+    ];
+    if snapshot.coverage_enabled {
+        constraints.push(Constraint::Length(heights[3]));
+    }
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
 
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(6), Constraint::Length(8)])
-        .split(columns[0]);
-
-    let right_constraints = if snapshot.coverage_enabled {
-        vec![
-            Constraint::Percentage(30),
-            Constraint::Percentage(25),
-            Constraint::Percentage(20),
-            Constraint::Percentage(25),
-        ]
-    } else {
-        vec![
-            Constraint::Percentage(40),
-            Constraint::Percentage(30),
-            Constraint::Percentage(30),
-        ]
-    };
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(right_constraints)
-        .split(columns[1]);
-
-    render_code_panes(frame, left[0], snapshot, ui, theme);
-    render_breakpoints(frame, left[1], snapshot, ui, theme);
-    render_stack(frame, right[0], snapshot, ui, theme);
-    render_locals(frame, right[1], snapshot, ui, theme);
-    render_watches(frame, right[2], snapshot, ui, theme);
+    render_stack(frame, rows[0], snapshot, ui, theme, None);
+    render_locals(frame, rows[1], snapshot, ui, theme, None);
+    render_breakpoints(frame, rows[2], snapshot, ui, theme, None);
+    render_watches(frame, rows[3], snapshot, ui, theme, None);
     if snapshot.coverage_enabled {
-        render_coverage(frame, right[3], snapshot, ui, theme);
+        render_coverage(frame, rows[4], snapshot, ui, theme, None);
     }
 }
+
+/// Heights for content-sized panes plus what remains for the flexible one.
+///
+/// Each content-sized pane wants its rows plus a border, is never shorter
+/// than an empty pane, and never takes more than a quarter of the column.
+/// When even that leaves the flexible pane too little room, the tallest
+/// panes give rows back first.
+fn side_heights(total: u16, rows: &[usize]) -> (Vec<u16>, u16) {
+    const EMPTY_PANE: u16 = 3;
+    const MIN_FLEX: u16 = 5;
+    let cap = (total / 4).max(EMPTY_PANE);
+    let mut heights: Vec<u16> = rows
+        .iter()
+        .map(|rows| (u16::try_from(*rows).unwrap_or(u16::MAX).max(1) + 2).min(cap))
+        .collect();
+    while heights.iter().sum::<u16>() + MIN_FLEX > total {
+        let Some(tallest) = heights
+            .iter_mut()
+            .filter(|height| **height > EMPTY_PANE)
+            .max()
+        else {
+            break;
+        };
+        *tallest -= 1;
+    }
+    let flex = total.saturating_sub(heights.iter().sum());
+    (heights, flex)
+}
+
+fn watch_rows(snapshot: &DebugSnapshot<'_>) -> usize {
+    snapshot.watches.len()
+}
+
+/// Narrow terminals fold the inspector panes into one tabbed pane below the
+/// source, so the source keeps its full width.
+fn render_narrow_body(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: &DebugSnapshot<'_>,
+    ui: &mut DebugUiState,
+    theme: &Theme,
+) {
+    let inspector_height = (area.height * 2 / 5)
+        .clamp(6, 14)
+        .min(area.height.saturating_sub(6));
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(6), Constraint::Length(inspector_height)])
+        .split(area);
+    render_code_panes(frame, rows[0], snapshot, ui, theme);
+
+    let mut tabs = vec![Pane::Stack, Pane::Locals, Pane::Breakpoints, Pane::Watches];
+    if snapshot.coverage_enabled {
+        tabs.push(Pane::Coverage);
+    }
+    let shown = if ui.focus.is_inspector() {
+        ui.focus
+    } else {
+        ui.inspector_tab
+    };
+    let shown = if tabs.contains(&shown) {
+        shown
+    } else {
+        Pane::Locals
+    };
+    let tabs = Some(tabs.as_slice());
+    match shown {
+        Pane::Stack => render_stack(frame, rows[1], snapshot, ui, theme, tabs),
+        Pane::Breakpoints => render_breakpoints(frame, rows[1], snapshot, ui, theme, tabs),
+        Pane::Watches => render_watches(frame, rows[1], snapshot, ui, theme, tabs),
+        Pane::Coverage => render_coverage(frame, rows[1], snapshot, ui, theme, tabs),
+        _ => render_locals(frame, rows[1], snapshot, ui, theme, tabs),
+    }
+}
+
+/// The block for an inspector pane. With `tabs`, the title is the narrow
+/// layout's tab strip and each label is registered as a click target.
+fn side_block<'a>(
+    pane: Pane,
+    title: String,
+    ui: &mut DebugUiState,
+    area: Rect,
+    theme: &'a Theme,
+    tabs: Option<&[Pane]>,
+) -> Block<'a> {
+    let focused = ui.focus == pane;
+    let Some(tabs) = tabs else {
+        return panel_block(&title, focused, theme);
+    };
+    let mut spans = Vec::new();
+    let mut column = area.x + 1;
+    for (index, tab) in tabs.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled("│", theme.border_dim()));
+            column += 1;
+        }
+        let label = if *tab == pane {
+            format!(" {title} ")
+        } else {
+            format!(" {} ", tab.title())
+        };
+        let width = cells(&label) as u16;
+        ui.hit.inspector_tabs.push(PaneHit {
+            pane: *tab,
+            area: Rect::new(column, area.y, width, 1),
+        });
+        column += width;
+        spans.push(Span::styled(
+            label,
+            if *tab == pane {
+                if focused {
+                    theme.panel_title_focused()
+                } else {
+                    theme.tab_active()
+                }
+            } else {
+                theme.tab_inactive()
+            },
+        ));
+    }
+    base_block(focused, theme).title(Line::from(spans))
+}
+
+// ── Source ──────────────────────────────────────────────────────────────
 
 fn render_code_panes(
     frame: &mut Frame<'_>,
@@ -295,6 +442,7 @@ fn render_code_panes(
         .map(|line| line.saturating_sub(1).saturating_sub(height / 2))
         .unwrap_or(0)
         .min(snapshot.secondary_source_lines.len().saturating_sub(height));
+    let width = inner.width as usize;
     let lines: Vec<Line<'_>> = snapshot
         .secondary_source_lines
         .iter()
@@ -304,36 +452,73 @@ fn render_code_panes(
         .map(|(index, line)| {
             let line_no = index + 1;
             let active = highlight == Some(line_no);
+            let gutter = if active {
+                format!("▶ {line_no:5} ")
+            } else {
+                format!("  {line_no:5} ")
+            };
+            let text_style = if active {
+                theme.focused_line_bg()
+            } else {
+                theme.style(&tokens::PLAIN)
+            };
+            let room = width.saturating_sub(cells(&gutter));
             Line::from(vec![
                 Span::styled(
-                    if active {
-                        format!("▶ {line_no:5} ")
-                    } else {
-                        format!("  {line_no:5} ")
-                    },
+                    gutter,
                     if active {
                         theme.gutter_focused()
                     } else {
                         theme.gutter_default()
                     },
                 ),
-                Span::styled(
-                    line.raw.as_str(),
-                    if active {
-                        theme.focused_line_bg()
-                    } else {
-                        theme.style(&tokens::PLAIN)
-                    },
-                ),
+                Span::styled(truncate_cells(&sanitize(&line.raw), room), text_style),
             ])
         })
         .collect();
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        panes[1],
-    );
+    frame.render_widget(Paragraph::new(lines).block(block), panes[1]);
+}
+
+fn source_title(snapshot: &DebugSnapshot<'_>, ui: &DebugUiState) -> String {
+    let label = if snapshot.source_label.is_empty() {
+        file_label(snapshot.source_path)
+    } else {
+        snapshot.source_label.to_string()
+    };
+    let qualifier = match snapshot.source_origin {
+        SourceOrigin::UserScript => None,
+        SourceOrigin::CompiledSource => Some("compiled source"),
+        SourceOrigin::SourcedFile => Some("sourced file"),
+        SourceOrigin::ProcBody => Some("proc body"),
+        SourceOrigin::Anonymous => Some("eval, session-only"),
+        SourceOrigin::Synthetic => Some("synthetic"),
+    };
+    let mut title = match qualifier {
+        Some(qualifier) => format!(" Source · {label} · {qualifier}"),
+        None => format!(" Source · {label}"),
+    };
+    if !snapshot.source_search.query.is_empty() {
+        let total = snapshot.source_search.match_lines.len();
+        let current = snapshot.source_search.current.map_or(0, |c| c + 1);
+        title.push_str(&format!(
+            " · /{}  {current}/{total}",
+            snapshot.source_search.query
+        ));
+    } else if let Some(line) = snapshot.source_lines.get(ui.source_cursor)
+        && line.commands.len() > 1
+    {
+        let index = ui
+            .source_command_cursor
+            .min(line.commands.len().saturating_sub(1));
+        title.push_str(&format!(
+            " · command {}/{}: {}",
+            index + 1,
+            line.commands.len(),
+            line.commands[index].label
+        ));
+    }
+    title.push(' ');
+    title
 }
 
 fn render_source(
@@ -344,56 +529,8 @@ fn render_source(
     theme: &Theme,
 ) {
     let focused = ui.focus == Pane::Source;
-    let base_title = match snapshot.source_origin {
-        SourceOrigin::UserScript => " Source ",
-        SourceOrigin::CompiledSource => " Source · compiled source ",
-        SourceOrigin::SourcedFile => " Source · sourced file ",
-        SourceOrigin::ProcBody => " Source · proc body ",
-        SourceOrigin::Anonymous => " Source · eval (session-only) ",
-        SourceOrigin::Synthetic => " Source · synthetic ",
-    };
-    let selected_command = snapshot
-        .source_lines
-        .get(ui.source_cursor)
-        .and_then(|line| {
-            let index = ui
-                .source_command_cursor
-                .min(line.commands.len().saturating_sub(1));
-            line.commands.get(index).map(|command| {
-                (
-                    index,
-                    line.commands.len(),
-                    command.label.as_str(),
-                    command.offset,
-                )
-            })
-        });
-    let dynamic_title;
-    let title: &str = if !snapshot.source_search.query.is_empty() {
-        let total = snapshot.source_search.match_lines.len();
-        let cur = snapshot.source_search.current.map(|c| c + 1).unwrap_or(0);
-        dynamic_title = format!(
-            "{} · /{}  {}/{}",
-            base_title.trim_end(),
-            snapshot.source_search.query,
-            cur,
-            total
-        );
-        &dynamic_title
-    } else if let Some((index, count, label, offset)) = selected_command {
-        dynamic_title = format!(
-            "{} · command {}/{}: {} @{} ",
-            base_title.trim_end(),
-            index + 1,
-            count,
-            label,
-            offset
-        );
-        &dynamic_title
-    } else {
-        base_title
-    };
-    let block = panel_block(title, focused, theme);
+    let title = source_title(snapshot, ui);
+    let block = panel_block(&title, focused, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -402,6 +539,7 @@ fn render_source(
         area,
     });
     ui.hit.source_inner = Some(inner);
+    ui.hit.source_gutter_width = SOURCE_GUTTER_CELLS;
 
     let height = inner.height.max(1) as usize;
     let half = height / 2;
@@ -418,7 +556,7 @@ fn render_source(
     }
     ui.hit.source_view_top = ui.source_view_top;
 
-    let paused_line = snapshot.focused_proc.map(|p| p.line as usize).unwrap_or(0);
+    let paused_line = snapshot.paused_line.map_or(0, |line| line as usize);
     let active_qname = snapshot
         .source_qname
         .or_else(|| snapshot.focused_proc.map(|proc| proc.qname.as_str()))
@@ -465,6 +603,7 @@ fn render_source(
     let bp_style = theme.style(&tokens::DEBUG_BREAKPOINT);
     let cursor_bg = theme.selection();
     let paused_bg = theme.focused_line_bg();
+    let code_width = (inner.width as usize).saturating_sub(SOURCE_GUTTER_CELLS as usize);
 
     let mut lines = Vec::with_capacity(height);
     for row in 0..height {
@@ -510,9 +649,8 @@ fn render_source(
             theme.style(&tokens::PLAIN)
         };
 
-        // Search hit highlighting: if the query is present and this
-        // line matches, underline the row. The current match also
-        // gets a yellow accent background.
+        // Search hits are underlined; the current one also takes the
+        // gutter's accent.
         let is_search_match = !snapshot.source_search.query.is_empty()
             && snapshot.source_search.match_lines.contains(&idx);
         let is_current_match = is_search_match
@@ -529,23 +667,22 @@ fn render_source(
             row_style = row_style.patch(theme.style(&tokens::SEARCH_MATCH));
         }
 
-        let mut spans = Vec::with_capacity(4 + snapshot.source_lines[idx].spans.len());
+        let mut spans = Vec::with_capacity(4 + source_line.spans.len());
         spans.push(Span::styled(format!(" {pointer}"), gutter_style));
         spans.push(Span::styled(bp_marker, bp_render_style));
         spans.push(Span::styled(format!(" {line_no:>4} "), gutter_style));
         spans.push(Span::styled(" ", row_style));
-        // Strip control bytes (NUL, BEL, ESC, …) from raw source text
-        // before pushing to the renderer. Decompiled .tbc occasionally
-        // contains stray control bytes from string-literal fragments
-        // the decompiler couldn't reconstruct; ratatui happily writes
-        // them as zero-width cells which then drift subsequent
-        // characters left and produce phantom-letter artifacts.
+
+        // Control bytes (NUL, BEL, ESC, …) are replaced before rendering:
+        // ratatui writes them as zero-width cells, which drifts the rest of
+        // the row left and leaves phantom letters behind.
         let selected = is_cursor.then(|| {
             let index = ui
                 .source_command_cursor
                 .min(source_line.commands.len().saturating_sub(1));
             source_line.commands.get(index)
         });
+        let mut code: Vec<Span<'_>> = Vec::new();
         if let Some(Some(command)) = selected {
             let start = char_boundary_at_or_before(&source_line.raw, command.start_column);
             let end = char_boundary_at_or_before(
@@ -562,14 +699,14 @@ fn render_source(
                     .style(&tokens::DEBUG_COMMAND_SELECTED)
                     .patch(row_style)
             };
-            spans.push(Span::styled(sanitize(&source_line.raw[..start]), row_style));
-            spans.push(Span::styled(
+            code.push(Span::styled(sanitize(&source_line.raw[..start]), row_style));
+            code.push(Span::styled(
                 sanitize(&source_line.raw[start..end]),
                 command_style,
             ));
-            spans.push(Span::styled(sanitize(&source_line.raw[end..]), row_style));
+            code.push(Span::styled(sanitize(&source_line.raw[end..]), row_style));
         } else if source_line.spans.is_empty() {
-            spans.push(Span::styled(sanitize(&source_line.raw), row_style));
+            code.push(Span::styled(sanitize(&source_line.raw), row_style));
         } else {
             for span in &source_line.spans {
                 let merged = if row_style.bg.is_some() || is_search_match {
@@ -577,9 +714,19 @@ fn render_source(
                 } else {
                     span.style
                 };
-                spans.push(Span::styled(sanitize(&span.content), merged));
+                code.push(Span::styled(sanitize(&span.content), merged));
             }
         }
+        // Rows never wrap: a wrapped row would shift every line below it
+        // away from the line numbers and break click-to-line. Long lines are
+        // clipped, scrolled with ←/→, and marked where text continues.
+        let clipped = clip_spans(
+            code,
+            ui.source_hscroll,
+            code_width.saturating_sub(1),
+            theme.fg_muted().patch(row_style),
+        );
+        spans.extend(clipped);
         // Pad the row out to inner.width with row-styled spaces so the
         // *cells* themselves get overwritten — defends against any
         // ratatui buffer leak that survives the up-front Clear.
@@ -598,7 +745,85 @@ fn render_source(
         )));
     }
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Drop `skip` cells from the left of a styled row and keep at most `width`
+/// cells, marking each clipped edge with `…`.
+fn clip_spans<'a>(
+    spans: Vec<Span<'a>>,
+    skip: usize,
+    width: usize,
+    marker_style: Style,
+) -> Vec<Span<'a>> {
+    let total: usize = spans.iter().map(|span| cells(span.content.as_ref())).sum();
+    if skip == 0 && total <= width {
+        return spans;
+    }
+    let mut out = Vec::new();
+    let mut position = 0usize;
+    let mut used = 0usize;
+    let left_clipped = skip > 0 && total > 0;
+    if left_clipped {
+        out.push(Span::styled("…", marker_style));
+        used += 1;
+    }
+    let start = if left_clipped { skip + 1 } else { skip };
+    let right_clipped = total > skip + width;
+    let budget = if right_clipped {
+        width.saturating_sub(1)
+    } else {
+        width
+    };
+    for span in spans {
+        let mut kept = String::new();
+        for character in span.content.chars() {
+            let wide = char_cells(character);
+            if position >= start && used + wide <= budget {
+                kept.push(character);
+                used += wide;
+            }
+            position += wide;
+        }
+        if !kept.is_empty() {
+            out.push(Span::styled(kept, span.style));
+        }
+    }
+    if right_clipped {
+        out.push(Span::styled("…", marker_style));
+    }
+    out
+}
+
+// ── Inspector panes ─────────────────────────────────────────────────────
+
+/// What a stack frame is called in the Stack pane.
+fn frame_name(frame: &StackFrame) -> String {
+    if let Some(name) = frame.proc_name.as_deref().filter(|name| !name.is_empty()) {
+        return name.to_string();
+    }
+    if frame.level == 0 || frame.kind == "toplevel" {
+        return "(top level)".to_string();
+    }
+    frame
+        .source_path
+        .as_deref()
+        .map(file_label)
+        .unwrap_or_else(|| frame.kind.clone())
+}
+
+/// Where a stack frame is, for the Stack pane.
+fn frame_location(frame: &StackFrame) -> String {
+    if let Some(label) = frame.location_label.as_deref() {
+        return label.to_string();
+    }
+    match (frame.source_path.as_deref(), frame.line) {
+        (Some(path), Some(line)) if frame.proc_name.is_none() => {
+            format!("{}:{line}", file_label(path))
+        }
+        (_, Some(line)) => format!("line {line}"),
+        _ => String::new(),
+    }
 }
 
 fn render_stack(
@@ -607,43 +832,52 @@ fn render_stack(
     snapshot: &DebugSnapshot<'_>,
     ui: &mut DebugUiState,
     theme: &Theme,
+    tabs: Option<&[Pane]>,
 ) {
-    let focused = ui.focus == Pane::Stack;
-    let block = panel_block(" Stack ", focused, theme);
+    let block = side_block(Pane::Stack, "Stack".to_string(), ui, area, theme, tabs);
+    let inner = block.inner(area);
     ui.hit.panes.push(PaneHit {
         pane: Pane::Stack,
         area,
     });
-    ui.hit.stack_inner = Some(block.inner(area));
+    ui.hit.stack_inner = Some(inner);
+    let width = inner.width as usize;
     let items: Vec<ListItem> = if snapshot.stack.is_empty() {
         vec![ListItem::new(Span::styled(
             "  (no frames — pause execution first)",
             theme.empty_state(),
         ))]
     } else {
+        let name_width = snapshot
+            .stack
+            .iter()
+            .map(|frame| cells(&frame_name(frame)))
+            .max()
+            .unwrap_or(0)
+            .min(width / 2);
         snapshot
             .stack
             .iter()
-            .map(|f| {
-                let proc = f.proc_name.clone().unwrap_or_else(|| f.kind.clone());
-                let line = f.line.map(|l| format!(":{l}")).unwrap_or_default();
-                let marker = if f.level == snapshot.inspected_frame {
-                    "*"
-                } else {
-                    " "
-                };
+            .enumerate()
+            .map(|(index, frame)| {
+                let marker = if index == 0 { "▶ " } else { "  " };
+                let name = truncate_cells(&frame_name(frame), name_width);
+                let padding = " ".repeat(name_width.saturating_sub(cells(&name)));
+                let location = frame_location(frame);
+                let room = width.saturating_sub(2 + name_width + 2);
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!("{marker}[{:>2}] ", f.level), theme.detail_label()),
-                    Span::styled(proc, theme.detail_value_accent()),
-                    Span::styled(line, theme.detail_value()),
+                    Span::styled(marker, theme.gutter_focused()),
+                    Span::styled(name, theme.detail_value_accent()),
+                    Span::raw(padding),
+                    Span::raw("  "),
+                    Span::styled(truncate_cells(&location, room), theme.detail_label()),
                 ]))
             })
             .collect()
     };
     let list = List::new(items)
         .block(block)
-        .highlight_style(theme.style(&tokens::SELECTION_STRONG))
-        .highlight_symbol(if focused { "▶ " } else { "  " });
+        .highlight_style(theme.selection());
     frame.render_stateful_widget(list, area, &mut ui.selections.stack);
 }
 
@@ -653,32 +887,51 @@ fn render_locals(
     snapshot: &DebugSnapshot<'_>,
     ui: &mut DebugUiState,
     theme: &Theme,
+    tabs: Option<&[Pane]>,
 ) {
-    let focused = ui.focus == Pane::Locals;
-    let title = format!(" Locals · level {} ", snapshot.inspected_frame);
-    let block = panel_block(&title, focused, theme);
+    let scope = snapshot
+        .stack
+        .iter()
+        .find(|frame| frame.level == snapshot.inspected_frame)
+        .map(frame_name)
+        .unwrap_or_else(|| format!("level {}", snapshot.inspected_frame));
+    let title = if snapshot.app_state == AppState::Stopped {
+        format!("Locals · {scope}")
+    } else {
+        "Locals".to_string()
+    };
+    let block = side_block(Pane::Locals, title, ui, area, theme, tabs);
+    let inner = block.inner(area);
     ui.hit.panes.push(PaneHit {
         pane: Pane::Locals,
         area,
     });
-    ui.hit.locals_inner = Some(block.inner(area));
-    let inner_width = block.inner(area).width as usize;
+    ui.hit.locals_inner = Some(inner);
+    let inner_width = inner.width as usize;
     let items: Vec<ListItem> = if snapshot.locals.is_empty() {
-        vec![ListItem::new(Span::styled(
-            "  (no locals — pause inside a proc)",
-            theme.empty_state(),
-        ))]
+        let message = if snapshot.app_state == AppState::Stopped {
+            "  (no variables in this frame)"
+        } else {
+            "  (no locals — pause execution first)"
+        };
+        vec![ListItem::new(Span::styled(message, theme.empty_state()))]
     } else {
         snapshot
             .locals
             .iter()
             .map(|row| {
-                let name_style = theme.variable();
+                let name_style = if row.builtin {
+                    theme.fg_muted()
+                } else {
+                    theme.variable()
+                };
                 let (marker, value_style) = if row.changed {
                     (
                         Span::styled("Δ ", theme.style(&tokens::DEBUG_CHANGED)),
                         theme.style(&tokens::DEBUG_CHANGED),
                     )
+                } else if row.builtin {
+                    (Span::raw("  "), theme.fg_muted())
                 } else {
                     (Span::raw("  "), theme.detail_value())
                 };
@@ -689,7 +942,7 @@ fn render_locals(
                     marker,
                     Span::styled(row.name.clone(), name_style),
                     Span::styled(" = ", theme.detail_separator()),
-                    Span::styled(truncate(&row.value, room, theme), value_style),
+                    Span::styled(truncate_cells(&single_line(&row.value), room), value_style),
                 ]))
             })
             .collect()
@@ -706,17 +959,26 @@ fn render_breakpoints(
     snapshot: &DebugSnapshot<'_>,
     ui: &mut DebugUiState,
     theme: &Theme,
+    tabs: Option<&[Pane]>,
 ) {
-    let focused = ui.focus == Pane::Breakpoints;
-    let block = panel_block(" Breakpoints ", focused, theme);
+    let block = side_block(
+        Pane::Breakpoints,
+        "Breakpoints".to_string(),
+        ui,
+        area,
+        theme,
+        tabs,
+    );
+    let inner = block.inner(area);
     ui.hit.panes.push(PaneHit {
         pane: Pane::Breakpoints,
         area,
     });
-    ui.hit.breakpoints_inner = Some(block.inner(area));
+    ui.hit.breakpoints_inner = Some(inner);
+    let width = inner.width as usize;
     let items: Vec<ListItem> = if snapshot.breakpoints.is_empty() {
         vec![ListItem::new(Span::styled(
-            "  (none — press b on a source line, B to add by name)",
+            "  (none — press b on a source line)",
             theme.empty_state(),
         ))]
     } else {
@@ -730,30 +992,61 @@ fn render_breakpoints(
                 } else {
                     theme.fg_muted()
                 };
-                let cond = bp
-                    .condition
-                    .as_ref()
-                    .map(|c| format!("  if {c}"))
-                    .unwrap_or_default();
-                let location_name = bp
-                    .source_path
-                    .as_deref()
-                    .and_then(|path| std::path::Path::new(path).file_name())
-                    .and_then(|name| name.to_str())
-                    .unwrap_or(&bp.qname);
-                let location = format!(
-                    "{location_name}:{}{}",
-                    bp.line
-                        .map(|line| line.to_string())
-                        .unwrap_or_else(|| bp.offset.to_string()),
-                    if bp.pending { " [pending]" } else { "" },
-                );
+                let location = bp.location_label.clone().unwrap_or_else(|| {
+                    let name = bp
+                        .source_path
+                        .as_deref()
+                        .map(file_label)
+                        .unwrap_or_else(|| bp.qname.clone());
+                    format!(
+                        "{name}:{}",
+                        bp.line
+                            .map(|line| line.to_string())
+                            .unwrap_or_else(|| bp.offset.to_string())
+                    )
+                });
+                let mut details = Vec::new();
+                if bp.pending {
+                    details.push("[pending]".to_string());
+                }
+                if !bp.enabled {
+                    details.push("disabled".to_string());
+                }
+                if let Some(condition) = bp.condition.as_deref() {
+                    details.push(format!("if {condition}"));
+                }
+                if bp.ignore_count > 0 {
+                    details.push(format!("skip {}", bp.ignore_count));
+                }
+                if bp.hits > 0 {
+                    details.push(format!("hits {}", bp.hits));
+                }
+                let details = if details.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", details.join(" · "))
+                };
+                let used = 2 + cells(&bp.id) + 1 + cells(&location);
                 ListItem::new(Line::from(vec![
                     Span::styled(format!("{glyph} "), glyph_style),
-                    Span::styled(bp.id.clone(), theme.detail_value_accent()),
-                    Span::styled(format!("  {location}"), theme.detail_value()),
-                    Span::styled(format!("  hits={}", bp.hits), theme.detail_label()),
-                    Span::styled(cond, theme.variable()),
+                    Span::styled(bp.id.clone(), theme.fg_muted()),
+                    Span::raw(" "),
+                    Span::styled(
+                        location,
+                        if bp.enabled {
+                            theme.detail_value()
+                        } else {
+                            theme.fg_muted()
+                        },
+                    ),
+                    Span::styled(
+                        truncate_cells(&details, width.saturating_sub(used)),
+                        if bp.condition.is_some() {
+                            theme.variable()
+                        } else {
+                            theme.detail_label()
+                        },
+                    ),
                 ]))
             })
             .collect()
@@ -770,15 +1063,16 @@ fn render_watches(
     snapshot: &DebugSnapshot<'_>,
     ui: &mut DebugUiState,
     theme: &Theme,
+    tabs: Option<&[Pane]>,
 ) {
-    let focused = ui.focus == Pane::Watches;
-    let block = panel_block(" Watches ", focused, theme);
-    let inner_width = block.inner(area).width as usize;
+    let block = side_block(Pane::Watches, "Watches".to_string(), ui, area, theme, tabs);
+    let inner = block.inner(area);
+    let inner_width = inner.width as usize;
     ui.hit.panes.push(PaneHit {
         pane: Pane::Watches,
         area,
     });
-    ui.hit.watches_inner = Some(block.inner(area));
+    ui.hit.watches_inner = Some(inner);
     let items: Vec<ListItem> = if snapshot.watches.is_empty() {
         vec![ListItem::new(Span::styled(
             "  (none — press w to add)",
@@ -795,47 +1089,42 @@ fn render_watches(
                 } else {
                     theme.style(&tokens::PLAIN)
                 };
+                // The value is the point of a watch; the name and expression
+                // give way first. A watch named after its own expression
+                // would read `x = $x → 1`, so the expression is said once.
+                let name = truncate_cells(&w.name, inner_width / 3);
+                let value_room = inner_width
+                    .saturating_sub(cells(changed_text) + cells(&name) + 3)
+                    .clamp(8, (inner_width * 2 / 3).max(8));
                 let (value_text, value_style) = if let Some(err) = &w.last_error {
-                    (format!("→ ! {err}"), theme.error())
-                } else if let Some(v) = &w.last_value {
-                    let room = inner_width.saturating_sub(cells(&w.name) + 8).max(8);
                     (
-                        format!("→ {}", truncate(v, room, theme)),
+                        format!("→ ! {}", truncate_cells(&single_line(err), value_room)),
+                        theme.error(),
+                    )
+                } else if let Some(v) = &w.last_value {
+                    (
+                        format!("→ {}", truncate_cells(&single_line(v), value_room)),
                         theme.detail_value(),
                     )
                 } else {
-                    ("→ (unevaluated)".to_string(), theme.empty_state())
+                    ("→ (not evaluated yet)".to_string(), theme.empty_state())
                 };
-                let prefix_width = 2 + cells(&w.name) + 3;
-                let total_width = prefix_width + cells(&w.expr) + 1 + cells(&value_text);
-                let expression = truncate(
-                    &w.expr,
-                    inner_width.saturating_sub(prefix_width).max(1),
-                    theme,
+                let expression_room = inner_width.saturating_sub(
+                    cells(changed_text) + cells(&name) + 1 + cells(&value_text) + 3,
                 );
-                let name_line = || {
-                    Line::from(vec![
-                        Span::styled(changed_text, changed_style),
-                        Span::styled(w.name.clone(), theme.variable()),
-                        Span::styled(" = ", theme.detail_separator()),
-                        Span::styled(expression.clone(), theme.detail_label()),
-                    ])
-                };
-                if total_width <= inner_width {
-                    ListItem::new(Line::from(vec![
-                        Span::styled(changed_text, changed_style),
-                        Span::styled(w.name.clone(), theme.variable()),
-                        Span::styled(" = ", theme.detail_separator()),
-                        Span::styled(w.expr.clone(), theme.detail_label()),
-                        Span::raw(" "),
-                        Span::styled(value_text, value_style),
-                    ]))
-                } else {
-                    ListItem::new(vec![
-                        name_line(),
-                        Line::from(vec![Span::raw("  "), Span::styled(value_text, value_style)]),
-                    ])
+                let expression =
+                    (w.expr != w.name && w.expr != format!("${}", w.name) && expression_room >= 4)
+                        .then(|| format!(" = {}", truncate_cells(&w.expr, expression_room)));
+                let mut spans = vec![
+                    Span::styled(changed_text, changed_style),
+                    Span::styled(name, theme.variable()),
+                ];
+                if let Some(expression) = expression {
+                    spans.push(Span::styled(expression, theme.detail_label()));
                 }
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(value_text, value_style));
+                ListItem::new(Line::from(spans))
             })
             .collect()
     };
@@ -851,9 +1140,16 @@ fn render_coverage(
     snapshot: &DebugSnapshot<'_>,
     ui: &mut DebugUiState,
     theme: &Theme,
+    tabs: Option<&[Pane]>,
 ) {
-    let focused = ui.focus == Pane::Coverage;
-    let block = panel_block(" Coverage ", focused, theme);
+    let block = side_block(
+        Pane::Coverage,
+        "Coverage".to_string(),
+        ui,
+        area,
+        theme,
+        tabs,
+    );
     ui.hit.panes.push(PaneHit {
         pane: Pane::Coverage,
         area,
@@ -886,130 +1182,437 @@ fn render_coverage(
     frame.render_stateful_widget(list, area, &mut ui.selections.coverage);
 }
 
-fn render_events(
+// ── Console ─────────────────────────────────────────────────────────────
+
+/// Console lines worth showing: everything while filtering, otherwise all
+/// but debugger bookkeeping.
+pub fn visible_console_lines<'a>(events: &'a [EventLine], filter: &str) -> Vec<&'a EventLine> {
+    let filter = filter.to_lowercase();
+    events
+        .iter()
+        .filter(|line| {
+            if filter.is_empty() {
+                line.severity != EventSeverity::Trace
+            } else {
+                line.text.to_lowercase().contains(&filter)
+            }
+        })
+        .collect()
+}
+
+fn render_console(
     frame: &mut Frame<'_>,
     area: Rect,
     snapshot: &DebugSnapshot<'_>,
     ui: &mut DebugUiState,
     theme: &Theme,
 ) {
-    let focused = ui.focus == Pane::Events;
-    let title = if snapshot.event_filter.is_empty() {
-        " Events / Log ".to_string()
+    let lines = visible_console_lines(snapshot.events, snapshot.event_filter);
+    let height = area.height.saturating_sub(2) as usize;
+    let max_scroll = lines.len().saturating_sub(height);
+    ui.console_scroll = ui.console_scroll.min(max_scroll);
+    let mut title = if snapshot.event_filter.is_empty() {
+        " Console ".to_string()
     } else {
-        format!(" Events / Log · /{}", snapshot.event_filter)
+        format!(" Console · /{} ", snapshot.event_filter)
     };
+    if ui.console_scroll > 0 {
+        title.push_str(&format!("· {} newer below ", ui.console_scroll));
+    }
+    let focused = ui.focus == Pane::Events;
     let block = panel_block(&title, focused, theme);
+    let inner = block.inner(area);
     ui.hit.panes.push(PaneHit {
         pane: Pane::Events,
         area,
     });
-    ui.hit.events_inner = Some(block.inner(area));
-    let inner_width = block.inner(area).width as usize;
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let take = inner_height.max(1) * 2;
-    let filter_lc = snapshot.event_filter.to_lowercase();
-    let items: Vec<ListItem> = snapshot
-        .events
-        .iter()
-        .rev()
-        .filter(|line| filter_lc.is_empty() || line.text.to_lowercase().contains(&filter_lc))
-        .take(take)
-        .map(|line| {
-            let stamp = format_local_clock(line.when);
-            let style = match line.severity {
-                EventSeverity::Info => theme.detail_value(),
-                EventSeverity::Pause => theme.command_prompt(),
-                EventSeverity::Warn => theme.variable(),
-                EventSeverity::Error => theme.error(),
-            };
-            let room = inner_width.saturating_sub(cells(&stamp) + 2).max(8);
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{stamp}  "), theme.detail_label()),
-                Span::styled(truncate(&line.text, room, theme), style),
-            ]))
-        })
-        .collect();
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(theme.selection());
-    frame.render_stateful_widget(list, area, &mut ui.selections.events);
+    ui.hit.events_inner = Some(inner);
+    let width = inner.width as usize;
+    let end = lines.len().saturating_sub(ui.console_scroll);
+    let start = end.saturating_sub(height);
+    let rows: Vec<Line> = if lines.is_empty() {
+        vec![Line::from(Span::styled(
+            if snapshot.event_filter.is_empty() {
+                "  (program output and debugger messages appear here)"
+            } else {
+                "  (no console lines match the filter — / to change it)"
+            },
+            theme.empty_state(),
+        ))]
+    } else {
+        // No timestamps: the order is the story, and program output reads
+        // like it would in a terminal. Transcripts keep the times.
+        lines[start..end]
+            .iter()
+            .map(|line| {
+                let style = match line.severity {
+                    EventSeverity::Info => theme.detail_value(),
+                    EventSeverity::Pause => theme.command_prompt(),
+                    EventSeverity::Warn => theme.variable(),
+                    EventSeverity::Error | EventSeverity::ErrorOutput => theme.error(),
+                    EventSeverity::Output => theme.fg(),
+                    EventSeverity::Trace => theme.fg_muted(),
+                };
+                let room = width.saturating_sub(1);
+                Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(truncate_cells(&sanitize(&line.text), room), style),
+                ])
+            })
+            .collect()
+    };
+    frame.render_widget(Paragraph::new(rows).block(block), area);
+}
+
+// ── Hint line ───────────────────────────────────────────────────────────
+
+/// One key hint: the key, an alternative key, and a long and a short label.
+#[derive(Clone, Copy)]
+struct Hint {
+    key: &'static str,
+    alt: Option<&'static str>,
+    label: &'static str,
+    short: &'static str,
+}
+
+const fn hint(key: &'static str, label: &'static str, short: &'static str) -> Hint {
+    Hint {
+        key,
+        alt: None,
+        label,
+        short,
+    }
+}
+
+const fn hint_alt(
+    key: &'static str,
+    alt: &'static str,
+    label: &'static str,
+    short: &'static str,
+) -> Hint {
+    Hint {
+        key,
+        alt: Some(alt),
+        label,
+        short,
+    }
+}
+
+/// The keys worth advertising right now, most important first.
+fn hints_for(snapshot: &DebugSnapshot<'_>, focus: Pane) -> Vec<Hint> {
+    let mut hints = Vec::new();
+    if !snapshot.source_search.query.is_empty() {
+        hints.push(hint("n/N", "next/prev match", "match"));
+    }
+    match focus {
+        Pane::Breakpoints if !snapshot.breakpoints.is_empty() => hints.extend([
+            hint("Space", "enable/disable", "on/off"),
+            hint("c", "condition", "cond"),
+            hint("d", "delete", "del"),
+        ]),
+        Pane::Watches if !snapshot.watches.is_empty() => hints.extend([
+            hint("Enter", "show value", "view"),
+            hint("d", "delete", "del"),
+        ]),
+        Pane::Locals if !snapshot.locals.is_empty() => {
+            hints.push(hint("Enter", "show value", "view"));
+        }
+        Pane::Stack if snapshot.stack.len() > 1 => {
+            hints.push(hint("j/k", "choose frame", "frame"));
+        }
+        Pane::Events => hints.push(hint("/", "filter", "filter")),
+        _ => {}
+    }
+    match snapshot.app_state {
+        AppState::Stopped => hints.extend([
+            hint_alt("F5", "c", "continue", "cont"),
+            hint_alt("F10", "n", "step over", "over"),
+            hint_alt("F11", "s", "step into", "into"),
+            hint_alt("S-F11", "S", "step out", "out"),
+            hint("b", "breakpoint", "bp"),
+            hint("e", "eval", "eval"),
+            hint("w", "watch", "watch"),
+        ]),
+        AppState::Running => hints.push(hint("p", "pause", "pause")),
+        AppState::Completed | AppState::Dead | AppState::LoadFailed => hints.extend([
+            hint("r", "restart", "restart"),
+            hint("b", "breakpoint", "bp"),
+        ]),
+        AppState::Starting | AppState::Ready | AppState::Loading => {}
+    }
+    hints.push(hint("?", "help", "help"));
+    if snapshot.app_state != AppState::Stopped {
+        hints.push(hint("q", "quit", "quit"));
+    }
+    hints
+}
+
+#[derive(Clone, Copy)]
+enum HintDensity {
+    WithAlternatives,
+    Labels,
+    Short,
+    KeysOnly,
+}
+
+fn hint_variant(hints: &[Hint], density: HintDensity) -> chrome::Variant {
+    let mut variant = chrome::Variant::new().push(tokens::FG, " ");
+    for (index, hint) in hints.iter().enumerate() {
+        if index > 0 {
+            variant = variant.push(tokens::FG_MUTED, "  ");
+        }
+        let key = match (density, hint.alt) {
+            (HintDensity::WithAlternatives, Some(alt)) => format!("{}/{alt}", hint.key),
+            _ => hint.key.to_string(),
+        };
+        variant = variant.push(tokens::HELP_KEY, key);
+        let label = match density {
+            HintDensity::WithAlternatives | HintDensity::Labels => Some(hint.label),
+            HintDensity::Short => Some(hint.short),
+            // Help keeps its word even at the tightest density: it is the
+            // way to everything that was dropped.
+            HintDensity::KeysOnly => (hint.key == "?").then_some(hint.label),
+        };
+        if let Some(label) = label {
+            variant = variant.push(tokens::FG_DIM, format!(" {label}"));
+        }
+    }
+    variant
 }
 
 fn render_hintline(
     frame: &mut Frame<'_>,
     area: Rect,
     snapshot: &DebugSnapshot<'_>,
+    ui: &DebugUiState,
     prompt: Option<&PromptInput>,
     theme: &Theme,
 ) {
-    if let Some(prompt) = prompt {
+    if ui.confirm_quit {
         let line = Line::from(vec![
-            Span::styled(format!(":{}> ", prompt.label), theme.command_prompt()),
-            Span::styled(prompt.buffer.clone(), theme.command_input()),
-            Span::styled("█", theme.command_prompt()),
+            Span::styled(
+                " End the debug session and quit? ",
+                theme.style(&tokens::DEBUG_STATE_ERROR),
+            ),
+            Span::styled("  y", theme.help_key()),
+            Span::styled(" quit   ", theme.fg_dim()),
+            Span::styled("any other key", theme.help_key()),
+            Span::styled(" keep debugging", theme.fg_dim()),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
+    if let Some(prompt) = prompt {
+        render_prompt(frame, area, prompt, theme);
+        return;
+    }
+    if ui.popup.is_some() {
+        let line = Line::from(vec![
+            Span::styled(" Esc", theme.help_key()),
+            Span::styled(" close  ", theme.fg_dim()),
+            Span::styled("j/k", theme.help_key()),
+            Span::styled(" scroll", theme.fg_dim()),
         ]);
         frame.render_widget(Paragraph::new(line), area);
         return;
     }
 
-    // Hints keep their tersest form and the status takes what is left. A status
-    // too narrow to read is dropped rather than shown as a stub, matching the
-    // explorer.
-    const MIN_STATUS_CELLS: usize = 12;
+    // The status is the answer to whatever the user just did; it keeps up
+    // to a third of the row and is shortened past that. Hints take the rest
+    // at the densest phrasing that fits.
     let total_width = area.width as usize;
-    let hints = crate::chrome::fit(
-        &[
-            crate::chrome::Variant::new().push(
-                crate::tokens::STATUS_PILL_INACTIVE,
-                super::bindings::compact_hints(),
-            ),
-            crate::chrome::Variant::new()
-                .push(crate::tokens::STATUS_PILL_INACTIVE, " ?:help  q:quit "),
-        ],
-        total_width.saturating_sub(MIN_STATUS_CELLS),
+    let status = single_line(snapshot.status);
+    let hints = hints_for(snapshot, ui.focus);
+    // Labelled hints beat a status that repeats the title bar: when the
+    // status would push the hints down to bare keys, the status yields.
+    let short_hints = chrome::fit(
+        &[hint_variant(&hints, HintDensity::Short)],
+        usize::from(u16::MAX),
         theme,
-    );
-
-    let mut spans = hints.spans;
-    let room = total_width.saturating_sub(hints.width + 2);
-    if room >= MIN_STATUS_CELLS
-        && let Some(status) = crate::chrome::elide(snapshot.status, room, theme)
-    {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(status, theme.detail_value_accent()));
+    )
+    .width;
+    let mut status_reserve = if status.is_empty() {
+        0
+    } else {
+        cells(&status).clamp(12, total_width / 3) + 2
+    };
+    if short_hints + status_reserve > total_width && total_width >= short_hints + 2 {
+        status_reserve = total_width - short_hints - 2;
     }
-    let line = Line::from(spans);
-    frame.render_widget(Paragraph::new(line), area);
+    let ladder = [
+        HintDensity::WithAlternatives,
+        HintDensity::Labels,
+        HintDensity::Short,
+        HintDensity::KeysOnly,
+    ]
+    .map(|density| hint_variant(&hints, density));
+    let left = chrome::fit(&ladder, total_width.saturating_sub(status_reserve), theme);
+    let room = total_width.saturating_sub(left.width + 2);
+    let right = match chrome::elide(&status, room, theme) {
+        Some(status) if room >= 8 => chrome::Row {
+            width: cells(&status) + 1,
+            spans: vec![
+                Span::styled(status, theme.detail_value_accent()),
+                Span::raw(" "),
+            ],
+        },
+        _ => chrome::Row::empty(),
+    };
+    frame.render_widget(
+        Paragraph::new(chrome::justify(left, right, total_width)),
+        area,
+    );
 }
 
-fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, theme: &Theme, scroll: u16) {
-    // Use nearly all of the product-owned viewport to keep the primary
-    // execution bindings visible without an initial scroll.
-    let popup = centered_rect(75, 95, area);
+fn render_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PromptInput, theme: &Theme) {
+    let width = area.width as usize;
+    let label = format!(" {} › ", prompt.label);
+    let mut cursor = prompt.cursor.min(prompt.buffer.len());
+    while !prompt.buffer.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    let (before, after) = prompt.buffer.split_at(cursor);
+    let room = width.saturating_sub(cells(&label) + 1);
+    // Keep the cursor in view: show the end of what precedes it when the
+    // buffer is wider than the row.
+    let before = tail_cells(before, room.saturating_sub(room / 4).max(1));
+    let after = truncate_cells(after, room.saturating_sub(cells(&before)));
+    let used = cells(&label) + cells(&before) + 1 + cells(&after);
+    let mut spans = vec![
+        Span::styled(label, theme.command_prompt()),
+        Span::styled(before, theme.command_input()),
+        Span::styled("█", theme.command_prompt()),
+        Span::styled(after, theme.command_input()),
+    ];
+    let placeholder_room = width.saturating_sub(used + 3);
+    if !prompt.placeholder.is_empty() && placeholder_room >= 12 {
+        let placeholder = truncate_cells(&prompt.placeholder, placeholder_room);
+        let gap = width.saturating_sub(used + cells(&placeholder) + 1).max(2);
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled(placeholder, theme.fg_muted()));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+// ── Overlays ────────────────────────────────────────────────────────────
+
+fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, theme: &Theme, scroll: &mut u16) {
+    let popup = centered_rect(86, 92, area);
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .title(Span::styled(
-            " tcld debug — keybindings  (j/k to scroll · q/Esc to dismiss) ",
+            " tcld debug — keybindings ",
             theme.status_pill_active(),
         ))
+        .title_bottom(Line::from(Span::styled(
+            " j/k scroll · Esc or ? closes ",
+            theme.fg_muted(),
+        )))
         .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
         .border_style(theme.border_focused());
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let lines: Vec<Line> = super::bindings::help_lines()
-        .into_iter()
-        .map(|line| Line::from(Span::styled(line, theme.detail_value())))
-        .collect();
-    let max_scroll = lines.len().saturating_sub(inner.height as usize) as u16;
-    let scroll = scroll.min(max_scroll);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        inner,
-    );
+    let sections = super::bindings::help_sections();
+    let keys_width = sections
+        .iter()
+        .flat_map(|section| section.rows.iter())
+        .map(|(keys, _)| cells(keys))
+        .max()
+        .unwrap_or(8)
+        .min(18);
+    // Two columns when there is room, so the common keys fit without
+    // scrolling; sections never split across columns.
+    let two_columns = inner.width >= 96;
+    let column_width = if two_columns {
+        (inner.width / 2) as usize
+    } else {
+        inner.width as usize
+    };
+    let section_lines = |section: &super::bindings::HelpSection| {
+        let mut lines = vec![Line::from(Span::styled(
+            section.title,
+            theme.help_section_title(),
+        ))];
+        for (keys, description) in &section.rows {
+            let padding = " ".repeat(keys_width.saturating_sub(cells(keys)));
+            let room = column_width.saturating_sub(keys_width + 5);
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {keys}"), theme.help_key()),
+                Span::raw(padding),
+                Span::styled(
+                    format!("  {}", truncate_cells(description, room)),
+                    theme.help_desc(),
+                ),
+            ]));
+        }
+        lines.push(Line::from(""));
+        lines
+    };
+    let mut columns: Vec<Vec<Line>> = vec![Vec::new()];
+    if two_columns {
+        let total: usize = sections.iter().map(|s| s.rows.len() + 2).sum();
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        let mut used = 0usize;
+        for section in &sections {
+            let lines = section_lines(section);
+            if used < total / 2 {
+                used += lines.len();
+                left.extend(lines);
+            } else {
+                right.extend(lines);
+            }
+        }
+        columns = vec![left, right];
+    } else {
+        for section in &sections {
+            columns[0].extend(section_lines(section));
+        }
+    }
+    let content_height = columns.iter().map(Vec::len).max().unwrap_or(0);
+    let max_scroll = content_height.saturating_sub(inner.height as usize) as u16;
+    *scroll = (*scroll).min(max_scroll);
+    let areas = if two_columns {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(inner)
+            .to_vec()
+    } else {
+        vec![inner]
+    };
+    for (column, area) in columns.into_iter().zip(areas) {
+        frame.render_widget(Paragraph::new(column).scroll((*scroll, 0)), area);
+    }
+}
+
+fn render_value_popup(frame: &mut Frame<'_>, area: Rect, popup: &mut ValuePopup, theme: &Theme) {
+    let rect = centered_rect(70, 60, area);
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(Span::styled(
+            format!(" {} ", popup.title),
+            theme.panel_title_focused(),
+        ))
+        .title_bottom(Line::from(Span::styled(
+            " j/k scroll · Esc closes ",
+            theme.fg_muted(),
+        )))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
+        .border_style(theme.border_focused());
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let body = sanitize(&popup.body);
+    let max_scroll = wrapped_rows(&body, inner.width as usize).saturating_sub(inner.height);
+    popup.scroll = popup.scroll.min(max_scroll);
+    let paragraph = Paragraph::new(body)
+        .style(theme.detail_value())
+        .wrap(Wrap { trim: false })
+        .scroll((popup.scroll, 0));
+    frame.render_widget(paragraph, inner);
 }
 
 fn render_picker_overlay(
@@ -1018,10 +1621,7 @@ fn render_picker_overlay(
     picker: &super::types::PickerOverlay<'_>,
     theme: &Theme,
 ) {
-    if picker.entries.is_empty() {
-        return;
-    }
-    let height = (picker.entries.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let height = (picker.entries.len().max(1) as u16 + 2).min(area.height.saturating_sub(2));
     let width = area.width.saturating_sub(8);
     let popup = Rect {
         x: area.x + 4,
@@ -1036,9 +1636,20 @@ fn render_picker_overlay(
             theme.panel_title_focused(),
         ))
         .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
         .border_style(theme.border_focused());
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+    if picker.entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "  no procs match — keep typing or press Esc",
+                theme.empty_state(),
+            )),
+            inner,
+        );
+        return;
+    }
 
     let visible = inner.height as usize;
     let cursor = picker.selected.unwrap_or(0);
@@ -1073,21 +1684,39 @@ fn render_picker_overlay(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-pub fn panel_block<'a>(title: &'a str, focused: bool, theme: &'a Theme) -> Block<'a> {
-    let border_style = if focused {
-        theme.border_focused()
-    } else {
-        theme.border_dim()
-    };
-    let title_style = if focused {
-        theme.panel_title_focused()
-    } else {
-        theme.panel_title()
-    };
+// ── Shared pieces ───────────────────────────────────────────────────────
+
+fn base_block(focused: bool, theme: &Theme) -> Block<'_> {
+    // Focus reads from the border's weight as well as its color, so it
+    // survives monochrome terminals and `--no-colors`.
     Block::default()
         .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Span::styled(title.to_string(), title_style))
+        .border_type(if focused {
+            BorderType::Thick
+        } else {
+            BorderType::Plain
+        })
+        .border_style(if focused {
+            theme.border_focused()
+        } else {
+            theme.border_dim()
+        })
+}
+
+pub fn panel_block<'a>(title: &str, focused: bool, theme: &'a Theme) -> Block<'a> {
+    let title = if title.starts_with(' ') {
+        title.to_string()
+    } else {
+        format!(" {title} ")
+    };
+    base_block(focused, theme).title(Span::styled(
+        title,
+        if focused {
+            theme.panel_title_focused()
+        } else {
+            theme.panel_title()
+        },
+    ))
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -1135,18 +1764,80 @@ fn is_unsafe_control(c: char) -> bool {
     matches!(c, '\0'..='\u{08}' | '\u{0b}'..='\u{1f}' | '\u{7f}')
 }
 
-/// Shorten `s` to `max` terminal cells.
+/// Collapse a multi-line value onto one row, marking where lines joined.
+fn single_line(value: &str) -> String {
+    if !value.contains('\n') {
+        return value.to_string();
+    }
+    value
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join(" ⏎ ")
+}
+
+/// Keep the first `max` cells of `value`, ending with `…` when cut.
 ///
-/// Delegates to the shared chrome elision, so the debugger measures text the
-/// same way the explorer does: in cells rather than characters, breaking at a
-/// word boundary where the text allows one.
-fn truncate(s: &str, max: usize, theme: &Theme) -> String {
-    crate::chrome::elide(s, max, theme).unwrap_or_default()
+/// Unlike [`chrome::elide`], this cuts anywhere, which is right for paths,
+/// values and log lines: breaking at the last space would throw away the
+/// part of `paused at file:/very/long/path.tcl:31` that matters.
+fn truncate_cells(value: &str, max: usize) -> String {
+    if cells(value) <= max {
+        return value.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for character in value.chars() {
+        let wide = char_cells(character);
+        if used + wide > max - 1 {
+            break;
+        }
+        out.push(character);
+        used += wide;
+    }
+    out.push('…');
+    out
+}
+
+/// Keep the last `max` cells of `value`, starting with `…` when cut.
+fn tail_cells(value: &str, max: usize) -> String {
+    if cells(value) <= max {
+        return value.to_string();
+    }
+    let mut kept = std::collections::VecDeque::new();
+    let mut used = 1;
+    for character in value.chars().rev() {
+        let wide = char_cells(character);
+        if used + wide > max {
+            break;
+        }
+        kept.push_front(character);
+        used += wide;
+    }
+    std::iter::once('…').chain(kept).collect()
+}
+
+/// Rows `text` occupies when wrapped at `width` cells; close enough to bound
+/// scrolling without re-running ratatui's word wrapper.
+fn wrapped_rows(text: &str, width: usize) -> u16 {
+    let width = width.max(1);
+    let rows: usize = text
+        .lines()
+        .map(|line| cells(line).div_ceil(width).max(1))
+        .sum();
+    u16::try_from(rows).unwrap_or(u16::MAX)
 }
 
 /// Cells occupied by a run of text.
 fn cells(value: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(value)
+}
+
+fn char_cells(character: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(character).unwrap_or(0)
 }
 
 fn file_label(path: &str) -> String {
@@ -1157,27 +1848,14 @@ fn file_label(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-fn format_local_clock(when: std::time::SystemTime) -> String {
-    // No external chrono dep; show seconds-of-day from the current
-    // process to keep the log skim-able. Wallclock would need libc.
-    let elapsed = when
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let h = (elapsed / 3600) % 24;
-    let m = (elapsed / 60) % 60;
-    let s = elapsed % 60;
-    format!("{h:02}:{m:02}:{s:02}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Theme;
     use crate::debug::{
-        AppState, BreakpointKindLabel, DebugSnapshot, DebugUiState, EventLine, FocusedProc,
-        LocalRow, PauseKind, PauseReasonLabel, ProcBreakpoint, SourceBlockKind, SourceCommand,
-        SourceLine, SourceOrigin, SourceSearch, StackFrame,
+        AppState, BreakpointKindLabel, DebugSnapshot, DebugUiState, EventLine, EventSeverity,
+        FocusedProc, LocalRow, PauseKind, PauseReasonLabel, ProcBreakpoint, SourceBlockKind,
+        SourceCommand, SourceLine, SourceOrigin, SourceSearch, StackFrame,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1260,6 +1938,7 @@ mod tests {
             ignore_count: 0,
             condition: None,
             kind: BreakpointKindLabel::Line,
+            location_label: None,
         }
     }
 
@@ -1290,13 +1969,17 @@ mod tests {
     ) -> DebugSnapshot<'a> {
         DebugSnapshot {
             title,
+            target_path: path,
             source_path: path,
+            source_label: "",
             source_origin: SourceOrigin::UserScript,
             source_qname: None,
             source_lines: lines,
             secondary_source_lines: &[],
             secondary_highlight_line: None,
             focused_proc: focused,
+            paused_line: focused.map(|focus| focus.line),
+            location_label: None,
             app_state: AppState::Stopped,
             stack: &[],
             inspected_frame: 0,
@@ -1312,6 +1995,7 @@ mod tests {
             source_search: SourceSearch::default(),
             picker: None,
             theme_label: "obsidian",
+            instruction_set: None,
         }
     }
 
@@ -1333,17 +2017,21 @@ mod tests {
             line: Some(2),
             offset_start: Some(0),
             offset_end: Some(1),
+            location_label: Some("demo.tcl:2".into()),
         }];
         let locals = vec![LocalRow {
             name: "a".to_string(),
             value: "1".to_string(),
             changed: true,
+            builtin: false,
         }];
         let breakpoints = vec![line_bp("bp0", "demo", 2)];
         let events = vec![EventLine::pause("paused frame=1 bp=bp0")];
         let snapshot = DebugSnapshot {
             stack: &stack,
             locals: &locals,
+            inspected_frame: 1,
+            location_label: Some("demo · demo.tcl:2"),
             ..snap(
                 "tcld debug",
                 "/tmp/demo.tcl",
@@ -1362,7 +2050,19 @@ mod tests {
         assert!(text.contains("bp0"), "breakpoint id missing");
         assert!(text.contains("a = 1"), "locals row missing");
         assert!(text.contains("paused frame=1"), "event log missing");
-        assert!(text.contains("user script"), "source-origin label missing");
+        assert!(
+            text.contains("Source · demo.tcl"),
+            "source pane label missing"
+        );
+        assert!(
+            text.contains("at demo · demo.tcl:2"),
+            "pause location missing"
+        );
+        assert!(text.contains("Locals · demo"), "locals scope missing");
+        assert!(
+            text.contains("F5/c continue") || text.contains("F5 continue"),
+            "paused hints advertise stepping: {text}"
+        );
     }
 
     #[test]
@@ -1404,7 +2104,11 @@ mod tests {
         let mut ui = DebugUiState::new();
         ui.source_command_cursor = 1;
         let text = render_to_text(&snapshot, &mut ui, None, &theme);
-        assert!(text.contains("command 2/2: expr @7"), "{text}");
+        assert!(text.contains("command 2/2: expr"), "{text}");
+        assert!(
+            !text.contains("@7"),
+            "byte offsets stay out of the title: {text}"
+        );
         assert!(
             text.lines().any(|line| line.contains("2    1")),
             "two breakpoints on the line should be visible in the gutter: {text}"
@@ -1446,7 +2150,11 @@ mod tests {
         let mut ui = DebugUiState::new();
         let text = render_to_text(&snapshot, &mut ui, None, &theme);
         assert!(text.contains("[Dead]"));
-        assert!(text.contains("F5 cont") || text.contains("?:help"));
+        assert!(text.contains("r restart"), "{text}");
+        assert!(
+            !text.contains("F10"),
+            "stepping is not offered while dead: {text}"
+        );
         assert!(text.contains("press r to start"));
         assert!(text.contains("(none — press b"));
     }
@@ -1460,14 +2168,25 @@ mod tests {
             status: "",
             ..snap("tcld debug", "<scratch>", &lines, &[], None, &[])
         };
-        let mut prompt = PromptInput::new("dbg");
+        let mut prompt = PromptInput::new("dbg").with_placeholder("Tab completes");
         prompt.buffer.push_str("vars 1");
         prompt.cursor = prompt.buffer.len();
         let mut ui = DebugUiState::new();
         let text = render_to_text(&snapshot, &mut ui, Some(&prompt), &theme);
         assert!(
-            text.contains(":dbg> vars 1"),
+            text.contains(" dbg › vars 1█"),
             "prompt line missing the typed input — got:\n{text}"
+        );
+        assert!(
+            text.contains("Tab completes"),
+            "placeholder missing:\n{text}"
+        );
+
+        prompt.cursor = 4;
+        let text = render_to_text(&snapshot, &mut ui, Some(&prompt), &theme);
+        assert!(
+            text.contains(" dbg › vars█ 1"),
+            "cursor must render where it is, not at the end — got:\n{text}"
         );
     }
 
@@ -1501,13 +2220,13 @@ mod tests {
     }
 
     #[test]
-    fn render_narrow_terminal_stacks_panes_vertically() {
+    fn render_narrow_terminal_folds_inspector_panes_into_tabs() {
         let theme = Theme::with_palette(true, "obsidian").unwrap();
         let lines: Vec<SourceLine> = vec![SourceLine::raw("puts x")];
         let snapshot = snap("tcld debug", "/tmp/x.tcl", &lines, &[], None, &[]);
         let mut ui = DebugUiState::new();
         let text = render_to_text_sized(&snapshot, &mut ui, None, &theme, 80, 40);
-        // In narrow mode, every pane should appear stacked.
+        // The source keeps full width; every inspector pane is one tab away.
         for needle in [
             " Source ",
             " Stack ",
@@ -1520,6 +2239,99 @@ mod tests {
                 "expected pane {needle} in narrow render — got:\n{text}"
             );
         }
+        assert_eq!(ui.hit.inspector_tabs.len(), 4, "tabs are clickable");
+        assert!(
+            text.contains("(no variables"),
+            "Locals is the default tab: {text}"
+        );
+
+        ui.focus_pane(Pane::Watches);
+        let text = render_to_text_sized(&snapshot, &mut ui, None, &theme, 80, 40);
+        assert!(text.contains("(none — press w to add)"), "{text}");
+        ui.focus_pane(Pane::Source);
+        let text = render_to_text_sized(&snapshot, &mut ui, None, &theme, 80, 40);
+        assert!(
+            text.contains("(none — press w to add)"),
+            "the last inspector tab stays shown while the source has focus: {text}"
+        );
+    }
+
+    #[test]
+    fn long_source_lines_are_clipped_not_wrapped() {
+        let theme = Theme::with_palette(true, "obsidian").unwrap();
+        let long = format!("set value {}", "x".repeat(200));
+        let lines = vec![SourceLine::raw(long), SourceLine::raw("set next 2")];
+        let snapshot = snap("tcld debug", "/tmp/x.tcl", &lines, &[], None, &[]);
+        let mut ui = DebugUiState::new();
+        let text = render_to_text_sized(&snapshot, &mut ui, None, &theme, 120, 32);
+        let rows: Vec<&str> = text.lines().collect();
+        let first = rows
+            .iter()
+            .position(|row| row.contains("set value"))
+            .expect("first line");
+        assert!(rows[first].contains('…'), "clipped edge is marked: {text}");
+        assert!(
+            rows[first + 1].contains("2  set next 2"),
+            "the next source line is the next row: {text}"
+        );
+
+        ui.source_hscroll = 20;
+        let text = render_to_text_sized(&snapshot, &mut ui, None, &theme, 120, 32);
+        assert!(!text.contains("set value"), "scrolled past: {text}");
+    }
+
+    #[test]
+    fn console_is_chronological_and_hides_bookkeeping() {
+        let theme = Theme::with_palette(true, "obsidian").unwrap();
+        let lines: Vec<SourceLine> = vec![SourceLine::raw("puts hi")];
+        let events = vec![
+            EventLine::trace("source unit registered: file demo.tcl"),
+            EventLine::new(EventSeverity::Output, "hello from the program"),
+            EventLine::pause("Paused at demo.tcl:1"),
+        ];
+        let snapshot = snap("tcld debug", "/tmp/x.tcl", &lines, &[], None, &events);
+        let mut ui = DebugUiState::new();
+        let text = render_to_text(&snapshot, &mut ui, None, &theme);
+        assert!(!text.contains("source unit registered"), "{text}");
+        let output = text.find("hello from the program").expect("output");
+        let pause = text.find("Paused at demo.tcl:1").expect("pause");
+        assert!(output < pause, "newest line is at the bottom: {text}");
+
+        let filtered = DebugSnapshot {
+            event_filter: "registered",
+            ..snap("tcld debug", "/tmp/x.tcl", &lines, &[], None, &events)
+        };
+        let text = render_to_text(&filtered, &mut ui, None, &theme);
+        assert!(
+            text.contains("source unit registered"),
+            "filtering reaches bookkeeping lines too: {text}"
+        );
+    }
+
+    #[test]
+    fn quit_confirmation_replaces_the_hint_line() {
+        let theme = Theme::with_palette(true, "obsidian").unwrap();
+        let lines: Vec<SourceLine> = vec![SourceLine::raw("puts hi")];
+        let snapshot = snap("tcld debug", "/tmp/x.tcl", &lines, &[], None, &[]);
+        let mut ui = DebugUiState::new();
+        ui.confirm_quit = true;
+        let text = render_to_text(&snapshot, &mut ui, None, &theme);
+        assert!(text.contains("End the debug session and quit?"), "{text}");
+    }
+
+    #[test]
+    fn side_heights_fit_content_and_leave_locals_the_rest() {
+        let (heights, flex) = side_heights(30, &[2, 0, 1]);
+        assert_eq!(heights, vec![4, 3, 3]);
+        assert_eq!(flex, 20);
+
+        let (heights, flex) = side_heights(16, &[40, 40, 40]);
+        assert!(
+            flex >= 5,
+            "locals keeps a usable minimum: {heights:?} {flex}"
+        );
+        assert!(heights.iter().all(|height| *height >= 3));
+        assert_eq!(heights.iter().sum::<u16>() + flex, 16);
     }
 
     #[test]
@@ -1675,7 +2487,7 @@ mod tests {
         let theme = Theme::with_palette(true, "obsidian").unwrap();
         let lines: Vec<SourceLine> = Vec::new();
         let events = vec![
-            EventLine::info("step into"),
+            EventLine::info("resumed execution"),
             EventLine::pause("paused frame=1"),
             EventLine::error("error_paused divide by zero"),
         ];
@@ -1690,7 +2502,7 @@ mod tests {
             "filtered event missing — got:\n{text}"
         );
         assert!(
-            !text.contains("step into"),
+            !text.contains("resumed execution"),
             "unfiltered event should be hidden — got:\n{text}"
         );
     }

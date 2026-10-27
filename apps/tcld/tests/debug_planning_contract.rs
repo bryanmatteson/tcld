@@ -58,7 +58,7 @@ fn explicit_source_vm_backends_compile_before_the_terminal_gate() {
     assert!(String::from_utf8_lossy(&hybrid.stderr).contains("requires an interactive terminal"));
     let dir = tempfile::tempdir().unwrap();
     let unsupported = dir.path().join("unsupported.tcl");
-    std::fs::write(&unsupported, "puts hello\n").unwrap();
+    std::fs::write(&unsupported, "exec ls\n").unwrap();
     let strict = run_debug(&unsupported, "vm-strict");
     let stderr = String::from_utf8_lossy(&strict.stderr);
     assert!(stderr.starts_with("source_compile_failed:"), "{stderr}");
@@ -69,12 +69,16 @@ fn explicit_source_vm_backends_compile_before_the_terminal_gate() {
         "compile admission precedes TTY: {stderr}"
     );
 
+    // A static `namespace eval` body compiles into the image.
+    let namespace = dir.path().join("namespace-eval.tcl");
+    std::fs::write(&namespace, "namespace eval hidden {set value 1}\n").unwrap();
+    let stderr = String::from_utf8_lossy(&run_debug(&namespace, "hybrid").stderr).into_owned();
+    assert!(
+        stderr.contains("requires an interactive terminal"),
+        "{stderr}"
+    );
+
     for (filename, source, expected) in [
-        (
-            "namespace-eval.tcl",
-            "namespace eval hidden {set value 1}\n",
-            "namespace eval",
-        ),
         (
             "package-require.tcl",
             "package require hidden\n",

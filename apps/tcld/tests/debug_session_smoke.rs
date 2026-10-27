@@ -54,6 +54,7 @@ fn paths() -> NubPaths {
 fn session_breakpoint_pause_and_step_round_trip() {
     let user = std::env::temp_dir().join("tcld_debug_session_smoke.tcl");
     std::fs::write(&user, "set a 1\nset b 2\nset c 3\n").expect("write user script");
+    let canonical_user = user.canonicalize().expect("resolve user script");
 
     let mut session = Session::connect(paths()).expect("session connect");
     session
@@ -75,7 +76,7 @@ fn session_breakpoint_pause_and_step_round_trip() {
 
     // Parsed snapshot should reflect the pause.
     let focused = session.focused_proc().expect("focused proc populated");
-    assert_eq!(focused.source_path.as_deref(), user.to_str());
+    assert_eq!(focused.source_path.as_deref(), canonical_user.to_str());
     assert_eq!(focused.line, 2);
 
     // Stack and locals should be queryable while stopped.

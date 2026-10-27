@@ -20,6 +20,7 @@ pub struct SessionSnapshot {
     pub selections: HashMap<ViewId, usize>,
     pub list_scrolls: HashMap<ViewId, usize>,
     pub doc_scrolls: HashMap<ViewId, usize>,
+    pub doc_cursors: HashMap<ViewId, usize>,
     pub diff_target: Option<String>,
     pub theme: Option<String>,
 }
@@ -82,6 +83,7 @@ pub fn persist<D: DataSource>(
         encode_view_map(&nav.list_scrolls)
     ));
     lines.push(format!("doc_scrolls={}", encode_view_map(&nav.doc_scrolls)));
+    lines.push(format!("doc_cursors={}", encode_view_map(&nav.doc_cursors)));
     lines.push(format!("detail_scroll={}", nav.detail_scroll));
     fs::write(path, lines.join("\n"))
 }
@@ -123,10 +125,9 @@ pub fn restore(
         .is_some_and(|v| matches!(v.as_str(), "true" | "1"));
 
     let focused_pane = match map.get("focused_pane").map(String::as_str) {
-        Some("decompile") => PaneFocus::Decompile,
+        Some("list") | Some("single") => PaneFocus::List,
         Some("context") => PaneFocus::Context,
-        Some("single") => PaneFocus::List,
-        _ => PaneFocus::List,
+        _ => PaneFocus::Decompile,
     };
     let rail_mode = match map.get("rail_mode").map(String::as_str) {
         Some("anchors") => RailMode::Anchors,
@@ -154,10 +155,16 @@ pub fn restore(
         .get("list_scrolls")
         .map(|v| decode_view_map(v, specs))
         .unwrap_or_default();
-    let doc_scrolls = map
+    let doc_scrolls: HashMap<ViewId, usize> = map
         .get("doc_scrolls")
         .map(|v| decode_view_map(v, specs))
         .unwrap_or_default();
+    // Sessions from before the cursor existed treated the top line as
+    // current; start the cursor there.
+    let doc_cursors = map
+        .get("doc_cursors")
+        .map(|v| decode_view_map(v, specs))
+        .unwrap_or_else(|| doc_scrolls.clone());
     let diff_target = map.get("diff_target").cloned();
     let theme = map.get("theme").cloned();
 
@@ -174,6 +181,7 @@ pub fn restore(
         selections,
         list_scrolls,
         doc_scrolls,
+        doc_cursors,
         diff_target,
         theme,
     })

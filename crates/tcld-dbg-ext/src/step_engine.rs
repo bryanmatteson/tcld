@@ -27,6 +27,7 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ffi::CString;
+use std::ops::Range;
 use std::os::raw::{c_int, c_void};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -78,13 +79,17 @@ pub struct EngineCtx {
     /// would be captured levels away from the paused user frame.
     pub paused_trace_level: Option<c_int>,
     /// True when the current command pause belongs to the active target file.
-    /// File StepOver uses this provenance to select the next parsed command
-    /// after the paused command's complete subtree.
+    /// File StepOver uses this provenance to step over the paused command's
+    /// complete subtree.
     pub paused_in_target_file: bool,
-    /// Exact next top-level file command selected by StepOver. File execution
-    /// can enter nested evaluators at trace depths indistinguishable from
+    /// File block and source span of the command a file StepOver steps over.
+    /// The step ends at the first command traced in that file outside the
+    /// span: a later sibling substitution, the command enclosing it, or the
+    /// first command run for the next statement, which is often a
+    /// substitution Tcl runs before the command around it. File execution can
+    /// enter nested evaluators at trace depths indistinguishable from
     /// siblings, so depth alone is not a sound target.
-    pub source_step_target: Option<(BlockId, usize)>,
+    pub source_step_target: Option<(BlockId, Range<usize>)>,
     /// Opcode callback frame depth at the most recent opcode pause.
     /// `None` until the patched Tcl runtime has paused through the
     /// opcode hook at least once.
@@ -564,12 +569,17 @@ unsafe fn capture_paused_stack(
     // command observed at each still-active parent level before replacing the
     // current row below.
     for observed in unsafe { (*ctx_ptr).observed_frames.values() } {
-        if observed.level <= level
-            && !frames
-                .iter()
-                .any(|candidate| candidate.level == observed.level)
+        if observed.level > level {
+            continue;
+        }
+        match frames
+            .iter_mut()
+            .find(|candidate| candidate.level == observed.level)
         {
-            frames.push(observed.clone());
+            // The synthetic global row knows no command; the observed one does.
+            Some(candidate) if candidate.location.is_none() => *candidate = observed.clone(),
+            Some(_) => {}
+            None => frames.push(observed.clone()),
         }
     }
 
@@ -597,11 +607,9 @@ unsafe fn observe_user_frame(
         (*ctx_ptr)
             .observed_frames
             .retain(|level, _| *level <= snapshot.level);
-        if snapshot.level == 0 {
-            (*ctx_ptr).observed_frames.clear();
-        } else {
-            (*ctx_ptr).observed_frames.insert(snapshot.level, snapshot);
-        }
+        // Level 0 is kept too: it is the caller line a paused proc frame
+        // returns to, which the bare global row cannot report.
+        (*ctx_ptr).observed_frames.insert(snapshot.level, snapshot);
     }
 }
 
@@ -611,11 +619,24 @@ unsafe fn user_frame_snapshot(
     frame: &FrameInfo,
     location: &Location,
 ) -> FrameSnapshot {
+    // Commands in a sourced file report the nub's `::source` wrapper as their
+    // proc, but the wrapper evaluates them with `uplevel 1` in its caller's
+    // variable frame. Attribute them to that frame; otherwise a sourced script
+    // claims a proc level of its own, and `uplevel #N` for that level resolves
+    // to whichever debugger frame happens to be active while paused.
+    let runs_in_caller_frame = frame
+        .proc_name
+        .as_deref()
+        .is_some_and(|name| name.trim_start_matches("::") == "source")
+        && frame.frame_type.as_deref() != Some("proc");
     let proc_qname = frame
         .proc_name
         .as_deref()
+        .filter(|_| !runs_in_caller_frame)
         .map(|name| Arc::from(name.trim_start_matches("::")));
-    let level = if proc_qname.is_some() {
+    let level = if runs_in_caller_frame {
+        unsafe { fetch_info_level_depth(interp) }.unwrap_or(0)
+    } else if proc_qname.is_some() {
         unsafe { fetch_info_level_depth(interp) }
             .unwrap_or(frame.level)
             .max(frame.level)
@@ -1018,25 +1039,28 @@ pub unsafe fn set_step_mode(
     let ctx_ptr = lookup_ctx(interp).ok_or_else(|| "step engine not installed".to_string())?;
     unsafe {
         let paused_in_target_file = (*ctx_ptr).paused_in_target_file;
-        (*ctx_ptr).source_step_target = None;
-        if mode == StepMode::StepOver && paused_in_target_file {
-            let current = (*ctx_ptr)
-                .paused_stack
-                .last()
-                .and_then(|frame| frame.location.as_ref())
-                .map(|location| (location.block().clone(), location.byte_offset()));
-            (*ctx_ptr).source_step_target = current.and_then(|(block_id, offset)| {
-                (*ctx_ptr)
+        (*ctx_ptr).source_step_target = (mode == StepMode::StepOver && paused_in_target_file)
+            .then(|| {
+                let location = (*ctx_ptr).paused_stack.last()?.location.as_ref()?;
+                let block = (*ctx_ptr)
                     .state
                     .lock()
-                    .ok()
-                    .and_then(|guard| guard.blocks.get(&block_id).cloned())
-                    .and_then(|block| next_command_after_subtree(block.source(), offset))
-                    .map(|next| (block_id, next))
-            });
+                    .ok()?
+                    .blocks
+                    .get(location.block())?
+                    .clone();
+                let stepped = command_span_at(block.source(), location.byte_offset())?;
+                Some((location.block().clone(), stepped))
+            })
+            .flatten();
+        if (*ctx_ptr).source_step_target.is_some() {
+            // Continue mode never reads the anchor; the file step bounds its
+            // target's depth with it instead.
             (*ctx_ptr).mode = StepMode::Continue;
-            (*ctx_ptr).step_anchor_level = 0;
+            (*ctx_ptr).step_anchor_level = anchor_level;
         } else {
+            // Everything else steps by depth, including a file StepOver from a
+            // pause outside every parsed command.
             (*ctx_ptr).mode = match (mode, paused_in_target_file) {
                 (StepMode::StepOut, true) => StepMode::Continue,
                 _ => mode,
@@ -1047,15 +1071,15 @@ pub unsafe fn set_step_mode(
     Ok(())
 }
 
-fn next_command_after_subtree(source: &str, current_offset: usize) -> Option<usize> {
-    let spans = tcld_syntax::command_spans(source).ok()?;
-    let current = spans
-        .iter()
-        .find(|span| span.start_byte == current_offset)?;
-    spans
-        .iter()
-        .find(|span| span.start_byte >= current.end_byte)
-        .map(|span| span.start_byte)
+/// Source span of the innermost command containing `offset`, including its
+/// nested substitutions and bodies.
+fn command_span_at(source: &str, offset: usize) -> Option<Range<usize>> {
+    tcld_syntax::command_spans(source)
+        .ok()?
+        .into_iter()
+        .filter(|span| (span.start_byte..span.end_byte).contains(&offset))
+        .max_by_key(|span| (span.start_byte, std::cmp::Reverse(span.end_byte)))
+        .map(|span| span.start_byte..span.end_byte)
 }
 
 /// Set the opcode engine's resume mode.
@@ -1476,12 +1500,27 @@ unsafe fn handler_body(
             .as_ref()
             .is_some_and(|(block, offset)| location.block() == block && resolved_offset == *offset)
     });
-    let source_step_match = location_opt.as_ref().is_some_and(|location| unsafe {
-        (*ctx_ptr)
-            .source_step_target
-            .as_ref()
-            .is_some_and(|(block, offset)| location.block() == block && resolved_offset == *offset)
-    });
+    // File StepOver ends at the first command whose pause would be reported in
+    // the stepped file outside the stepped command. Procs, eval scripts, and
+    // other files it runs report locations of their own, and event callbacks
+    // it services run deeper than the paused command (an entry pause has no
+    // traced depth to compare against).
+    let pause_offset = frame_pause_location
+        .as_ref()
+        .map(|location| (location.block(), location.byte_offset()))
+        .or_else(|| {
+            location_opt
+                .as_ref()
+                .map(|location| (location.block(), resolved_offset))
+        });
+    let source_step_match = !debugger_internal_location
+        && !is_user_proc_frame
+        && (anchor_level == 0 || level <= anchor_level)
+        && unsafe { (*ctx_ptr).source_step_target.as_ref() }.is_some_and(|(block, stepped)| {
+            pause_offset.is_some_and(|(pause_block, offset)| {
+                pause_block == block && !stepped.contains(&offset)
+            })
+        });
     if entry_match {
         unsafe {
             (*ctx_ptr).stop_on_entry = None;
@@ -1628,6 +1667,8 @@ unsafe fn handler_body(
     // the exact scale the handler compares against.
     unsafe {
         (*ctx_ptr).paused_trace_level = Some(level);
+        // Whatever stopped here, a file step still in flight is over.
+        (*ctx_ptr).source_step_target = None;
         (*ctx_ptr).paused_in_target_file = (*ctx_ptr)
             .active_target_file
             .as_ref()
@@ -1890,6 +1931,7 @@ unsafe fn opcode_boundary_body(
     unsafe {
         (*ctx_ptr).paused_trace_level = None;
         (*ctx_ptr).paused_opcode_level = Some(level);
+        (*ctx_ptr).source_step_target = None;
     }
     let frame = unsafe { fetch_frame_info(interp) }.unwrap_or_default();
     let location = opcode_pause_location(interp, &frame);
@@ -2181,14 +2223,23 @@ unsafe extern "C" fn trace_delete(client_data: *mut c_void) {
     if client_data.is_null() {
         return;
     }
-    // The Box was already taken by uninstall; this is the Tcl-side
-    // delete callback. To handle the case where the interp is destroyed
-    // before uninstall is called, we attempt to free here only if the
-    // ctx is still in the registry. Otherwise the registry's removal
-    // path already freed it.
-    // (In Tier 0 we accept a small leak risk on abnormal interp teardown
-    // rather than risk a double-free.)
-    let _ = client_data;
+    // Tcl deletes the trace either from `uninstall`, which takes the ctx out
+    // of the registry first and frees it afterwards, or while deleting an
+    // interpreter nobody uninstalled (a child given `slave_install`, say).
+    // Only the second still finds the ctx registered. Reclaim it, or the
+    // next interpreter allocated at that address would "already" have an
+    // engine: this stale one, with a dead interp and someone else's state.
+    let ctx = client_data as *mut EngineCtx;
+    let orphaned = engine_registry().lock().ok().and_then(|mut map| {
+        let key = map
+            .iter()
+            .find(|(_, entry)| entry.0 == ctx)
+            .map(|(key, _)| *key)?;
+        map.remove(&key)
+    });
+    if let Some(entry) = orphaned {
+        unsafe { drop(Box::from_raw(entry.0)) };
+    }
 }
 
 #[cfg(test)]
@@ -2196,24 +2247,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_step_target_advances_past_the_current_command_subtree() {
+    fn file_step_skips_the_innermost_command_at_the_paused_offset() {
         let source = "package provide demo [lindex {Revision: 1.0} 1]\n\
 namespace eval demo {\n    set nested 1\n}\n\
 proc demo::run {} {\n    puts nested\n}\n";
+        let lindex = source.find("lindex").unwrap();
         let namespace = source.find("namespace eval").unwrap();
         let nested_set = source.find("set nested").unwrap();
         let procedure = source.find("proc demo::run").unwrap();
+        let span = |offset| command_span_at(source, offset).unwrap();
 
-        assert_eq!(next_command_after_subtree(source, 0), Some(namespace));
-        assert_eq!(
-            next_command_after_subtree(source, namespace),
-            Some(procedure)
-        );
-        assert_eq!(
-            next_command_after_subtree(source, nested_set),
-            Some(procedure)
-        );
-        assert_eq!(next_command_after_subtree(source, procedure), None);
+        // A statement's span covers the substitutions Tcl ran before it.
+        assert_eq!(span(0).start, 0);
+        assert!(span(0).contains(&lindex) && !span(0).contains(&namespace));
+        // A substitution is stepped over on its own, from anywhere inside it.
+        assert_eq!(span(lindex).start, lindex);
+        assert_eq!(span(lindex + 7), span(lindex));
+        assert!(span(lindex).end < namespace);
+        // A body belongs to the command that evaluates it.
+        assert!(span(namespace).contains(&nested_set) && !span(namespace).contains(&procedure));
+        assert_eq!(span(nested_set).start, nested_set);
+        assert!(!span(nested_set).contains(&procedure));
+        assert_eq!(command_span_at(source, source.len()), None);
     }
 
     #[test]

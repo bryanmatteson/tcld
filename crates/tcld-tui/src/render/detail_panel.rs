@@ -4,38 +4,24 @@ use crate::state::PaneFocus;
 use crate::views;
 use ratatui::layout::Rect;
 use ratatui::text::Span;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 const COMPACT_DETAIL_ALIAS_WIDTH: usize = 18;
 
 /// Render the detail/context panel (right side in multi-pane layout).
 pub fn render<D: DataSource>(frame: &mut ratatui::Frame<'_>, area: Rect, app: &TuiApp<D>) {
     let focused = app.layout.focused_pane == PaneFocus::Context;
-    let border_style = if focused {
-        app.theme.border_focused()
-    } else {
-        app.theme.border()
-    };
-    let title_style = if focused {
-        app.theme.panel_title_focused()
-    } else {
-        app.theme.panel_title()
-    };
 
     // Trace mode: show trace frame info instead of normal detail
     let is_trace = app.nav.trace_mode && app.data.trace_len() > 0;
-    let title = if app.nav.expanded {
-        " Inspector Expanded "
-    } else if is_trace {
-        " Inspector Trace "
-    } else {
-        " Inspector "
+    let title = match (app.nav.expanded, is_trace) {
+        (true, true) => " Inspector · trace · zoomed (z restores) ",
+        (true, false) => " Inspector · zoomed (z restores) ",
+        (false, true) => " Inspector · trace ",
+        (false, false) => " Inspector ",
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Span::styled(title, title_style));
+    let block = super::panel_block(title.to_string(), focused, &app.theme);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -68,7 +54,7 @@ pub fn render<D: DataSource>(frame: &mut ratatui::Frame<'_>, area: Rect, app: &T
         app.data.list_detail(view, app.nav.selection(view))
     } else {
         app.data
-            .document_detail(view, app.nav.doc_scroll(view), app.search.query.as_deref())
+            .document_detail(view, app.nav.doc_cursor(view), app.search.query.as_deref())
     };
 
     match detail {

@@ -1,32 +1,32 @@
  tcld explore │ expr.tbc  │  [b] Browse  [C] Compare  │  tcl 8.0 · source: generated from tests/fixtures/expr.tbc
-┌ Workspace ───────────────┐┌ Canvas - Instructions (23) ────────────────────────────┐┌ Inspector Trace ───────────────┐
-│> ⊞ Instructions       [i]││▎▸      (0) push1 0             # result ◂              ││instruction: 0                  │
-│  ◈ Literals           [l]││        (2) push1 1             # int(10                ││pc: 0                           │
-│  ⚡  Exceptions        [e]││        (4) push1 2             #                       ││opcode: push1                   │
-│  ☰  Source            [c]││        (6) push1 3             # *                     ││argc: 0                         │
-│  ◇ Decompile          [d]││        (8) push1 2             #                       ││delta: 1                        │
-│  ◊ Summary            [s]││       (10) beginCatch4 0       # 0                     ││stack: 0 -> 1                   │
-└──────────────────────────┘│       (15) push1 4             # 16                    ││pop: []                         │
-                            │       (17) callBuiltinFunc1 16 # 16                    ││push: ["result"]                │
-                            │ ┌ Command Palette ─────────────────────────────────────────┐t: [2]                       │
-                            │ │Filter: decompile | 2 matches                             │                             │
-                            │ │> Open Decompile view  [d]                                │                             │
-                            │ │  Reveal selected instruction in Decompile                │                             │
-                            │ │                                                          │                             │
-                            │ │                                                          │                             │
-                            │ │                                                          │                             │
-                            │ │                                                          │                             │
-                            │ │                                                          │                             │
-                            │ │                                                          │                             │
-                            │ │↑/↓: move | Enter: run | Esc: close | Showing 1-2 of 2    │                             │
-                            │ └──────────────────────────────────────────────────────────┘                             │
-                            │ ▸     (36) push1 0             # result                ││                                │
-                            │       (38) loadScalarStk                               ││                                │
-                            │ ▸     (39) done                                        ││                                │
-                            │                                                        ││                                │
-                            │                                                        ││                                │
-                            │                                                        ││                                │
-                            │                                                        ││                                │
-                            │                                                        ││                                │
-                            └────────────────────────────────────────────────────────┘└────────────────────────────────┘
- Instructions  #1/23  search 1/1 expr  trace on #0              : Cmd | Ctrl-P | ? | / Search | t Trace | :export Export
+┌ Views ───────────────────┐┏ Instructions · 23 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ Inspector · trace ─────────────┐
+│▸ ⊞ Instructions       [i]│┃▎▸      (0) push1 0             # result ◂              ┃│instruction: 0                  │
+│  ◈ Literals           [l]│┃        (2) push1 1             # int(10                ┃│pc: 0                           │
+│  ⚡  Exceptions        [e]│┃        (4) push1 2             #                       ┃│opcode: push1                   │
+│  ☰  Source            [c]│┃        (6) push1 3             # *                     ┃│argc: 0                         │
+│  ◇ Decompile          [d]│┃        (8) push1 2             #                       ┃│delta: 1                        │
+│  ◊ Summary            [s]│┃       (10) beginCatch4 0       # 0                     ┃│stack: 0 -> 1                   │
+└──────────────────────────┘┃       (15) push1 4             # 16                    ┃│pop: []                         │
+                            ┃       (17) callBuiltinFunc1 16 # 16                    ┃│push: ["result"]                │
+                            ┃ ┌ Command Palette ─────────────────────────────────────────┐t: [2]                       │
+                            ┃ │Filter: decompile | 2 matches                             │                             │
+                            ┃ │> Open Decompile view  [d]                                │                             │
+                            ┃ │  Reveal selected instruction in Decompile                │                             │
+                            ┃ │                                                          │                             │
+                            ┃ │                                                          │                             │
+                            ┃ │                                                          │                             │
+                            ┃ │                                                          │                             │
+                            ┃ │                                                          │                             │
+                            ┃ │                                                          │                             │
+                            ┃ │↑/↓: move | Enter: run | Esc: close | Showing 1-2 of 2    │                             │
+                            ┃ └──────────────────────────────────────────────────────────┘                             │
+                            ┃ ▸     (36) push1 0             # result                ┃│                                │
+                            ┃       (38) loadScalarStk                               ┃│                                │
+                            ┃ ▸     (39) done                                        ┃│                                │
+                            ┃                                                        ┃│                                │
+                            ┃                                                        ┃│                                │
+                            ┃                                                        ┃│                                │
+                            ┃                                                        ┃│                                │
+                            ┃                                                        ┃│                                │
+                            ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────┘
+ Instructions  #1/23  search 1/1 expr  trace on #0       Enter follow  n/N match  v dec  t trace  Ctrl-P palette  ? help

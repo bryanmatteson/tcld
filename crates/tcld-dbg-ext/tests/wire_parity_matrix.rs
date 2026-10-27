@@ -294,8 +294,32 @@ fn parity_bp_export_via_wire() {
         })
         .expect("bp_add");
     let exp = h.ctrl.send(Op::BpExport).expect("bp_export");
-    assert!(exp.payload().contains("kind line"));
-    assert!(exp.payload().contains("condition"));
+    let parse_record = |payload: &str| {
+        let rows = tcld_debug_wire::tcl_list::tcl_list_parse(payload).expect("breakpoint list");
+        assert_eq!(rows.len(), 1, "expected one breakpoint: {payload}");
+        let fields =
+            tcld_debug_wire::tcl_list::tcl_list_parse(&rows[0]).expect("breakpoint record");
+        assert_eq!(fields.len() % 2, 0, "expected a dictionary: {payload}");
+        fields
+            .chunks_exact(2)
+            .map(|pair| (pair[0].clone(), pair[1].clone()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let exported = parse_record(exp.payload());
+    // Wire persistence retains the logical procedure target rather than its
+    // transient core line-breakpoint binding.
+    assert_eq!(exported["kind"], "proc_command");
+    assert_eq!(exported["qname"], "demo");
+    assert_eq!(exported["offset"], off.to_string());
+    assert_eq!(exported["len"], "1");
+    assert_eq!(exported["condition"], "$a > 0");
+    h.ctrl
+        .send(Op::BpImport {
+            serialized: exp.payload().into(),
+        })
+        .expect("bp_import");
+    let round_trip = h.ctrl.send(Op::BpExport).expect("bp_export after import");
+    assert_eq!(parse_record(round_trip.payload()), exported);
 }
 
 // ── Tier 3: watch expressions evaluated at pause ─────────────────────

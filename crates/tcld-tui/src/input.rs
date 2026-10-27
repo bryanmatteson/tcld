@@ -2,7 +2,7 @@ use crate::app::{PaletteAction, TuiApp};
 use crate::bindings::{self, BindingAction};
 use crate::data::{DataSource, ViewId};
 use crate::helpers::point_in_rect;
-use crate::state::{HitRegion, ModeLayoutProfile, PaneFocus};
+use crate::state::{HitRegion, ModeLayoutProfile, PaneFocus, RailTarget};
 use crate::views;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
@@ -13,19 +13,6 @@ pub fn handle_key<D: DataSource>(app: &mut TuiApp<D>, key: KeyEvent) {
         Some(BindingAction::QuitImmediate)
     ) {
         app.overlay.should_quit = true;
-    }
-
-    // Quit confirmation intercept
-    if app.overlay.quit_confirm {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                app.overlay.should_quit = true;
-            }
-            _ => {
-                app.overlay.quit_confirm = false;
-            }
-        }
-        return;
     }
 
     // Help overlay
@@ -200,13 +187,14 @@ fn handle_command_key<D: DataSource>(app: &mut TuiApp<D>, key: KeyEvent) {
 }
 
 fn handle_normal_key<D: DataSource>(app: &mut TuiApp<D>, key: KeyEvent) {
-    // Clear command output on any keypress
+    // Messages answer the key that produced them; the next key clears them
+    // so a stale message never describes a state that has moved on.
     app.cmd.output = None;
+    app.status = "ready".to_string();
 
     if let Some(action) = bindings::resolve_normal(app, key) {
         match action {
             BindingAction::QuitImmediate => app.overlay.should_quit = true,
-            BindingAction::QuitConfirm => app.overlay.quit_confirm = true,
             BindingAction::Help => app.overlay.show_help = true,
             BindingAction::Command => {
                 app.cmd.active = true;
@@ -245,13 +233,26 @@ fn handle_normal_key<D: DataSource>(app: &mut TuiApp<D>, key: KeyEvent) {
                     app.navigate_group(delta.into());
                 }
             }
+            BindingAction::Follow => {
+                if app.current_layout_profile() == ModeLayoutProfile::Browse {
+                    if app.layout.focused_pane == PaneFocus::List
+                        && !views::is_list_view(app.specs(), app.current_view())
+                    {
+                        // From the outline, Enter opens the line in the canvas.
+                        app.layout.focused_pane = PaneFocus::Decompile;
+                    } else {
+                        app.follow_link();
+                    }
+                }
+            }
+            BindingAction::Back => app.go_back(),
             BindingAction::ToggleInspector => {
                 app.nav.expanded = !app.nav.expanded;
                 app.nav.detail_scroll = 0;
                 app.status = if app.nav.expanded {
-                    "expanded inspector".to_string()
+                    "inspector zoomed · z restores".to_string()
                 } else {
-                    "collapsed inspector".to_string()
+                    "inspector restored".to_string()
                 };
             }
             BindingAction::FocusNext => focus_next(app),
@@ -273,6 +274,9 @@ fn handle_normal_key<D: DataSource>(app: &mut TuiApp<D>, key: KeyEvent) {
                 app.switch_mode(mode);
             }
             BindingAction::View(view) => {
+                if view != app.current_view() {
+                    app.push_history();
+                }
                 app.switch_to_view(view);
             }
         }
@@ -339,16 +343,26 @@ fn next_char_boundary(input: &str, cursor: usize) -> usize {
         .unwrap_or(cursor)
 }
 
+/// Whether the rail has anything for the keyboard to do: list views are
+/// navigated in the canvas itself, documents also through their outline.
+fn rail_is_focusable<D: DataSource>(app: &mut TuiApp<D>) -> bool {
+    let view = app.current_view();
+    !views::is_list_view(app.specs(), view) && !app.outline(view).is_empty()
+}
+
 fn focus_next<D: DataSource>(app: &mut TuiApp<D>) {
     if app.current_layout_profile() == ModeLayoutProfile::Compare {
         set_compare_focus(app, !app.diff.focus_right);
         return;
     }
+    let rail = rail_is_focusable(app);
     app.layout.focused_pane = match app.layout.focused_pane {
         PaneFocus::List => PaneFocus::Decompile,
         PaneFocus::Decompile => PaneFocus::Context,
-        PaneFocus::Context => PaneFocus::List,
+        PaneFocus::Context if rail => PaneFocus::List,
+        PaneFocus::Context => PaneFocus::Decompile,
     };
+    announce_focus(app);
 }
 
 fn focus_previous<D: DataSource>(app: &mut TuiApp<D>) {
@@ -356,10 +370,23 @@ fn focus_previous<D: DataSource>(app: &mut TuiApp<D>) {
         set_compare_focus(app, !app.diff.focus_right);
         return;
     }
+    let rail = rail_is_focusable(app);
     app.layout.focused_pane = match app.layout.focused_pane {
         PaneFocus::List => PaneFocus::Context,
-        PaneFocus::Decompile => PaneFocus::List,
+        PaneFocus::Decompile if rail => PaneFocus::List,
+        PaneFocus::Decompile => PaneFocus::Context,
         PaneFocus::Context => PaneFocus::Decompile,
+    };
+    announce_focus(app);
+}
+
+fn announce_focus<D: DataSource>(app: &mut TuiApp<D>) {
+    app.status = match app.layout.focused_pane {
+        PaneFocus::List => "outline focused · j/k jumps between procs".to_string(),
+        PaneFocus::Decompile => {
+            format!("{} focused", views::title(app.specs(), app.current_view()))
+        }
+        PaneFocus::Context => "inspector focused · j/k scrolls it".to_string(),
     };
 }
 
@@ -383,14 +410,14 @@ fn navigate_to_edge<D: DataSource>(app: &mut TuiApp<D>, last: bool) {
         app.nav.selections.insert(view, selection);
         update_group_focus(app);
     } else {
-        let scroll = if last {
+        let line = if last {
             app.cached_document(view)
                 .map(|document| document.lines.len().saturating_sub(1))
                 .unwrap_or(0)
         } else {
             0
         };
-        app.nav.doc_scrolls.insert(view, scroll);
+        app.nav.doc_cursors.insert(view, line);
     }
 }
 
@@ -415,13 +442,12 @@ fn handle_layered_escape<D: DataSource>(app: &mut TuiApp<D>) {
         app.status = "trace mode disabled".to_string();
     } else if app.search.query.is_some() {
         app.search = Default::default();
+        app.status = "search cleared".to_string();
+    } else if app.layout.focused_pane != PaneFocus::Decompile {
+        app.layout.focused_pane = PaneFocus::Decompile;
     } else {
-        let default = app.data.default_view();
-        if app.current_view() != default {
-            app.switch_to_view(default);
-        } else {
-            app.overlay.quit_confirm = true;
-        }
+        // Esc only ever backs out of things; it never quits.
+        app.status = "nothing to close · q quits".to_string();
     }
 }
 
@@ -442,12 +468,8 @@ fn navigate_active<D: DataSource>(app: &mut TuiApp<D>, delta: i32) {
         return;
     }
 
+    let view = app.current_view();
     match app.layout.focused_pane {
-        PaneFocus::Decompile if !views::is_list_view(app.specs(), app.current_view()) => {
-            scroll_doc(app, app.current_view(), delta);
-            return;
-        }
-        PaneFocus::Decompile => {}
         PaneFocus::Context => {
             if delta > 0 {
                 app.nav.detail_scroll = app.nav.detail_scroll.saturating_add(delta as usize);
@@ -456,13 +478,15 @@ fn navigate_active<D: DataSource>(app: &mut TuiApp<D>, delta: i32) {
             }
             return;
         }
+        PaneFocus::List if !views::is_list_view(app.specs(), view) => {
+            step_outline(app, view, delta);
+            return;
+        }
+        _ if !views::is_list_view(app.specs(), view) => {
+            move_doc_cursor(app, view, delta);
+            return;
+        }
         _ => {}
-    }
-
-    let view = app.current_view();
-    if !views::is_list_view(app.specs(), view) {
-        scroll_doc(app, view, delta);
-        return;
     }
 
     let max = app.data.list_len(view).saturating_sub(1);
@@ -483,6 +507,41 @@ fn scroll_doc<D: DataSource>(app: &mut TuiApp<D>, view: ViewId, delta: i32) {
         .unwrap_or(0);
     let scroll = offset(app.nav.doc_scroll(view), delta, max);
     app.nav.doc_scrolls.insert(view, scroll);
+}
+
+fn move_doc_cursor<D: DataSource>(app: &mut TuiApp<D>, view: ViewId, delta: i32) {
+    let max = app
+        .cached_document(view)
+        .map(|document| document.lines.len().saturating_sub(1))
+        .unwrap_or(0);
+    let cursor = offset(app.nav.doc_cursor(view), delta, max);
+    app.nav.doc_cursors.insert(view, cursor);
+}
+
+/// Move the document cursor `delta` outline entries (procs, top-level
+/// commands) from where it is.
+fn step_outline<D: DataSource>(app: &mut TuiApp<D>, view: ViewId, delta: i32) {
+    let outline = app.outline(view);
+    if outline.is_empty() {
+        move_doc_cursor(app, view, delta);
+        return;
+    }
+    let cursor = app.nav.doc_cursor(view);
+    let current = outline
+        .iter()
+        .rposition(|(line, _)| *line <= cursor)
+        .unwrap_or(0);
+    let target = if delta > 0 {
+        (current + delta as usize).min(outline.len() - 1)
+    } else if outline[current].0 < cursor {
+        // Mid-entry, "up" first returns to the entry's own start.
+        current.saturating_sub((-delta) as usize - 1)
+    } else {
+        current.saturating_sub((-delta) as usize)
+    };
+    let (line, label) = outline[target].clone();
+    app.place_doc_cursor(view, line);
+    app.status = label;
 }
 
 fn offset(current: usize, delta: i32, max: usize) -> usize {
@@ -520,15 +579,48 @@ pub fn handle_mouse<D: DataSource>(app: &mut TuiApp<D>, mouse: MouseEvent) {
                     if index < target.end {
                         app.nav.selections.insert(target.view, index);
                         update_group_focus(app);
-                        app.layout.focused_pane = PaneFocus::List;
+                        app.layout.focused_pane = PaneFocus::Decompile;
                     }
                     return;
                 }
             }
 
+            for (area, target) in app.hit.rail_targets.clone() {
+                if point_in_rect(x, y, area) {
+                    match target {
+                        RailTarget::View(view) => {
+                            if view != app.current_view() {
+                                app.push_history();
+                            }
+                            app.switch_to_view(view);
+                            app.layout.focused_pane = PaneFocus::Decompile;
+                        }
+                        RailTarget::OutlineLine(line) => {
+                            let view = app.current_view();
+                            app.push_history();
+                            app.place_doc_cursor(view, line);
+                            app.layout.focused_pane = PaneFocus::List;
+                        }
+                    }
+                    return;
+                }
+            }
+
+            if let Some((area, view, top)) = app.hit.document_target
+                && point_in_rect(x, y, area)
+            {
+                let line = top + (y - area.y) as usize;
+                let max = app
+                    .cached_document(view)
+                    .map(|document| document.lines.len().saturating_sub(1))
+                    .unwrap_or(0);
+                app.nav.doc_cursors.insert(view, line.min(max));
+                app.layout.focused_pane = PaneFocus::Decompile;
+                return;
+            }
+
             if hit_region(app, HitRegion::BrowseRail, x, y) {
                 app.layout.focused_pane = PaneFocus::List;
-                app.status = "workspace rail focused".to_string();
                 return;
             }
 
@@ -580,7 +672,7 @@ pub fn handle_mouse<D: DataSource>(app: &mut TuiApp<D>, mouse: MouseEvent) {
                     if index <= max {
                         app.nav.selections.insert(view, index);
                         update_group_focus(app);
-                        app.layout.focused_pane = PaneFocus::List;
+                        app.layout.focused_pane = PaneFocus::Decompile;
                     }
                 }
                 return;
@@ -606,13 +698,13 @@ pub fn handle_mouse<D: DataSource>(app: &mut TuiApp<D>, mouse: MouseEvent) {
                         }
                         app.nav.trace_index = Some(inst_idx);
                     }
-                    // Scroll decompile to anchor
+                    // Move the decompile cursor to the group's anchor
                     if let Some(dv) = app.data.decompile_view()
                         && let Ok(anchors) = app.data.decompile_anchors()
                         && let Some(&anchor) = anchors.get(group)
                         && anchor != usize::MAX
                     {
-                        app.nav.doc_scrolls.insert(dv, anchor.saturating_sub(2));
+                        app.place_doc_cursor(dv, anchor);
                     }
                     app.status = format!("focused group c{group:03}");
                 }
@@ -768,6 +860,10 @@ pub mod tests {
             Some(group.min(4))
         }
 
+        fn decompile_anchor_for_index(&mut self, index: usize) -> Result<Option<usize>, String> {
+            Ok(Some(index.min(2)))
+        }
+
         fn decompile_view(&self) -> Option<ViewId> {
             Some(DOC)
         }
@@ -911,7 +1007,7 @@ pub mod tests {
 
         assert_eq!(app.nav.selection(LIST), 2);
         assert_eq!(app.nav.group_focus, Some(2));
-        assert_eq!(app.layout.focused_pane, PaneFocus::List);
+        assert_eq!(app.layout.focused_pane, PaneFocus::Decompile);
 
         handle_mouse(
             &mut app,
@@ -1002,6 +1098,56 @@ pub mod tests {
             },
         );
         assert!(app.cmd.active);
+    }
+
+    #[test]
+    fn enter_follows_and_backspace_returns() {
+        let mut app = TuiApp::new(InputData, false);
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.nav.selection(LIST), 2);
+
+        // Row 2 has no link of its own, so Enter reveals its decompiled source.
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.current_view(), DOC);
+        assert!(app.status.contains("Backspace returns"), "{}", app.status);
+
+        handle_key(&mut app, key(KeyCode::Backspace));
+        assert_eq!(app.current_view(), LIST);
+        assert_eq!(app.nav.selection(LIST), 2);
+        assert!(app.status.contains("back to List"), "{}", app.status);
+
+        handle_key(&mut app, key(KeyCode::Backspace));
+        assert_eq!(app.status, "nothing to go back to");
+    }
+
+    #[test]
+    fn escape_backs_out_but_never_quits_and_q_quits_at_once() {
+        let mut app = TuiApp::new(InputData, false);
+        for _ in 0..4 {
+            handle_key(&mut app, key(KeyCode::Esc));
+        }
+        assert!(!app.overlay.should_quit);
+        assert!(app.status.contains("q quits"), "{}", app.status);
+
+        handle_key(&mut app, key(KeyCode::Char('q')));
+        assert!(app.overlay.should_quit);
+    }
+
+    #[test]
+    fn document_keys_move_a_cursor_and_messages_are_transient() {
+        let mut app = TuiApp::new(InputData, false);
+        app.switch_to_view(DOC);
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.nav.doc_cursor(DOC), 2);
+        assert_eq!(app.nav.doc_scroll(DOC), 0, "the viewport only follows");
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.nav.doc_cursor(DOC), 2, "the cursor stops at the end");
+
+        app.status = "old message".to_string();
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.status, "ready");
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::theme::{ACCENT_BAR, GROUP_MARKER, SELECTION_INDICATOR};
 use crate::views;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{List, ListItem, Paragraph};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FollowWindow {
@@ -66,24 +66,7 @@ pub fn render<D: DataSource>(
     let total = app.data.list_len(view);
     let selection = app.nav.selection(view).min(total.saturating_sub(1));
 
-    let border_style = if focused {
-        app.theme.border_focused()
-    } else {
-        app.theme.border()
-    };
-    let title_style = if focused {
-        app.theme.panel_title_focused()
-    } else {
-        app.theme.panel_title()
-    };
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Span::styled(
-            format!(" Canvas - {title} ({total}) "),
-            title_style,
-        ));
+    let block = super::panel_block(format!(" {title} · {total} "), focused, &app.theme);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);

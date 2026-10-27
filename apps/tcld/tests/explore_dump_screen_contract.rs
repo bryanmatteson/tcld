@@ -79,7 +79,8 @@ fn bytecode_browse_frame_uses_selected_view_as_full_width_canvas() {
         "tcld explore",
         "[b] Browse",
         "[C] Compare",
-        "Canvas - Instructions",
+        "Instructions · ",
+        "Views",
         "Inspector",
         "source: generated",
         "Instructions  #1/",
@@ -114,7 +115,7 @@ fn source_is_a_document_canvas_not_a_narrow_list() {
         empty: false,
     });
 
-    assert!(frame.contains("Canvas - Source"), "{frame}");
+    assert!(frame.contains("┏ Source "), "{frame}");
     assert!(frame.contains("set result"), "{frame}");
     assert!(!frame.contains("No entries in Source"), "{frame}");
     assert_static_only(&frame);
@@ -134,10 +135,11 @@ fn help_and_palette_are_generated_from_the_static_contract() {
     });
     for required in [
         "Quick Reference",
+        "Following links",
         "Browse",
         "Compare",
-        "i Instructions",
-        "d Decompile",
+        "Instructions",
+        "Decompile",
     ] {
         assert!(help.contains(required), "missing {required:?}\n{help}");
     }
@@ -235,7 +237,7 @@ fn real_cli_dump_screen_is_plain_and_static_only() {
         String::from_utf8_lossy(&output.stderr)
     );
     let frame = String::from_utf8(output.stdout).expect("utf8 frame");
-    assert!(frame.contains("Canvas - Instructions"), "{frame}");
+    assert!(frame.contains("Instructions · "), "{frame}");
     assert_no_ansi(&frame);
     assert_static_only(&frame);
 }
@@ -278,8 +280,11 @@ fn source_search_and_goto_use_document_offsets() {
     let mut app = TuiApp::new(core, false);
     app.switch_to_view(VIEW_SOURCE);
     app.execute_command("goto 2");
-    assert_eq!(app.nav.doc_scroll(VIEW_SOURCE), 1);
+    assert_eq!(app.nav.doc_cursor(VIEW_SOURCE), 1);
     app.execute_command("search result");
     assert_eq!(app.search.view, Some(VIEW_SOURCE));
-    assert_eq!(app.nav.doc_scroll(VIEW_SOURCE), app.search.hits[0]);
+    assert_eq!(
+        app.nav.doc_cursor(VIEW_SOURCE),
+        app.search.hits[app.search.cursor]
+    );
 }

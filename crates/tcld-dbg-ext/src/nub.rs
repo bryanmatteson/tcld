@@ -134,14 +134,39 @@ proc ::tcld::dbg::__nub__::on_readable {} {
     }
 }
 
+# Requests run inside the target's interpreter, and Tcl records every error,
+# even a caught one, in ::errorInfo and ::errorCode. Without this, a request
+# that fails (a variable that does not exist, an op that needs a pause) would
+# leave the debugger's message where the program reads its own errors.
+proc ::tcld::dbg::__nub__::save_error_state {} {
+    set saved {}
+    foreach name {::errorInfo ::errorCode} {
+        if {[info exists $name]} { dict set saved $name [set $name] }
+    }
+    return $saved
+}
+
+proc ::tcld::dbg::__nub__::restore_error_state {saved} {
+    foreach name {::errorInfo ::errorCode} {
+        if {[dict exists $saved $name]} {
+            set $name [dict get $saved $name]
+        } else {
+            unset -nocomplain $name
+        }
+    }
+}
+
 # Map a wire op name + args to a ::tcld::dbg::* command. Returns the
 # response payload (may be empty).
 proc ::tcld::dbg::__nub__::dispatch_req {serial payload} {
     set parts $payload
     set op [lindex $parts 0]
     set args [lrange $parts 1 end]
-    if {[::tcld::dbg::__wrap__::orig_catch \
-        {::tcld::dbg::__nub__::call_op $op $args} result opts]} {
+    set saved [::tcld::dbg::__nub__::save_error_state]
+    set failed [::tcld::dbg::__wrap__::orig_catch \
+        {::tcld::dbg::__nub__::call_op $op $args} result opts]
+    ::tcld::dbg::__nub__::restore_error_state $saved
+    if {$failed} {
         # Map a Tcl error to a wire err frame.
         set code internal
         if {[string match {*not paused*} $result] || \
@@ -786,7 +811,16 @@ proc ::tcld::dbg::__nub__::bp_import {serialized} {
     return [concat $external_core_ids $imported]
 }
 
+# Runs inside the target's `source`, so its caught errors must not reach the
+# target's error state either.
 proc ::tcld::dbg::__nub__::resolve_pending_breakpoints {path} {
+    set saved [::tcld::dbg::__nub__::save_error_state]
+    set resolved [::tcld::dbg::__nub__::resolve_pending_breakpoints_now $path]
+    ::tcld::dbg::__nub__::restore_error_state $saved
+    return $resolved
+}
+
+proc ::tcld::dbg::__nub__::resolve_pending_breakpoints_now {path} {
     set path [file normalize $path]
     if {[::tcld::dbg::__wrap__::orig_catch \
         {::tcld::dbg::block_generation "file:$path"} generation]} { return {} }
@@ -1000,8 +1034,11 @@ proc ::tcld::dbg::__nub__::pause_loop {} {
                 # them so the engine state updates, send the response,
                 # then signal exit.
                 if {$op in {step_into step_over step_out step_instruction step_over_instruction step_out_instruction continue run_to run_to_pc}} {
-                    if {[::tcld::dbg::__wrap__::orig_catch \
-                        {::tcld::dbg::__nub__::call_op $op $args_list} result]} {
+                    set saved [::tcld::dbg::__nub__::save_error_state]
+                    set failed [::tcld::dbg::__wrap__::orig_catch \
+                        {::tcld::dbg::__nub__::call_op $op $args_list} result]
+                    ::tcld::dbg::__nub__::restore_error_state $saved
+                    if {$failed} {
                         ::tcld::dbg::__nub__::send_err $serial internal $result
                     } else {
                         ::tcld::dbg::__nub__::send_frame resp $serial $result

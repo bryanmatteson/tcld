@@ -9,8 +9,8 @@
 //! defined in `crate::frame` / `crate::op` / `crate::event`; both
 //! are first-class v2 deliverables.
 
-use std::collections::HashMap;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::collections::{HashMap, VecDeque};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -116,16 +116,40 @@ pub struct Controller {
     nub_child: Option<Child>,
 }
 
+/// One line the debugged program wrote to stdout or stderr.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NubOutput {
+    pub stderr: bool,
+    pub text: String,
+}
+
+/// Lines kept for a frontend that is not draining output; older lines are
+/// dropped first.
+const OUTPUT_BACKLOG: usize = 4096;
+
+/// Startup diagnostics kept for [`NubChild::exited_stderr`].
+const STDERR_CAPTURE: usize = 64 * 1024;
+
 /// Handle to the spawned nub process. Drop SIGKILLs to prevent
 /// orphaned tclsh procs in tests.
 pub struct NubChild {
     child: Option<Child>,
     stderr_reader: Option<JoinHandle<Vec<u8>>>,
+    stdout_reader: Option<JoinHandle<()>>,
+    output: Arc<Mutex<VecDeque<NubOutput>>>,
 }
 
 impl NubChild {
     pub fn pid(&self) -> Option<u32> {
         self.child.as_ref().map(|c| c.id())
+    }
+
+    /// Take the lines the debugged program has written since the last call.
+    pub fn drain_output(&self) -> Vec<NubOutput> {
+        self.output
+            .lock()
+            .map(|mut output| output.drain(..).collect())
+            .unwrap_or_default()
     }
 
     pub fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
@@ -176,8 +200,44 @@ impl NubChild {
         if let Some(reader) = self.stderr_reader.take() {
             let _ = reader.join();
         }
+        if let Some(reader) = self.stdout_reader.take() {
+            let _ = reader.join();
+        }
         Ok(())
     }
+}
+
+/// Forward each line of a child's pipe into `output`, returning the first
+/// `capture` bytes. The pipe is read to its end either way, so a chatty
+/// program never blocks on a full pipe.
+fn forward_lines(
+    pipe: impl Read,
+    stderr: bool,
+    output: Arc<Mutex<VecDeque<NubOutput>>>,
+    capture: usize,
+) -> Vec<u8> {
+    let mut reader = BufReader::new(pipe);
+    let mut captured = Vec::new();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let room = capture.saturating_sub(captured.len());
+        captured.extend_from_slice(&line[..line.len().min(room)]);
+        let text = String::from_utf8_lossy(&line)
+            .trim_end_matches(['\n', '\r'])
+            .to_string();
+        if let Ok(mut queue) = output.lock() {
+            if queue.len() >= OUTPUT_BACKLOG {
+                queue.pop_front();
+            }
+            queue.push_back(NubOutput { stderr, text });
+        }
+    }
+    captured
 }
 
 impl Drop for NubChild {
@@ -225,6 +285,12 @@ impl Controller {
     /// to this controller. Sets `TCLD_DBG_DYLIB`, `TCLD_NUB_HOST`, and
     /// `TCLD_NUB_PORT`. Target execution is requested later with
     /// [`Op::StartTarget`].
+    ///
+    /// The program's stdout and stderr are captured line by line for
+    /// [`NubChild::drain_output`] rather than inherited: a frontend that owns
+    /// the terminal must not have the program writing over it. Standard
+    /// input is closed for the same reason, so a program reading it sees
+    /// end-of-file instead of competing for keystrokes.
     pub fn spawn_nub(
         &mut self,
         tclsh: &Path,
@@ -236,19 +302,26 @@ impl Controller {
             .env("TCLD_DBG_DYLIB", dylib)
             .env("TCLD_NUB_HOST", "127.0.0.1")
             .env("TCLD_NUB_PORT", self.bound_port.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = cmd.spawn()?;
-        let stderr = child.stderr.take();
-        let stderr_reader = stderr.map(|mut stderr| {
+        let output = Arc::new(Mutex::new(VecDeque::new()));
+        let stderr_reader = child.stderr.take().map(|stderr| {
+            let output = Arc::clone(&output);
+            thread::spawn(move || forward_lines(stderr, true, output, STDERR_CAPTURE))
+        });
+        let stdout_reader = child.stdout.take().map(|stdout| {
+            let output = Arc::clone(&output);
             thread::spawn(move || {
-                let mut bytes = Vec::new();
-                let _ = stderr.by_ref().take(64 * 1024).read_to_end(&mut bytes);
-                bytes
+                forward_lines(stdout, false, output, 0);
             })
         });
         Ok(NubChild {
             child: Some(child),
             stderr_reader,
+            stdout_reader,
+            output,
         })
     }
 

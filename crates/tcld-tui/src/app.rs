@@ -2,13 +2,13 @@ use crate::command::{
     self, CommandModule, CustomCommandHandler, ExploreCommand, PaletteActionKind, ThemeCommand,
     TraceCommand,
 };
-use crate::data::{DataSource, DocumentAnchor, OperationAvailability, ViewId};
+use crate::data::{DataSource, DocumentAnchor, Link, OperationAvailability, ViewId};
 use crate::helpers::fuzzy_score;
 use crate::render;
 use crate::session;
 use crate::state::{
     CommandState, DiffState, HitTestState, LayoutState, ModeId, ModeLayoutProfile, ModeSpec,
-    NavigationState, OverlayState, PaletteState, PaneFocus, RailMode, SearchState,
+    NavPoint, NavigationState, OverlayState, PaletteState, PaneFocus, RailMode, SearchState,
 };
 use crate::terminal::{Event, Frame, Rect, RuntimeAction, RuntimeEvent, TerminalApplication};
 use crate::theme::Theme;
@@ -368,11 +368,12 @@ impl<D: DataSource> TuiApp<D> {
             ExploreCommand::Goto { value } => {
                 let view = self.current_view();
                 if let Some(idx) = self.data.jump_index(view, value) {
+                    self.push_history();
                     if views::is_list_view(self.specs(), view) {
                         self.nav.selections.insert(view, idx);
                         self.update_group_focus();
                     } else {
-                        self.nav.doc_scrolls.insert(view, idx);
+                        self.place_doc_cursor(view, idx);
                     }
                 } else {
                     self.cmd.output = Some(format!("goto: value {value} not found"));
@@ -405,7 +406,7 @@ impl<D: DataSource> TuiApp<D> {
                         self.nav.selections.insert(view, target);
                         self.update_group_focus();
                     } else {
-                        self.nav.doc_scrolls.insert(view, target);
+                        self.place_doc_cursor(view, target);
                     }
                 }
                 self.nav.expanded = true;
@@ -432,16 +433,29 @@ impl<D: DataSource> TuiApp<D> {
                     self.cmd.output = Some(format!("no matches for '{text}'"));
                     self.search = SearchState::default();
                 } else {
-                    let first = result.hit_indices[0];
+                    // Start from the first match at or after where the reader
+                    // is, so searching never throws away their place.
+                    let here = if is_list {
+                        self.nav.selection(view)
+                    } else {
+                        self.nav.doc_cursor(view)
+                    };
+                    let start = result
+                        .hit_indices
+                        .iter()
+                        .position(|hit| *hit >= here)
+                        .unwrap_or(0);
+                    let first = result.hit_indices[start];
+                    self.push_history();
                     self.search.hits = result.hit_indices;
-                    self.search.cursor = 0;
+                    self.search.cursor = start;
                     self.search.query = Some(text.clone());
                     self.search.view = Some(view);
                     if is_list {
                         self.nav.selections.insert(view, first);
                         self.update_group_focus();
                     } else {
-                        self.nav.doc_scrolls.insert(view, first);
+                        self.place_doc_cursor(view, first);
                     }
                     self.cmd.output = Some(if result.truncated {
                         format!(
@@ -496,11 +510,9 @@ impl<D: DataSource> TuiApp<D> {
                 self.command_theme(action);
             }
             ExploreCommand::Quit => {
-                if self.overlay.quit_confirm {
-                    self.overlay.should_quit = true;
-                } else {
-                    self.overlay.quit_confirm = true;
-                }
+                // Nothing in the explorer is unsaved: the session is written
+                // on the way out and restored on the next launch.
+                self.overlay.should_quit = true;
             }
             ExploreCommand::Custom(cmd_name, args) => {
                 if let Some(handler) = &mut self.custom_handler {
@@ -547,13 +559,172 @@ impl<D: DataSource> TuiApp<D> {
                 return;
             }
         };
-        let scroll = self.nav.doc_scroll(view);
+        let cursor = self.nav.doc_cursor(view);
         let next = if forward {
-            scroll.saturating_add(step).min(max)
+            cursor.saturating_add(step).min(max)
         } else {
-            scroll.saturating_sub(step)
+            cursor.saturating_sub(step)
         };
-        self.nav.doc_scrolls.insert(view, next);
+        self.nav.doc_cursors.insert(view, next);
+    }
+
+    /// Put a document's cursor on `line` after a jump, with a little context
+    /// above it. The renderer scrolls further only if the line is not visible.
+    pub fn place_doc_cursor(&mut self, view: ViewId, line: usize) {
+        self.nav.doc_cursors.insert(view, line);
+        self.nav.doc_scrolls.insert(view, line.saturating_sub(2));
+    }
+
+    // ── Links and history ────────────────────────────────────────
+
+    /// Remember where the reader is, so Back can return here.
+    pub fn push_history(&mut self) {
+        let view = self.current_view();
+        let position = if views::is_list_view(self.specs(), view) {
+            self.nav.selection(view)
+        } else {
+            self.nav.doc_cursor(view)
+        };
+        let point = NavPoint { view, position };
+        if self.nav.back_stack.last() != Some(&point) {
+            self.nav.back_stack.push(point);
+        }
+        const HISTORY: usize = 100;
+        if self.nav.back_stack.len() > HISTORY {
+            self.nav.back_stack.remove(0);
+        }
+    }
+
+    /// Return to the position before the last jump.
+    pub fn go_back(&mut self) {
+        let Some(point) = self.nav.back_stack.pop() else {
+            self.status = "nothing to go back to".to_string();
+            return;
+        };
+        if self.current_view() != point.view && !self.switch_to_view(point.view) {
+            self.status = "that view is no longer available".to_string();
+            return;
+        }
+        if views::is_list_view(self.specs(), point.view) {
+            self.nav.selections.insert(point.view, point.position);
+            self.update_group_focus();
+        } else {
+            self.place_doc_cursor(point.view, point.position);
+        }
+        self.status = format!(
+            "back to {} {}",
+            views::title(self.specs(), point.view),
+            if views::is_list_view(self.specs(), point.view) {
+                format!("#{}", point.position + 1)
+            } else {
+                format!("line {}", point.position + 1)
+            }
+        );
+    }
+
+    /// Follow the selection to what it refers to: a jump's target, a
+    /// literal's first use, an instruction's source, a source line's
+    /// instructions.
+    pub fn follow_link(&mut self) {
+        let view = self.current_view();
+        if views::is_list_view(self.specs(), view) {
+            let index = self.nav.selection(view);
+            if let Some(Link {
+                view: target,
+                index: target_index,
+                label,
+            }) = self.data.list_link(view, index)
+            {
+                self.push_history();
+                if target != view && !self.switch_to_view(target) {
+                    self.status = format!("{label} is not available here");
+                    return;
+                }
+                self.nav.selections.insert(target, target_index);
+                self.update_group_focus();
+                self.layout.focused_pane = PaneFocus::Decompile;
+                self.status = format!("→ {label} · Backspace returns");
+                return;
+            }
+            if self.data.group_for_index(index).is_some() && self.data.decompile_view().is_some() {
+                self.show_decompile_for_current();
+                self.layout.focused_pane = PaneFocus::Decompile;
+                return;
+            }
+            self.status = "nothing to follow from this entry".to_string();
+            return;
+        }
+
+        let line = self.nav.doc_cursor(view);
+        let Some(group) = self.document_group_at(view, line) else {
+            self.status = "no instructions are mapped to this line".to_string();
+            return;
+        };
+        let Some(index) = self.data.first_index_for_group(group) else {
+            self.status = format!("command group c{group:03} has no instructions");
+            return;
+        };
+        let Some(list_view) = self
+            .data
+            .available_views()
+            .iter()
+            .copied()
+            .find(|candidate| views::is_list_view(self.specs(), *candidate))
+        else {
+            self.status = "no instruction view is available".to_string();
+            return;
+        };
+        self.push_history();
+        self.switch_to_view(list_view);
+        self.nav.selections.insert(list_view, index);
+        self.update_group_focus();
+        self.layout.focused_pane = PaneFocus::Decompile;
+        self.status = format!("→ instructions for c{group:03} · Backspace returns");
+    }
+
+    /// The command group that produced `line` of a document, if known.
+    pub(crate) fn document_group_at(&mut self, view: ViewId, line: usize) -> Option<usize> {
+        let document = self.cached_document(view).ok()?;
+        if self.data.decompile_view() == Some(view) {
+            return crate::style::group_for_line(
+                line,
+                &document.decompile_anchors,
+                &document.decompile_group_spans,
+            );
+        }
+        document
+            .anchors
+            .iter()
+            .filter(|anchor| {
+                anchor.line_span.0 <= line && line < anchor.line_span.1.max(anchor.line_span.0 + 1)
+            })
+            .min_by_key(|anchor| anchor.line_span.1.saturating_sub(anchor.line_span.0))
+            .and_then(|anchor| anchor.group)
+    }
+
+    /// Structural outline of a document: the lines a reader navigates by.
+    pub(crate) fn outline(&mut self, view: ViewId) -> Vec<(usize, String)> {
+        let Ok(document) = self.cached_document(view) else {
+            return Vec::new();
+        };
+        // Command groups are the outline. `document.anchors` is statement-level
+        // (`c057/n011`) — listing those would just make the rail a second canvas.
+        let outline = document
+            .decompile_anchors
+            .iter()
+            .copied()
+            .filter(|line| *line != usize::MAX && *line < document.lines.len())
+            .map(|line| (line, outline_label(document.lines[line].trim())))
+            .filter(|(_, label)| !label.is_empty())
+            .collect::<Vec<_>>();
+        if !outline.is_empty() {
+            return outline;
+        }
+        document
+            .anchors
+            .iter()
+            .map(|anchor| (anchor.line_span.0, anchor.label.clone()))
+            .collect()
     }
 
     pub fn advance_search(&mut self, direction: i32) {
@@ -573,11 +744,14 @@ impl<D: DataSource> TuiApp<D> {
             };
         }
         let target = self.search.hits[self.search.cursor];
+        if self.current_view() != view {
+            self.switch_to_view(view);
+        }
         if views::is_list_view(self.specs(), view) {
             self.nav.selections.insert(view, target);
             self.update_group_focus();
         } else {
-            self.nav.doc_scrolls.insert(view, target);
+            self.place_doc_cursor(view, target);
         }
         self.status = format!(
             "match {}/{}",
@@ -697,15 +871,13 @@ impl<D: DataSource> TuiApp<D> {
             self.nav.trace_index = Some(inst_idx);
         }
 
-        // Scroll decompile to group anchor
+        // Move the decompile cursor to the group's anchor
         if let Some(decompile_view) = self.data.decompile_view()
             && let Ok(anchors) = self.data.decompile_anchors()
             && let Some(&anchor) = anchors.get(next_group)
             && anchor != usize::MAX
         {
-            self.nav
-                .doc_scrolls
-                .insert(decompile_view, anchor.saturating_sub(2));
+            self.place_doc_cursor(decompile_view, anchor);
         }
 
         self.status = format!("focused command group c{next_group:03}");
@@ -748,12 +920,11 @@ impl<D: DataSource> TuiApp<D> {
         self.nav.trace_index = Some(context_index);
 
         if let (Some(decompile_view), Some(line_idx)) = (self.data.decompile_view(), anchor) {
+            self.push_history();
             self.switch_to_view(decompile_view);
-            self.nav
-                .doc_scrolls
-                .insert(decompile_view, line_idx.saturating_sub(2));
+            self.place_doc_cursor(decompile_view, line_idx);
             self.status = format!(
-                "revealed decompile for #{context_index}{}",
+                "revealed decompile for #{context_index}{} · Backspace returns",
                 group.map(|g| format!(" (c{g:03})")).unwrap_or_default()
             );
         } else if self.data.decompile_view().is_some() {
@@ -904,10 +1075,7 @@ impl<D: DataSource> TuiApp<D> {
             return false;
         };
         self.layout.mode_index = index;
-        self.layout.focused_pane = match self.current_layout_profile() {
-            ModeLayoutProfile::Browse => PaneFocus::List,
-            ModeLayoutProfile::Compare => PaneFocus::Decompile,
-        };
+        self.layout.focused_pane = PaneFocus::Decompile;
         let spec = self.current_mode_spec();
         self.cmd.output = Some(format!("mode: {}", spec.title));
         true
@@ -983,7 +1151,14 @@ impl<D: DataSource> TuiApp<D> {
                     .copied()
                     .unwrap_or(0)
                     .min(max);
+                let cursor = snapshot
+                    .doc_cursors
+                    .get(&view)
+                    .copied()
+                    .unwrap_or(scroll)
+                    .min(max);
                 self.nav.doc_scrolls.insert(view, scroll);
+                self.nav.doc_cursors.insert(view, cursor);
             }
         }
 
@@ -1023,6 +1198,20 @@ impl<D: DataSource> TuiApp<D> {
             self.specs(),
             self.theme.name(),
         );
+    }
+}
+
+/// Reduce an anchor line to what distinguishes it. `proc ` leads every entry in a
+/// procedure outline and the argument list rarely survives the rail's width.
+pub(crate) fn outline_label(line: &str) -> String {
+    match line.strip_prefix("proc ") {
+        Some(rest) => rest
+            .split_whitespace()
+            .next()
+            .unwrap_or(rest)
+            .trim_end_matches('{')
+            .to_string(),
+        None => line.to_string(),
     }
 }
 
@@ -1388,17 +1577,17 @@ pub mod tests {
         app.execute_command("doc");
         assert_eq!(app.current_view(), DOC);
         app.execute_command("search alpha");
-        assert_eq!(app.nav.doc_scroll(DOC), 0);
+        assert_eq!(app.nav.doc_cursor(DOC), 0);
         crate::input::handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()),
         );
-        assert_eq!(app.nav.doc_scroll(DOC), 2);
+        assert_eq!(app.nav.doc_cursor(DOC), 2);
         crate::input::handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT),
         );
-        assert_eq!(app.nav.doc_scroll(DOC), 0);
+        assert_eq!(app.nav.doc_cursor(DOC), 0);
 
         app.execute_command("view export");
         assert!(app.cmd.output.as_ref().unwrap().contains("not available"));
@@ -1485,10 +1674,12 @@ pub mod tests {
         assert_eq!(fetches.get(), 2);
 
         app.switch_to_view(DOC);
-        app.nav.doc_scrolls.insert(DOC, 1);
+        app.nav.doc_cursors.insert(DOC, 2);
         crate::render_frame_to_text(&mut app, 100, 28).expect("document frame");
-        assert!(
-            rendered_windows.borrow().contains(&(1, 3)),
+        // The whole three-line document fits, so the window is exactly it.
+        assert_eq!(
+            rendered_windows.borrow().last(),
+            Some(&(0, 3)),
             "rendered windows: {:?}",
             rendered_windows.borrow().as_slice()
         );
@@ -1523,7 +1714,7 @@ pub mod tests {
         app.execute_command("search alpha");
         assert_eq!(app.search.hits, vec![0, 2]);
         app.advance_search(1);
-        assert_eq!(app.nav.doc_scroll(DOC), 2);
+        assert_eq!(app.nav.doc_cursor(DOC), 2);
 
         app.execute_command("view list");
         app.execute_command("goto 2");
@@ -1620,7 +1811,7 @@ pub mod tests {
         assert_eq!(app.theme.name(), "sunset");
 
         app.switch_mode(ModeId("browse"));
-        crate::input::handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        // The canvas has focus by default, so keys move through the document.
         assert_eq!(app.layout.focused_pane, PaneFocus::Decompile);
         let list_selection = app.nav.selection(LIST);
         let group_focus = app.nav.group_focus;
@@ -1628,7 +1819,7 @@ pub mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
         );
-        assert!(app.nav.doc_scroll(DOC) > 0);
+        assert!(app.nav.doc_cursor(DOC) > 0);
         assert_eq!(app.nav.selection(LIST), list_selection);
         assert_eq!(app.nav.group_focus, group_focus);
 
@@ -1656,7 +1847,7 @@ pub mod tests {
             },
         );
         assert_eq!(app.nav.selection(LIST), 2);
-        assert_eq!(app.layout.focused_pane, PaneFocus::List);
+        assert_eq!(app.layout.focused_pane, PaneFocus::Decompile);
 
         crate::input::handle_mouse(
             &mut app,
@@ -1746,11 +1937,11 @@ pub mod tests {
         app.switch_to_view(DOC);
 
         app.execute_command("next 2");
-        assert_eq!(app.nav.doc_scroll(DOC), 2);
+        assert_eq!(app.nav.doc_cursor(DOC), 2);
         app.execute_command("prev");
-        assert_eq!(app.nav.doc_scroll(DOC), 1);
+        assert_eq!(app.nav.doc_cursor(DOC), 1);
         app.execute_command("show 3");
-        assert_eq!(app.nav.doc_scroll(DOC), 2);
+        assert_eq!(app.nav.doc_cursor(DOC), 2);
         assert!(app.nav.expanded);
 
         app.execute_command("show 99");
