@@ -67,6 +67,7 @@ import {
   planTclFormatEdits,
   saveFileDialog,
   saveTextFile,
+  takeLaunchOpenPath,
   emit as emitTauriEvent,
 } from "@/lib/tauri-api";
 import { addRecentFile, loadRecentFiles, type RecentFile } from "@/lib/recent-files";
@@ -2028,6 +2029,24 @@ function ExplorerApp({ visualParityState }: { visualParityState: string | null }
     },
     [launchDebugPath, store],
   );
+
+  // ─── Launcher hand-off (`tcld ui <file>`) ────────────────────
+  // The backend yields the path once; the ref keeps a re-run effect from
+  // asking twice, so the file opens exactly like a picked recent file.
+  const launchOpenRequestedRef = useRef(false);
+  useEffect(() => {
+    if (launchOpenRequestedRef.current) return;
+    launchOpenRequestedRef.current = true;
+    void takeLaunchOpenPath().then((path) => {
+      if (!path) return;
+      void handleRecentFile({
+        path,
+        filename: path.split("/").pop() || path,
+        mode: "open",
+        timestamp: Date.now(),
+      });
+    });
+  }, [handleRecentFile]);
 
   // ─── Drag-and-drop file opening ──────────────────────────────
 

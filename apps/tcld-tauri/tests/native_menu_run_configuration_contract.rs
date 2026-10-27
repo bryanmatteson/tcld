@@ -146,7 +146,7 @@ fn native_menu_contract_uses_conventional_app_menu_buckets() {
 #[test]
 fn native_menu_run_configuration_contract_recent_configurations_menu_has_update_channel_and_real_slots()
  {
-    let main_rs = include_str!("../src/main.rs");
+    let main_rs = include_str!("../src/app.rs");
 
     assert!(
         main_rs.contains("menu:recent-configurations"),

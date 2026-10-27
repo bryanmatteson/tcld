@@ -124,9 +124,19 @@ and provide the [Tcl development libraries](third_party/tcl/README.md), then:
 ```bash
 npm ci --prefix apps/tcld-gui
 npm run build --prefix apps/tcld-gui
-cargo build --release -p tcld-tauri --features tauri/custom-protocol
-./target/release/tcld-tauri
+cargo build --release -p tcld --features native-ui
+./target/release/tcld ui path/to/file.tbc   # FILE is optional
 ```
+
+With [mise](https://mise.jdx.dev), `mise run tcld:build-ui` runs these steps
+as a debug build and `mise run tcld:ui [FILE]` builds and opens the window.
+
+`tcld ui` hosts the desktop window in the CLI process and returns when the
+last window closes. A `tcld` built without `native-ui` reports
+`ui_unavailable` (exit code 3) with these build steps. The standalone app
+binary works the same way:
+`cargo build --release -p tcld-tauri --features custom-protocol`, then
+`./target/release/tcld-tauri [FILE]`.
 
 For platform bundles, use the Tauri CLI from `apps/tcld-tauri` (`cargo tauri
 build`). The `hybrid` feature additionally enables direct bytecode execution
@@ -163,6 +173,7 @@ tcld dump path/to/file.tbc          # exceptions, literals, instructions
 tcld explore path/to/file.tbc       # interactive terminal explorer
 tcld source-map path/to/file.tbc    # bytecode ↔ source span mapping
 tcld coverage report                # opcode × Tcl-version support matrix
+tcld ui [path/to/file.tbc]          # native desktop workbench (native-ui builds)
 ```
 
 Try it immediately on the bundled fixture:

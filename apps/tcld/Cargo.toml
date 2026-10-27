@@ -16,7 +16,13 @@
     integration_tclsh = []
     # In-process TEBC VM + embedded Tcl 9 WorldHost (requires Tcl 9 headers/libs).
     # Enables `tcld run` plus hybrid `tcld debug` for raw `.tbc` and admitted Tcl source.
-    hybrid = ["dep:tcld-vm", "tcld-vm/host", "tcld-vm/debug"]
+    hybrid = ["dep:tcld-vm", "tcld-vm/host", "tcld-vm/debug", "tcld-tauri?/hybrid"]
+    # `tcld ui`: hosts the Tauri desktop app in-process with the frontend
+    # embedded at compile time. Build the frontend first, then:
+    #   npm run build --prefix apps/tcld-gui
+    #   cargo build -p tcld --features native-ui
+    # Like `tcld-tauri`'s default debugger, this links Tcl 9.
+    native-ui = ["dep:tcld-tauri", "tcld-tauri/custom-protocol"]
 
 [dependencies]
     clap.workspace            = true
@@ -31,6 +37,7 @@
     tcld-decompile.workspace  = true
     tcld-explore.workspace    = true
     tcld-syntax.workspace     = true
+    tcld-tauri                = { workspace = true, optional = true }
     tcld-tui.workspace        = true
     tcld-vm                   = { workspace = true, optional = true }
     tempfile.workspace        = true

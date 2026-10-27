@@ -119,7 +119,7 @@ export const DESIGN_SURFACES: Record<string, DesignSurfaceGroup> = {
   },
   "detached-windows": {
     designFiles: ["tcld-prefs.jsx"],
-    productionFiles: ["app/page.tsx", "lib/tauri-api.ts", "../apps/tcld-tauri/src/main.rs"],
+    productionFiles: ["app/page.tsx", "lib/tauri-api.ts", "../apps/tcld-tauri/src/app.rs"],
     productionMarkers: [
       "data-design-surface=\"preferences-window\"",
       "data-design-surface=\"run-configuration-window\"",

@@ -59,7 +59,7 @@ export const DESIGN_DEVIATIONS: DesignDeviationEntry[] = [
     category: "shell",
     designFile: "tcld-chrome.jsx",
     designSurface: "reference window controls",
-    productionFile: "apps/tcld-tauri/src/main.rs",
+    productionFile: "apps/tcld-tauri/src/app.rs",
     productionSurface: "native Tauri window chrome",
     parityStatus: "omitted",
     justification: "The packaged application uses the native window frame.",

@@ -6,6 +6,19 @@
     description = "Open the unified interactive terminal explorer"
     run         = "cargo run --bin tcld -- explore"
 
+[tasks."tcld:build-ui"]
+    description = "Build tcld with the embedded native desktop UI (`tcld ui`)"
+    run         = [
+        "test -d apps/tcld-gui/node_modules || npm ci --prefix apps/tcld-gui",
+        "npm run build --prefix apps/tcld-gui",
+        "cargo build -p tcld --features native-ui",
+    ]
+
+[tasks."tcld:ui"]
+    description = "Open the native desktop workbench (`mise run tcld:ui [FILE]`)"
+    depends     = [ "tcld:build-ui" ]
+    run         = "target/debug/tcld ui"
+
 [tasks."tcld:install"]
     description = "Install the CLI and its manifested Tcl 9 debugger nub"
     run         = "scripts/install-tcld.sh"

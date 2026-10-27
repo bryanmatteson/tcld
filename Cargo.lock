@@ -4006,6 +4006,7 @@ dependencies = [
  "tcld-decompile",
  "tcld-explore",
  "tcld-syntax",
+ "tcld-tauri",
  "tcld-tui",
  "tcld-vm",
  "tempfile",

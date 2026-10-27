@@ -7,7 +7,11 @@
     version.workspace    = true
 
 [features]
-    debugger = ["dep:tcld-interp", "dep:tcl-sys", "dep:tcld-debug-wire"]
+    # Serve the frontend embedded from `../tcld-gui/dist` instead of the
+    # `devUrl` dev server. `cargo tauri build` sets this; `tcld`'s
+    # `native-ui` feature enables it so `tcld ui` needs no dev server.
+    custom-protocol = ["tauri/custom-protocol"]
+    debugger        = ["dep:tcld-interp", "dep:tcl-sys", "dep:tcld-debug-wire"]
     default  = ["debugger", "tcl9"]
     # Links the in-process TEBC VM. Mirrors `tcld`'s feature of the same name
     # and, like it, requires Tcl 9 headers/libs — `tcld-vm/host` pins tcl-sys

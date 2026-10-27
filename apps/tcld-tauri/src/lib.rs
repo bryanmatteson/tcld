@@ -6,6 +6,11 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "debugger")]
 pub mod debugger;
 
+// The Tauri app itself lives in the library so `tcld ui` can host the same
+// window in-process; `main.rs` is a thin launcher over `app::run`.
+pub mod app;
+pub use app::{LaunchOptions, run};
+
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchProfileWindowContract {

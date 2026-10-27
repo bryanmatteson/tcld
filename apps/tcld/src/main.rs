@@ -14,7 +14,9 @@ fn main() {
         eprintln!("{message}");
         // Backend availability is a distinct, stable CLI capability failure.
         // Keep it aligned with `tcld run` and the documented package contract.
-        let exit_code = if message.starts_with("hybrid_unavailable:") {
+        let exit_code = if message.starts_with("hybrid_unavailable:")
+            || message.starts_with("ui_unavailable:")
+        {
             3
         } else {
             1
@@ -82,6 +84,9 @@ fn run() -> Result<()> {
         }
         TcldCommand::Run(parsed) => {
             tcld::run::run_script(parsed)?;
+        }
+        TcldCommand::Ui(parsed) => {
+            tcld::ui::run_ui(parsed)?;
         }
     }
     Ok(())

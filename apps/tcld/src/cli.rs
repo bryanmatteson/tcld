@@ -73,6 +73,22 @@ pub enum TcldCommand {
     /// `UnimplementedOpcode` trap when an instruction is outside the VM's
     /// supported pass scope.
     Run(RunArgs),
+    /// Open the native desktop workbench
+    ///
+    /// Hosts the Tauri desktop window in this process, optionally opening FILE
+    /// on startup. The command returns when the last window closes.
+    ///
+    /// Requires a binary built with `--features native-ui` after building the
+    /// frontend (`npm run build --prefix apps/tcld-gui`). Other builds return
+    /// `ui_unavailable` with exit code 3.
+    Ui(UiArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct UiArgs {
+    /// Tcl source or bytecode file to open when the window starts
+    #[arg(value_name = "FILE")]
+    pub input_path: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
@@ -676,6 +692,37 @@ mod tests {
         let unified = help_text("tcld", None);
         assert!(unified.contains("debug"));
         assert!(unified.contains("Debug Tcl source or bytecode"));
+    }
+
+    #[test]
+    fn parse_tcld_ui_accepts_an_optional_file() {
+        let bare = parse_cli_from(["tcld", "ui"]).expect("bare ui parses");
+        match bare.command {
+            TcldCommand::Ui(args) => assert_eq!(args, UiArgs { input_path: None }),
+            _ => panic!("expected Ui command"),
+        }
+
+        let with_file = parse_cli_from(["tcld", "ui", "demo.tbc"]).expect("ui with a file parses");
+        match with_file.command {
+            TcldCommand::Ui(args) => assert_eq!(args.input_path.as_deref(), Some("demo.tbc")),
+            _ => panic!("expected Ui command"),
+        }
+
+        let err = parse_cli_from(["tcld", "ui", "a.tbc", "b.tbc"])
+            .expect_err("ui opens at most one file");
+        assert!(err.to_string().contains("unexpected argument"));
+    }
+
+    #[test]
+    fn ui_help_documents_subcommand_and_appears_in_top_level_help() {
+        let topic = help_text("tcld", Some("ui"));
+        assert!(topic.contains("Usage: tcld ui [FILE]"));
+        assert!(topic.contains("--features native-ui"));
+        assert!(topic.contains("npm run build --prefix apps/tcld-gui"));
+        assert!(topic.contains("ui_unavailable"));
+
+        let unified = help_text("tcld", None);
+        assert!(unified.contains("Open the native desktop workbench"));
     }
 
     #[test]

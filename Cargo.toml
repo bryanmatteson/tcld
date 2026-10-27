@@ -22,6 +22,7 @@
     tcld-interp      = { path = "crates/tcld-interp", default-features = false }
     tcld-ir          = { path = "crates/tcld-ir" }
     tcld-syntax      = { path = "crates/tcld-syntax" }
+    tcld-tauri       = { path = "apps/tcld-tauri" }
     tcld-tui         = { path = "crates/tcld-tui" }
     tcld-vm          = { path = "crates/tcld-vm", default-features = false }
 

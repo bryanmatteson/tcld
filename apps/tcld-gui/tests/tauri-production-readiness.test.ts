@@ -365,7 +365,7 @@ test("native menu, toolbar source, and capabilities expose supported actions whi
 
   const toolbar = fs.readFileSync(path.resolve(process.cwd(), "src/components/chrome/DebugToolbar.tsx"), "utf8");
   const page = fs.readFileSync(path.resolve(process.cwd(), "src/app/page.tsx"), "utf8");
-  const main = fs.readFileSync(path.resolve(process.cwd(), "../tcld-tauri/src/main.rs"), "utf8");
+  const main = fs.readFileSync(path.resolve(process.cwd(), "../tcld-tauri/src/app.rs"), "utf8");
   const tauriLib = fs.readFileSync(path.resolve(process.cwd(), "../tcld-tauri/src/lib.rs"), "utf8");
   const capabilities = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), "../tcld-tauri/capabilities/default.json"), "utf8")) as { permissions: string[] };
 

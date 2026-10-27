@@ -4,6 +4,7 @@ pub mod debug;
 pub mod explore;
 pub mod highlight;
 pub mod run;
+pub mod ui;
 
 pub mod analysis {
     pub use tcld_core::analysis::*;

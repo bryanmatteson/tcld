@@ -256,6 +256,20 @@ export async function getAppCapabilities(): Promise<AppCapabilities> {
   }
 }
 
+/**
+ * File handed over by the launcher (`tcld ui <file>` / `tcld-tauri <file>`).
+ * The backend yields it once; outside the desktop host, or against an older
+ * backend without the command, there is nothing to open.
+ */
+export async function takeLaunchOpenPath(): Promise<string | null> {
+  if (!isTauri()) return null;
+  try {
+    return (await invoke<string | null | undefined>("take_launch_open_path")) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function loadFile(path: string): Promise<LoadResult> {
   return consumeLoadResult(await invoke<LoadResultRaw>("load_file", { path }));
 }

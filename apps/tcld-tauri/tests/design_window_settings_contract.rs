@@ -79,12 +79,12 @@ fn native_menu_contract_wires_preferences_and_run_configuration_window_commands(
 
 #[test]
 fn main_registers_preferences_and_appearance_settings_commands() {
-    let main_rs = include_str!("../src/main.rs");
+    let main_rs = include_str!("../src/app.rs");
 
     assert!(main_rs.contains("open_preferences_window"));
     assert!(main_rs.contains("load_appearance_settings"));
     assert!(main_rs.contains("save_appearance_settings"));
-    assert!(main_rs.contains("Result<Option<tcld_tauri::AppearanceSettingsPayload>"));
+    assert!(main_rs.contains("Result<Option<crate::AppearanceSettingsPayload>"));
     assert!(main_rs.contains("return Ok(None);"));
     assert!(main_rs.contains("appearance-settings.json"));
 }
