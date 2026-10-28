@@ -289,6 +289,12 @@ def finalize_appimage(bundle_dir, env, signed):
 
 
 def verify_desktop(executable, root, target, signed, build_env):
+    if 'apple' in target:
+        info = plistlib.loads((root / 'Contents/Info.plist').read_bytes())
+        if root / 'Contents/MacOS' / info['CFBundleExecutable'] != executable:
+            raise ValueError('Desktop bundle launcher does not match its executable')
+        if info['CFBundleIdentifier'] != json.loads((ROOT / 'apps/tcld-tauri/tauri.conf.json').read_text())['identifier']:
+            raise ValueError('Desktop bundle identifier does not match its configuration')
     environment = clean_env() | {'TCL_LIBRARY': '/nonexistent-build-library'}
     result = run([executable, '--distribution-smoke-test'], cwd=root, env=environment, capture=True)
     if 'TCLD distribution smoke passed' not in result or str(root) not in result:
@@ -608,10 +614,14 @@ def homebrew(output, metadata, *, allow_unsigned=False):
         entries = [item for item in metadata if selector in item['target']]
         if entries:
             formula.append(f'  on_{os_name} do')
+            revision = max(item.get('package_revision', 0) for item in entries)
+            if revision:
+                formula.append(f'    revision {revision}')
             for item in entries:
                 name = f'tcld-{build_version}-{item["target"]}.tar.gz'
                 cpu = 'arm' if item['target'].startswith('aarch64') else 'intel'
-                formula.extend([f'    on_{cpu} do', f'      url "{base}/{name}"',
+                suffix = f'?revision={item["package_revision"]}' if item.get('package_revision') else ''
+                formula.extend([f'    on_{cpu} do', f'      url "{base}/{name}{suffix}"',
                     f'      sha256 "{item["artifacts"][name]}"', '    end'])
             formula.append('  end')
     formula.extend(['  def install', '    bin.install "tcld"', '    (lib/"tcld").install "lib/tcld/nub"', '    pkgshare.install "examples"',
@@ -619,11 +629,13 @@ def homebrew(output, metadata, *, allow_unsigned=False):
     tap = output / 'homebrew'
     (tap / 'Formula').mkdir(parents=True, exist_ok=True)
     (tap / 'Formula/tcld.rb').write_text('\n'.join(formula))
-    mac = [item for item in metadata if 'apple' in item['target'] and (item['signed'] or allow_unsigned)]
+    mac = [item for item in metadata if 'apple' in item['target'] and (item['signed'] or item.get('apple_signed') or allow_unsigned)]
     if not mac:
         (tap / 'Casks/tcld.rb').unlink(missing_ok=True)
     if mac:
-        lines = ['cask "tcld" do', f'  version "{ver}"']
+        revision = max(item.get('package_revision', 0) for item in mac)
+        cask_version = f'{ver},{revision}' if revision else ver
+        lines = ['cask "tcld" do', f'  version "{cask_version}"']
         for item in mac:
             name = next(name for name in item['artifacts'] if name.endswith('.dmg'))
             cpu = 'arm' if item['target'].startswith('aarch64') else 'intel'
@@ -631,12 +643,18 @@ def homebrew(output, metadata, *, allow_unsigned=False):
         lines += ['  name "TCLD"', '  desc "Tcl bytecode analysis workbench"',
             f'  homepage "https://github.com/{CONFIG["repository"]}"',
             '  depends_on macos: :big_sur', '  app "TCLD.app"']
-        if any(not item['signed'] for item in mac):
+        if build_version != ver or any(not item['signed'] for item in mac):
             lines += ['  caveats <<~EOS',
                 f'    Release {ver} reuses build {build_version} without recompilation.',
-                '    The application reports its original build version.',
-                '    This desktop build is unsigned and not notarized; in-app updates are unavailable.',
-                '  EOS']
+                '    The application reports its original build version.']
+            if any(not (item['signed'] or item.get('apple_signed')) for item in mac):
+                lines.append('    This desktop build is unsigned and not notarized; in-app updates are unavailable.')
+            else:
+                if any(not (item['signed'] or item.get('notarized')) for item in mac):
+                    lines.append('    This desktop build is signed but not notarized.')
+                if any(not item['signed'] for item in mac):
+                    lines.append('    In-app updates are unavailable; use Homebrew to update.')
+            lines.append('  EOS')
         lines += ['end', '']
         (tap / 'Casks').mkdir(exist_ok=True)
         (tap / 'Casks/tcld.rb').write_text('\n'.join(lines))

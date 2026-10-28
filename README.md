@@ -174,8 +174,9 @@ brew install --cask bryanmatteson/tap/tcld
 
 Desktop distributions include a private Tcl 9 runtime and hybrid execution
 support. The 1.0.0 release reuses the last validated packages without rebuilding:
-the CLI and desktop About dialog still report build version 0.3.2. Its desktop
-packages are unsigned and not notarized; in-app updates are unavailable.
+the CLI and desktop About dialog still report build version 0.3.2. The macOS
+packages are signed with Developer ID and notarized; in-app updates are
+unavailable in these reused binaries.
 
 CI runs locally, only when requested, with Linux checks in OrbStack. See
 [Distribution](DISTRIBUTION.md) for package builds, local CI, signing, updates,

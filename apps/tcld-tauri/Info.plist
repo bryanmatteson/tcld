@@ -5,9 +5,9 @@
     <key>CFBundleDisplayName</key>
     <string>TCLD</string>
     <key>CFBundleExecutable</key>
-    <string>tcld-studio</string>
+    <string>tcld-tauri</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.matteson.tcld-studio</string>
+    <string>dev.matteson.tcld</string>
     <key>CFBundleName</key>
     <string>TCLD</string>
   </dict>

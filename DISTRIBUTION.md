@@ -18,9 +18,14 @@ recompilation. Its Homebrew release version is 1.0.0; the binaries and desktop
 About dialog retain build version 0.3.2. Release downloads include `version.txt`
 for the publication version and `build-version.txt` for the archive/executable
 version. The installer checks the original build while downloading everything
-from the selected release tag. These promoted desktop packages are unsigned
-development builds, without notarization or in-app updater support. This is an
-explicit reuse exception for 1.0.0; newly built releases use the signing flow below.
+from the selected release tag. The macOS CLI and desktop packages are signed
+with Developer ID and notarized by Apple. The apps and DMGs have stapled tickets.
+Signing and correcting the app's launcher metadata required repackaging, not
+recompilation. The Homebrew macOS formula revision and cask package revision
+allow upgrades from the initial unsigned publication. Linux files are unchanged.
+These reused binaries do not contain in-app updater support; use Homebrew or
+direct downloads for updates. This is an explicit reuse exception for 1.0.0;
+newly built releases use the signing flow below.
 
 - CLI: Tcl-independent `tcld`, terminal explorer, and Tcl 8.6/9 loadable debugger
   extensions, with manifests under `lib/tcld/nub`. Host debugging needs the
@@ -111,6 +116,17 @@ export APPLE_TEAM_ID='...'
 
 Alternatively set `APPLE_API_ISSUER`, `APPLE_API_KEY`, and `APPLE_API_KEY_PATH`
 for Tauri's notarization flow. Keep all credentials outside the repository.
+
+Existing packages can also be signed without compilation using `codesign` and
+submitted with `xcrun notarytool --keychain-profile PROFILE`. The maintainer's
+existing `talos-notary` profile works for this team; the credential stays in
+Keychain. Sign nested Mach-O libraries first, refresh nub manifest checksums,
+verify that `CFBundleExecutable` names the actual launcher, and sign the app last.
+Submit the signed apps and CLI payloads in a ZIP, staple accepted app tickets,
+then create, sign, notarize, and staple the DMGs. Repackage CLI archives only after
+their code is accepted. Regenerate package hashes, release metadata, and Homebrew
+definitions before publication. Apple notarization is separate from the Tauri
+updater signing key and cannot enable an updater in an existing binary.
 
 Generate and back up a persistent Tauri update key once:
 

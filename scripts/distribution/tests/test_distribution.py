@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import plistlib
 import subprocess
 import tarfile
 import tempfile
@@ -177,6 +178,18 @@ class AssemblyTests(unittest.TestCase):
         release.write_json(self.output / 'targets' / (target + '.json'), metadata)
         return metadata
 
+    def test_desktop_rejects_stale_launcher_metadata_before_running_binary(self):
+        app = self.output / 'TCLD.app'
+        (app / 'Contents').mkdir(parents=True)
+        (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({
+            'CFBundleExecutable': 'tcld-studio',
+            'CFBundleIdentifier': 'dev.matteson.tcld',
+        }))
+        with patch.object(release, 'run') as run:
+            with self.assertRaisesRegex(ValueError, 'launcher'):
+                release.verify_desktop(app / 'Contents/MacOS/tcld-tauri', app, TARGET, True, {})
+        run.assert_not_called()
+
     def test_assembly_generates_arch_specific_updates_and_complete_homebrew_install(self):
         self.target(TARGET)
         self.target('x86_64-apple-darwin')
@@ -219,6 +232,23 @@ class AssemblyTests(unittest.TestCase):
         self.assertIn('assert_match "tcld 0.3.2"', formula)
         self.assertTrue((self.output / 'homebrew/Casks/tcld.rb').is_file())
         self.assertIn('unsigned and not notarized', (self.output / 'homebrew/Casks/tcld.rb').read_text())
+
+    def test_notarized_repack_updates_homebrew_without_claiming_updater_signatures(self):
+        metadata = []
+        for target in release.TARGETS:
+            item = self.target(target, signed=False)
+            if 'apple' in target:
+                item.update(apple_signed=True, notarized=True, package_revision=1)
+            metadata.append(item)
+        release.homebrew(self.output, metadata)
+        formula = (self.output / 'homebrew/Formula/tcld.rb').read_text()
+        self.assertIn('revision 1', formula)
+        self.assertIn('.tar.gz?revision=1', formula)
+        cask = (self.output / 'homebrew/Casks/tcld.rb').read_text()
+        self.assertIn('version "1.0.0,1"', cask)
+        self.assertNotIn('not notarized', cask)
+        self.assertNotIn('unsigned', cask)
+        self.assertIn('In-app updates are unavailable', cask)
 
     def test_unsigned_build_cannot_assemble_as_release(self):
         self.target(TARGET, signed=False)
