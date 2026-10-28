@@ -528,6 +528,11 @@ def ci_native(output):
     tools(env)
     prefix = tcl_runtime(work, host_target(), env)
     tcl86 = tcl_runtime(work, host_target(), env, '86')
+    if sys.platform == 'linux':
+        # CI executables use the private build prefix. Installed-package checks
+        # clear this override and verify their relocated runtime independently.
+        env['LD_LIBRARY_PATH'] = str(prefix / 'lib') + (
+            os.pathsep + env['LD_LIBRARY_PATH'] if env.get('LD_LIBRARY_PATH') else '')
     env['TCLD_TCLSH86'] = str(tcl86 / 'bin/tclsh8.6')
     env['TCLD_TCLSH'] = str(prefix / 'bin/tclsh9.0')
     run(['npm', 'ci', '--prefix', 'apps/tcld-gui'], env=env)
