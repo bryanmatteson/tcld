@@ -694,7 +694,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let shell = dir.path().join("tclsh-test");
-        std::fs::write(&shell, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::write(&shell, format!("#!/bin/sh\nread -r _\n{body}\n")).unwrap();
         std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
         (dir, shell)
     }
@@ -817,7 +817,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let shell = dir.path().join("tclsh-custom");
-        std::fs::write(&shell, "#!/bin/sh\nprintf 9.0.3\n").unwrap();
+        std::fs::write(&shell, "#!/bin/sh\nread -r _\nprintf 9.0.3\n").unwrap();
         std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
         let selection = locate_tclsh(shell.to_str(), Some(TclAbi::Tcl86)).unwrap();
         assert_eq!(selection.path, shell);
@@ -833,7 +833,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let shell = dir.path().join("tclsh8.5");
-        std::fs::write(&shell, "#!/bin/sh\nprintf 8.5.9\n").unwrap();
+        std::fs::write(&shell, "#!/bin/sh\nread -r _\nprintf 8.5.9\n").unwrap();
         std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
         let selection = locate_tclsh(shell.to_str(), None).expect("8.5 is supported");
         assert_eq!(selection.abi, TclAbi::Tcl85);
@@ -847,7 +847,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let shell = dir.path().join("tclsh8.5");
-        std::fs::write(&shell, "#!/bin/sh\nprintf 8.5.9\n").unwrap();
+        std::fs::write(&shell, "#!/bin/sh\nread -r _\nprintf 8.5.9\n").unwrap();
         std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let selection =
@@ -887,7 +887,8 @@ mod tests {
         let missing = "/nonexistent/tcld-test-tclsh9.0";
         let error = locate_tclsh(Some(missing), Some(TclAbi::Tcl9)).unwrap_err();
         assert!(error.contains(missing), "{error}");
-        assert!(error.contains("failed to start"), "{error}");
+        // Emulation can report exec failure during the probe, after spawn.
+        assert!(error.contains("Choose a Tcl"), "{error}");
     }
 
     #[test]
@@ -974,7 +975,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let tcl9 = dir.path().join("tclsh9.0");
-        std::fs::write(&tcl9, "#!/bin/sh\nprintf 9.0.3\n").unwrap();
+        std::fs::write(&tcl9, "#!/bin/sh\nread -r _\nprintf 9.0.3\n").unwrap();
         std::fs::set_permissions(&tcl9, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let error =
@@ -996,7 +997,7 @@ mod tests {
             ("tclsh9.0", "9.0.3"),
         ] {
             let shell = dir.path().join(name);
-            std::fs::write(&shell, format!("#!/bin/sh\nprintf {version}\n")).unwrap();
+            std::fs::write(&shell, format!("#!/bin/sh\nread -r _\nprintf {version}\n")).unwrap();
             std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
@@ -1021,7 +1022,7 @@ mod tests {
         // when both satisfy the preferred search order.
         for (name, version) in [("tclsh", "8.5.9"), ("tclsh8.6", "8.6.17")] {
             let shell = dir.path().join(name);
-            std::fs::write(&shell, format!("#!/bin/sh\nprintf {version}\n")).unwrap();
+            std::fs::write(&shell, format!("#!/bin/sh\nread -r _\nprintf {version}\n")).unwrap();
             std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
@@ -1038,14 +1039,14 @@ mod tests {
 
         let path_dir = tempfile::tempdir().unwrap();
         let fallback = path_dir.path().join("tclsh8.5");
-        std::fs::write(&fallback, "#!/bin/sh\nprintf 8.5.9\n").unwrap();
+        std::fs::write(&fallback, "#!/bin/sh\nread -r _\nprintf 8.5.9\n").unwrap();
         std::fs::set_permissions(&fallback, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let prefix = tempfile::tempdir().unwrap();
         let bin = prefix.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let preferred = bin.join("tclsh8.6");
-        std::fs::write(&preferred, "#!/bin/sh\nprintf 8.6.17\n").unwrap();
+        std::fs::write(&preferred, "#!/bin/sh\nread -r _\nprintf 8.6.17\n").unwrap();
         std::fs::set_permissions(&preferred, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let selection = locate_tclsh_in_with_prefixes(
