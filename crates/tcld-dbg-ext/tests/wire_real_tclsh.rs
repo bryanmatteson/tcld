@@ -177,6 +177,7 @@ fn empty_target_completes_without_inventing_a_pause_location() {
     );
     let dir = std::env::temp_dir().join(format!("tcld-empty-{tag}"));
     std::fs::create_dir_all(&dir).expect("create empty-target fixture directory");
+    let dir = dir.canonicalize().expect("canonical fixture directory");
     let target = dir.join("empty.tcl");
     let target_text = target.to_string_lossy().into_owned();
     std::fs::write(&target, "# no executable commands\n\n").expect("write empty target");
@@ -238,6 +239,7 @@ fn start_target_pauses_before_first_user_side_effect() {
     );
     let dir = std::env::temp_dir().join(format!("tcld-entry-{tag}"));
     std::fs::create_dir_all(&dir).expect("create fixture directory");
+    let dir = dir.canonicalize().expect("canonical fixture directory");
     let target = dir.join("target.tcl");
     let sentinel = dir.join("first-command-ran");
     std::fs::write(
@@ -324,6 +326,7 @@ fn pending_file_line_breakpoint_resolves_before_target_reaches_it() {
     );
     let dir = std::env::temp_dir().join(format!("tcld-pending-{tag}"));
     std::fs::create_dir_all(&dir).expect("create fixture directory");
+    let dir = dir.canonicalize().expect("canonical fixture directory");
     let target = dir.join("target.tcl");
     let sentinel = dir.join("breakpoint-command-ran");
     std::fs::write(
@@ -351,10 +354,10 @@ fn pending_file_line_breakpoint_resolves_before_target_reaches_it() {
         })
         .expect("stage file line breakpoint")
         .into_payload();
-    assert!(pending.starts_with("pending"), "unexpected id: {pending}");
+    assert!(!pending.is_empty(), "missing breakpoint id");
     let listed = ctrl.send(Op::BpList).expect("list pending").into_payload();
     assert!(
-        listed.contains("pending 1"),
+        listed.contains(&format!("id {pending} ")) && listed.contains("pending 1"),
         "pending row missing: {listed}"
     );
     let persisted = ctrl
