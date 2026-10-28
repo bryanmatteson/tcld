@@ -13,6 +13,7 @@ typedef Tcl_Size Tcld_Size;
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <pthread.h>
 #endif
 
 typedef int (*TcldOpcodeHook)(
@@ -31,7 +32,11 @@ typedef int (*tcld_opcode_current_source_fn)(
     const char **file_out,
     Tcld_Size *line_out);
 
-static int g_resolved = 0;
+#if defined(_WIN32)
+static INIT_ONCE g_resolve_once = INIT_ONCE_STATIC_INIT;
+#else
+static pthread_once_t g_resolve_once = PTHREAD_ONCE_INIT;
+#endif
 static tcld_opcode_supported_fn g_supported = NULL;
 static tcld_opcode_set_hook_fn g_set_hook = NULL;
 static tcld_opcode_arm_fn g_arm = NULL;
@@ -54,18 +59,32 @@ static void *resolve_symbol(const char *name) {
 #endif
 }
 
-static void resolve_symbols_once(void) {
-    if (g_resolved) {
-        return;
-    }
-    g_resolved = 1;
-
+static void resolve_symbols(void) {
     g_supported = (tcld_opcode_supported_fn) resolve_symbol("tcld_opcode_supported");
     g_set_hook = (tcld_opcode_set_hook_fn) resolve_symbol("tcld_opcode_set_hook");
     g_arm = (tcld_opcode_arm_fn) resolve_symbol("tcld_opcode_arm");
     g_current_pc = (tcld_opcode_current_pc_fn) resolve_symbol("tcld_opcode_current_pc");
     g_current_source =
         (tcld_opcode_current_source_fn) resolve_symbol("tcld_opcode_current_source");
+}
+
+#if defined(_WIN32)
+static BOOL CALLBACK resolve_symbols_callback(
+    PINIT_ONCE once, PVOID parameter, PVOID *context) {
+    (void) once;
+    (void) parameter;
+    (void) context;
+    resolve_symbols();
+    return TRUE;
+}
+#endif
+
+static void resolve_symbols_once(void) {
+#if defined(_WIN32)
+    InitOnceExecuteOnce(&g_resolve_once, resolve_symbols_callback, NULL, NULL);
+#else
+    pthread_once(&g_resolve_once, resolve_symbols);
+#endif
 }
 
 int tcld_opcode_runtime_supported(Tcl_Interp *interp) {
