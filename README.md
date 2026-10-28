@@ -116,7 +116,7 @@ tcld explore path/to/file.tbc       # open the terminal explorer
 tcld coverage report               # report opcode and Tcl-version coverage
 ```
 
-Output is colored when stdout is a terminal and plain when redirected.
+Output uses ANSI color when stdout is a terminal and plain text when redirected.
 Use `--no-colors` or `NO_COLOR=1` to disable color explicitly. Run
 `tcld --help` or `tcld <command> --help` for command options.
 

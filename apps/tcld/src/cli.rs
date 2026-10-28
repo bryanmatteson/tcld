@@ -638,8 +638,8 @@ mod tests {
         match parsed {
             TcldCommand::Debug(args) => {
                 assert_eq!(args.input_path, "fixtures/demo.tcl");
-                assert!(args.tclsh.is_none());
-                assert!(args.dylib.is_none());
+                assert_eq!(args.tclsh, std::env::var("TCLD_TCLSH").ok());
+                assert_eq!(args.dylib, std::env::var("TCLD_DBG_DYLIB").ok());
                 assert!(args.bootstrap.is_none());
                 assert!(args.theme.is_none());
                 assert!(!args.no_colors);
