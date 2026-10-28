@@ -9,7 +9,51 @@ pub mod debugger;
 // The Tauri app itself lives in the library so `tcld ui` can host the same
 // window in-process; `main.rs` is a thin launcher over `app::run`.
 pub mod app;
+#[cfg(feature = "updater")]
+mod updates;
 pub use app::{LaunchOptions, run};
+
+/// Probe the same analysis and execution engines used by the installed app.
+pub fn distribution_smoke_test() -> Result<(), String> {
+    #[cfg(all(feature = "debugger", feature = "hybrid"))]
+    {
+        debugger::distribution_resource_smoke_test()?;
+        let interp = tcld_interp::Interpreter::new().map_err(|e| e.to_string())?;
+        let library = interp.eval("info library").map_err(|e| e.to_string())?;
+        interp
+            .eval("package require http; package require msgcat; encoding convertto iso8859-1 café; clock format 0 -gmt 1")
+            .map_err(|e| format!("packaged Tcl script library: {e}"))?;
+        if interp.eval("expr {6 * 7}").map_err(|e| e.to_string())? != "42" {
+            return Err("embedded Tcl evaluation failed".into());
+        }
+        let source = "set answer [expr {6 * 7}]; set answer";
+        let image = tcld_compile::compile_source(
+            "distribution-probe.tcl".into(),
+            source.into(),
+            tcld_compile::CompileMode::Hybrid,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut engine =
+            tcld_vm::HybridEngine::new(tcld_vm::RuntimeMode::Hybrid).map_err(|e| e.to_string())?;
+        engine
+            .bootstrap(Some("tcld-tauri"))
+            .map_err(|e| e.to_string())?;
+        match engine
+            .debug_start_image(&image, false)
+            .map_err(|e| e.to_string())?
+            .outcome
+        {
+            tcld_vm::DebugOutcome::Finished { result }
+                if result.as_string().map_err(|e| e.to_string())? == "42" => {}
+            outcome => return Err(format!("hybrid smoke failed: {outcome:?}")),
+        }
+        do_load_source(source, "distribution-probe.tcl")?;
+        println!("TCLD distribution smoke passed; Tcl library: {library}");
+        Ok(())
+    }
+    #[cfg(not(all(feature = "debugger", feature = "hybrid")))]
+    Err("desktop distribution requires debugger and hybrid features".into())
+}
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

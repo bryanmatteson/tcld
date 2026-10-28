@@ -1,0 +1,14 @@
+# Local tooling only. Nothing here installs a hook or starts CI automatically.
+rust = "1.97.1"
+node = "22.21.1"
+tauri_cli = "2.11.4"
+cargo_deny = "0.19.9"
+tcl86_commit = "874e4fe4264a40c00c4db5115afba9600f9f368d"
+tcl86_sha256 = "5fbdd07f18a3ce9f2642bad0b92af68dc412964f05e1431fe60dd27858538a5a"
+tcl_commit = "9b38e7eaac00e5617f1c6d51f8ca38798674a091"
+tcl_sha256 = "c4abd78dd21fcf7512700db04ba1ec465ef3986fe91643ef69b00bf3b190551c"
+repository = "bryanmatteson/tcld"
+tap = "bryanmatteson/tap"
+macos_minimum = "11.0"
+linux_image = "tcld-distribution:debian12"
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]

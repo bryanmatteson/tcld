@@ -1,5 +1,5 @@
 [tools]
-    rust          = "latest"
+    rust          = "1.97.1"
     rust-analyzer = "latest"
 
 [tasks."tcld:explore"]
@@ -26,3 +26,15 @@
 [tasks."tcld-tauri:dev"]
     description = "Run the desktop GUI in development mode"
     run         = "cargo tauri dev"
+
+[tasks."tcld:ci"]
+    description = "Run local native and OrbStack CI explicitly"
+    run = "python3 scripts/distribution/release.py ci"
+
+[tasks."tcld:dist"]
+    description = "Build and verify a local distribution (no full CI, signing, or publication)"
+    run = "python3 scripts/distribution/release.py build"
+
+[tasks."tcld:release"]
+    description = "Run local CI and prepare signed packages from committed source"
+    run = "python3 scripts/distribution/release.py release"

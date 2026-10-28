@@ -182,6 +182,10 @@ pub fn locate_nub_paths(
     })
 }
 
+pub(super) fn locate_extension_for_shell(tclsh: &std::path::Path) -> Result<PathBuf, String> {
+    locate_dylib(None, probe_tclsh_abi(tclsh)?)
+}
+
 fn locate_tclsh(override_path: Option<&str>) -> Result<PathBuf, String> {
     if let Some(p) = override_path {
         let path = PathBuf::from(p);
@@ -360,6 +364,7 @@ fn automatic_dylib_candidates(
             bin_dir.join("../lib/tcld/nub"),
             bin_dir.join("resources/lib/tcld/nub"),
             bin_dir.join("../Resources/lib/tcld/nub"),
+            bin_dir.join("../lib/TCLD/lib/tcld/nub"),
         ] {
             candidates.push(base.join(abi.bundle_dir()).join(file));
         }
@@ -387,6 +392,14 @@ fn automatic_dylib_candidates(
         }
     }
     candidates
+}
+
+#[cfg(feature = "hybrid")]
+pub(super) fn distribution_nub_paths() -> Result<Vec<PathBuf>, String> {
+    [TclAbi::Tcl86, TclAbi::Tcl9]
+        .into_iter()
+        .map(|abi| locate_dylib(None, abi))
+        .collect()
 }
 
 fn locate_bootstrap() -> Result<(PathBuf, Option<TempFileGuard>), String> {

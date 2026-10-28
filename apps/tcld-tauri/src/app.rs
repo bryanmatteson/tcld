@@ -110,6 +110,16 @@ struct AppState {
 /// The main window takes it once on mount and opens it like a recent file.
 struct LaunchOpenPath(Mutex<Option<String>>);
 
+#[tauri::command]
+fn distribution_ui_ready(app: tauri::AppHandle, state: State<'_, RwLock<AppState>>) {
+    if std::env::args().any(|arg| arg == "--distribution-ui-smoke-test")
+        && state.try_read().is_ok_and(|state| state.loaded.is_some())
+    {
+        println!("TCLD installed UI opened and rendered bytecode");
+        app.exit(0);
+    }
+}
+
 // ─── Tauri Commands ─────────────────────────────────────────────────
 
 /// The frontend consumes `debugger_available` to gate debug UI instead of
@@ -564,6 +574,13 @@ fn build_menu(
             menu_items.insert(item_contract.item_id.to_string(), menu_item.clone());
             submenu = submenu.item(&menu_item);
         }
+        #[cfg(feature = "updater")]
+        if menu_contract.label == "Help" {
+            let check = MenuItemBuilder::new("Check for Updates...")
+                .id("distribution_check_updates")
+                .build(app)?;
+            submenu = submenu.separator().item(&check);
+        }
         submenus.push((menu_contract.label, submenu.build()?));
     }
 
@@ -674,7 +691,26 @@ pub fn run(options: LaunchOptions) -> Result<(), String> {
                 .build(),
         );
 
+    #[cfg(feature = "updater")]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+
     let builder = builder
+        .on_page_load(|webview, payload| {
+            if std::env::args().any(|arg| arg == "--distribution-ui-smoke-test")
+                && payload.event() == tauri::webview::PageLoadEvent::Finished
+                && webview.label() == "main"
+            {
+                let _ = webview.eval(
+                    r#"
+                    const probe = setInterval(() => {
+                        if (document.querySelector('[data-token-role="opcode"]')) {
+                            window.__TAURI__.core.invoke('distribution_ui_ready');
+                        }
+                    }, 250);
+                "#,
+                );
+            }
+        })
         .manage(RwLock::new(AppState { loaded: None }))
         .manage(LaunchOpenPath(Mutex::new(
             options
@@ -691,6 +727,11 @@ pub fn run(options: LaunchOptions) -> Result<(), String> {
 
         app.on_menu_event(|app_handle, event| {
             let id = event.id().0.as_str();
+            #[cfg(feature = "updater")]
+            if id == "distribution_check_updates" {
+                crate::updates::check(app_handle.clone());
+                return;
+            }
             let contract = crate::native_menu_run_configuration_contract();
             if contract.item_by_id(id).is_some()
                 || contract
@@ -765,6 +806,7 @@ pub fn run(options: LaunchOptions) -> Result<(), String> {
 
     #[cfg(feature = "debugger")]
     let builder = builder.invoke_handler(tauri::generate_handler![
+        distribution_ui_ready,
         get_app_capabilities,
         take_launch_open_path,
         load_file,
@@ -817,6 +859,7 @@ pub fn run(options: LaunchOptions) -> Result<(), String> {
 
     #[cfg(not(feature = "debugger"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
+        distribution_ui_ready,
         get_app_capabilities,
         take_launch_open_path,
         load_file,

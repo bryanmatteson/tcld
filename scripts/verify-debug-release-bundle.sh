@@ -61,7 +61,7 @@ PY
   fi
 
   if [[ -n "$shell" ]]; then
-    printf 'load {%s} Tcld_dbg\nputs [package require tcld_dbg]\n' "$library" | "$shell" | grep -E '^0\.'
+    printf 'load {%s} Tcld_dbg\nputs [package require tcld_dbg]\n' "$library" | "$shell" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$'
   fi
 }
 
@@ -105,9 +105,13 @@ abi = sys.argv[3]
 mode = sys.argv[4]
 supplied_target = sys.argv[5]
 extension = "dylib" if sys.platform == "darwin" else "so"
-expected_nub = os.path.realpath(
-    os.path.join(os.path.dirname(binary), "lib", "tcld", "nub", abi, f"libtcld_dbg.{extension}")
-)
+nub_candidates = [
+    os.path.join(os.path.dirname(binary), relative, abi, f"libtcld_dbg.{extension}")
+    for relative in ("lib/tcld/nub", "../lib/tcld/nub")
+]
+expected_nub = next((os.path.realpath(path) for path in nub_candidates if os.path.isfile(path)), None)
+if expected_nub is None:
+    raise SystemExit(f"No installed {abi} nub beside {binary}")
 
 def descendants(parent):
     listing = subprocess.run(

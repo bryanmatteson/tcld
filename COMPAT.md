@@ -331,8 +331,9 @@ printf 'load {%s} Tcld_dbg\nputs [package require tcld_dbg]\n' \
   target/debug-nub-tcl85/debug/libtcld_dbg.dylib | /usr/bin/tclsh8.5
 ```
 
-CI requires Tcl 8.6 and 9.0. macOS release jobs also require Tcl 8.5 when they
-package the system-shell nub.
+Explicit local CI requires Tcl 8.6 and 9.0. Release packages include their
+loadable nubs. Tcl 8.5 remains an optional source-build extension. See
+[Distribution](DISTRIBUTION.md) for the local OrbStack runner.
 
 ## Release archives
 

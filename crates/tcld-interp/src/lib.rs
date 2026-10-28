@@ -1,8 +1,30 @@
 use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 use std::os::raw::{c_char, c_int, c_void};
+use std::path::{Path, PathBuf};
 
 use tcl_sys::*;
+
+// Set the packaged script library on each interpreter, never in the process
+// environment: other threads can run Tcl or launch another ABI's interpreter.
+fn packaged_library(executable: &Path) -> Option<PathBuf> {
+    let bin = executable.parent()?;
+    #[cfg(feature = "tcl9")]
+    let version = "tcl9.0";
+    #[cfg(feature = "tcl8_6")]
+    let version = "tcl8.6";
+    #[cfg(feature = "tcl8_5")]
+    let version = "tcl8.5";
+    [
+        bin.join("../Resources").join(version),
+        bin.join("../lib/tcld").join(version),
+        bin.join("../lib/tcld-tauri").join(version),
+        bin.join("../lib/TCLD").join(version),
+        bin.join("../share/tcld-tauri").join(version),
+    ]
+    .into_iter()
+    .find(|path| path.join("init.tcl").is_file())
+}
 
 // Tcl keeps a process-wide notifier registry keyed by OS thread ID. Release
 // it when a Rust-owned thread exits so a reused thread ID is initialized anew.
@@ -56,6 +78,19 @@ impl Interpreter {
                     error_info: None,
                     error_code: None,
                 });
+            }
+            if let Some(library) = std::env::current_exe()
+                .ok()
+                .and_then(|exe| packaged_library(&exe))
+            {
+                let value = library.to_string_lossy();
+                Tcl_SetVar2Ex(
+                    interp,
+                    c"tcl_library".as_ptr(),
+                    std::ptr::null(),
+                    Tcl_NewStringObj(value.as_ptr().cast(), value.len() as Tcl_Size),
+                    TCL_GLOBAL_ONLY,
+                );
             }
             let ret = Tcl_Init(interp);
             if ret != TCL_OK {
@@ -507,5 +542,44 @@ unsafe extern "C" fn trace_callback_trampoline(
 unsafe extern "C" fn trace_delete_callback(client_data: *mut c_void) {
     unsafe {
         let _ = Box::from_raw(client_data as *mut Box<dyn FnMut(&str, i32) -> bool>);
+    }
+}
+
+#[cfg(test)]
+mod distribution_tests {
+    use super::*;
+
+    #[test]
+    fn packaged_library_follows_app_and_linux_install_layouts() {
+        let root = tempfile::tempdir().unwrap();
+        #[cfg(feature = "tcl9")]
+        let version = "tcl9.0";
+        #[cfg(feature = "tcl8_6")]
+        let version = "tcl8.6";
+        #[cfg(feature = "tcl8_5")]
+        let version = "tcl8.5";
+        for (executable, library) in [
+            (
+                "TCLD.app/Contents/MacOS/tcld-tauri".into(),
+                format!("TCLD.app/Contents/Resources/{version}"),
+            ),
+            (
+                "usr/bin/tcld-tauri".into(),
+                format!("usr/lib/TCLD/{version}"),
+            ),
+        ] {
+            let executable: String = executable;
+            let exe = root.path().join(executable);
+            std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            assert!(packaged_library(&exe).is_none());
+            let lib = root.path().join(library);
+            std::fs::create_dir_all(&lib).unwrap();
+            assert!(packaged_library(&exe).is_none());
+            std::fs::write(lib.join("init.tcl"), "# probe").unwrap();
+            assert_eq!(
+                packaged_library(&exe).unwrap().canonicalize().unwrap(),
+                lib.canonicalize().unwrap()
+            );
+        }
     }
 }

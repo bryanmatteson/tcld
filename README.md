@@ -2,7 +2,6 @@
 <h1 align="center">Tcld</h1>
 <p align="center"><strong>Recover the source. Follow the bytecode. Understand the program.</strong></p>
 
-[![CI](https://github.com/bryanmatteson/tcld/actions/workflows/ci.yml/badge.svg)](https://github.com/bryanmatteson/tcld/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/rust-stable-orange.svg)
 
@@ -156,6 +155,31 @@ This is an actual session recorded with VHS from [docs/demo.tape](docs/demo.tape
 </details>
 
 ## Quick start
+
+Download packages from [GitHub Releases](https://github.com/bryanmatteson/tcld/releases).
+The CLI archive includes the debugger libraries as well as the executable; keep
+them together. The download installer installs the complete package under `~/.local`:
+
+```bash
+curl -fsSLO https://github.com/bryanmatteson/tcld/releases/latest/download/install.sh
+sh install.sh
+```
+
+Homebrew installs the CLI or desktop application from `bryanmatteson/tap`:
+
+```bash
+brew install bryanmatteson/tap/tcld
+brew install --cask bryanmatteson/tap/tcld
+```
+
+Desktop distributions include a private Tcl 9 runtime and hybrid execution
+support. The 1.0.0 release reuses the last validated packages without rebuilding:
+the CLI and desktop About dialog still report build version 0.3.2. Its desktop
+packages are unsigned and not notarized; in-app updates are unavailable.
+
+CI runs locally, only when requested, with Linux checks in OrbStack. See
+[Distribution](DISTRIBUTION.md) for package builds, local CI, signing, updates,
+and publishing.
 
 You need stable Rust (the toolchain is pinned in `rust-toolchain.toml`). The
 default CLI build has **no Tcl dependency**:

@@ -12,3 +12,6 @@ apps/tcld-gui/next-env.d.ts
 third_party/tcl/src/
 third_party/tcl/build/
 third_party/tcl/runtime/
+
+# Local Python distribution tooling.
+__pycache__/

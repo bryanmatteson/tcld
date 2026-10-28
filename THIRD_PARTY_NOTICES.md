@@ -3,6 +3,12 @@
 Tcld is licensed under Apache-2.0. The following third-party material retains
 their original permissive terms:
 
+Desktop distributions include Tcl 9.0.2 with the opcode-runtime patch under
+`third_party/tcl/patches/`. Tcl's redistribution terms are included in the
+desktop package as `licenses/license.terms`. Its script library and shared
+library remain under those terms. The CLI archives contain the loadable
+debugger extensions and do not embed a Tcl runtime.
+
 - `apps/tcld/tests/fixtures/` contains TclPro compiler fixtures from Ajuba
   Solutions and ActiveState. Its notice is reproduced at
   `apps/tcld/tests/fixtures/license.terms`.

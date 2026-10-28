@@ -3,6 +3,14 @@
 use std::path::PathBuf;
 
 fn main() {
+    // Probe the installed engines without opening a webview.
+    if std::env::args().nth(1).as_deref() == Some("--distribution-smoke-test") {
+        if let Err(error) = tcld_tauri::distribution_smoke_test() {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     // `tcld-tauri [FILE]`: the optional file mirrors `tcld ui [FILE]`. Flags
     // are skipped so launcher-injected arguments (e.g. macOS `-psn_*`) are
     // never mistaken for a path.

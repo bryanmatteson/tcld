@@ -1012,9 +1012,10 @@ fn agent_script_path() -> Result<String, String> {
     let exe_dir = exe.parent().ok_or("no exe parent dir")?;
 
     let candidates = [
-        exe_dir.join("../../../apps/tcld-tauri/src/resources/tcld-agent.tcl"),
         exe_dir.join("resources/tcld-agent.tcl"),
         exe_dir.join("../Resources/tcld-agent.tcl"),
+        exe_dir.join("../lib/TCLD/tcld-agent.tcl"),
+        exe_dir.join("../../../apps/tcld-tauri/src/resources/tcld-agent.tcl"),
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/resources/tcld-agent.tcl"),
     ];
 
@@ -1066,10 +1067,19 @@ fn debug_extension_library_path() -> Option<String> {
     }
 
     let file = dbg_extension_library_filename();
+    let abi = if cfg!(feature = "tcl8_6") {
+        "tcl8.6"
+    } else {
+        "tcl9.0"
+    };
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
 
     let candidates = [
+        exe_dir.join(format!("../Resources/lib/tcld/nub/{abi}/{file}")),
+        exe_dir.join(format!("../lib/TCLD/lib/tcld/nub/{abi}/{file}")),
+        exe_dir.join(format!("lib/tcld/nub/{abi}/{file}")),
+        exe_dir.join(format!("../lib/tcld/nub/{abi}/{file}")),
         exe_dir.join(format!("../../../target/debug/{file}")),
         exe_dir.join(format!("../../../target/release/{file}")),
         exe_dir.join(format!("resources/{file}")),
@@ -1090,6 +1100,41 @@ fn debug_extension_library_path() -> Option<String> {
     }
 
     None
+}
+
+/// Verify the discovery paths used by both embedded and external debugging.
+#[cfg(feature = "hybrid")]
+pub(crate) fn distribution_resource_smoke_test() -> Result<(), String> {
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let bin = executable.parent().ok_or("missing executable directory")?;
+    let root = bin
+        .join(if cfg!(target_os = "macos") {
+            "../Resources"
+        } else {
+            "../lib/TCLD"
+        })
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let agent = PathBuf::from(agent_script_path()?);
+    let mut paths = vec![
+        agent.clone(),
+        agent.with_file_name("tcld-bytecode-hooks.tcl"),
+        agent.with_file_name("tcld-debug-extension.tcl"),
+        PathBuf::from(
+            debug_extension_library_path().ok_or("packaged embedded debugger extension missing")?,
+        ),
+    ];
+    paths.extend(remote::distribution_nub_paths()?);
+    for path in paths {
+        let path = path.canonicalize().map_err(|e| e.to_string())?;
+        if !path.starts_with(&root) || !path.is_file() {
+            return Err(format!(
+                "debugger resource escaped installed package: {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_disassembly_command_header(line: &str) -> Option<u32> {
@@ -1612,13 +1657,20 @@ impl DebugActor {
     ) -> Result<(), String> {
         let path = canonicalize_debug_path(path);
         let script_source = tokio::fs::read_to_string(&path).await.ok();
-        let debug_extension_path = debug_extension_library_path();
         let backend = if launch_options.backend == DebugBackendKind::External {
             BackendKind::Wire
         } else if tclsh_path.is_some() {
             BackendKind::External
         } else {
             BackendKind::Embedded
+        };
+        let debug_extension_path = if backend == BackendKind::External {
+            tclsh_path
+                .as_deref()
+                .and_then(|shell| remote::locate_extension_for_shell(Path::new(shell)).ok())
+                .map(|path| path.to_string_lossy().into_owned())
+        } else {
+            debug_extension_library_path()
         };
         let hook_plan = resolve_hook_plan(backend, launch_options.clone())?;
 
