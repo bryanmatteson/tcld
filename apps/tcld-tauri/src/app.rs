@@ -725,6 +725,11 @@ pub fn run(options: LaunchOptions) -> Result<(), String> {
         let (menu, debug_items) = build_menu(app)?;
         app.set_menu(menu)?;
 
+        #[cfg(feature = "updater")]
+        if std::env::args().any(|arg| arg == "--distribution-updater-probe") {
+            crate::updates::distribution_probe(app.handle().clone());
+        }
+
         app.on_menu_event(|app_handle, event| {
             let id = event.id().0.as_str();
             #[cfg(feature = "updater")]

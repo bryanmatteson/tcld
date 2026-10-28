@@ -13,8 +13,9 @@ belong outside the shared checkout. No Git worktrees are created.
 
 ## Products
 
-The 1.0.0 publication promotes the previously validated 0.3.2 builds without
-recompilation. Its Homebrew release version is 1.0.0; the binaries and desktop
+Release 1.0.1 uses matching package and executable versions and enables signed
+desktop updates. The earlier 1.0.0 publication promoted the previously validated
+0.3.2 builds without recompilation. Its Homebrew release version is 1.0.0; the binaries and desktop
 About dialog retain build version 0.3.2. Release downloads include `version.txt`
 for the publication version and `build-version.txt` for the archive/executable
 version. The installer checks the original build while downloading everything
@@ -128,14 +129,62 @@ their code is accepted. Regenerate package hashes, release metadata, and Homebre
 definitions before publication. Apple notarization is separate from the Tauri
 updater signing key and cannot enable an updater in an existing binary.
 
-Generate and back up a persistent Tauri update key once:
+The 1.0.1 desktop build enables the updater. Its persistent public key is in
+`apps/tcld-tauri/tauri.conf.json`; the corresponding encrypted private key and
+password are stored in macOS Keychain under `dev.matteson.tcld.updater`. The
+maintainer's encrypted private-key backup is `~/.config/tcld/updater.key`.
+Back up both the key and its password securely before relying on this identity
+for published updates. Never generate a replacement just to prepare a release.
+
+For a new signing identity, initialize once:
 
 ```sh
-cargo tauri signer generate -w "$HOME/.config/tcld/updater.key"
-export TAURI_SIGNING_PRIVATE_KEY="$HOME/.config/tcld/updater.key"
-export TCLD_UPDATER_PUBLIC_KEY="$(cat "$HOME/.config/tcld/updater.key.pub")"
-# Set TAURI_SIGNING_PRIVATE_KEY_PASSWORD privately if the key is encrypted.
+python3 scripts/distribution/signing.py setup
+python3 scripts/distribution/signing.py configure \
+  --identity 'Developer ID Application: ...' --notary-profile PROFILE
+python3 scripts/distribution/signing.py status
 ```
+
+`setup` refuses to replace an existing key. Only the public key enters the
+repository; the helper loads the private key and password into the build
+process without printing them. Local Apple identity/profile settings live in
+`~/.config/tcld/signing.json`. The configured `talos-notary` profile authenticates
+notarization without exporting an Apple ID password. The runner notarizes the
+signed app and CLI payload, staples the app, creates and notarizes the DMG, then
+signs the final stapled `.app.tar.gz` for the updater.
+
+Other machines may supply `TAURI_SIGNING_PRIVATE_KEY`,
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, and `TCLD_UPDATER_PUBLIC_KEY` explicitly.
+Linux receives the updater credential from the local orchestrator; Apple
+credentials and Keychain profiles are not forwarded into OrbStack.
+
+A signed local build runs package checks without full CI or publication:
+
+```sh
+python3 scripts/distribution/release.py build --signed \
+  --output "$HOME/Documents/Developer/tcld/updater-1.0.1"
+```
+
+A local build covers only the selected target. A single-target `assemble`
+creates local checksums and an update manifest, but publication requires the
+complete configured platform matrix.
+
+Verify the actual macOS updater against a disposable copy of a packaged app:
+
+```sh
+python3 scripts/distribution/verify-updater.py \
+  --app /path/to/TCLD.app \
+  --archive /path/to/TCLD.app.tar.gz \
+  --signature /path/to/TCLD.app.tar.gz.sig \
+  --output "$HOME/Documents/Developer/tcld/updater-verification"
+```
+
+This uses an ephemeral loopback HTTPS server and the real updater plugin. It
+checks version selection, rejects corrupted downloads and invalid signatures,
+installs a valid signed payload, then verifies the replacement's signature,
+Gatekeeper acceptance, notarization ticket, and packaged-runtime launch. Test
+certificates and application copies are temporary. The normal update feed is
+unchanged, and the diagnostic endpoint accepts only loopback HTTPS.
 
 The public key is embedded in signed desktop builds. The private key signs the
 update artifacts; it is distinct from Apple code signing. Linux containers
@@ -153,7 +202,7 @@ versions, and Tauri version together. `version` checks their consistency:
 
 ```sh
 python3 scripts/distribution/release.py version
-python3 scripts/distribution/release.py release --output "$HOME/Documents/Developer/tcld/releases/1.0.0"
+python3 scripts/distribution/release.py release --output "$HOME/Documents/Developer/tcld/releases/1.0.1"
 ```
 
 Commit the intended release source before `release`. It exports `HEAD` to an isolated
@@ -177,7 +226,7 @@ annotated version tag at the source commit, write `release-notes.md` in the outp
 directory, and run:
 
 ```sh
-python3 scripts/distribution/release.py publish --output "$HOME/Documents/Developer/tcld/releases/1.0.0"
+python3 scripts/distribution/release.py publish --output "$HOME/Documents/Developer/tcld/releases/1.0.1"
 ```
 
 This verifies the tag/source match, complete target matrix, signing status, and
@@ -193,7 +242,7 @@ brew install --cask bryanmatteson/tap/tcld
 ```
 
 Linux/macOS archive users can download `install.sh` from the release and run it
-with `--version 1.0.0` and/or `--prefix DIR`. The installer verifies the archive
+with `--version 1.0.1` and/or `--prefix DIR`. The installer verifies the archive
 and nub checksums, smoke-tests the executable, preserves the complete package in
 a versioned directory, and atomically switches `bin/tcld`. It refuses unrelated
 existing executables and keeps old versions available. An alternate artifact

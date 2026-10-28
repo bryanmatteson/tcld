@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import plistlib
 import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
@@ -14,6 +15,7 @@ import unittest
 from unittest.mock import patch
 
 DIRECTORY = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(DIRECTORY))
 
 
 def module(name):
@@ -204,6 +206,7 @@ class AssemblyTests(unittest.TestCase):
         self.assertIn('on_arm do', formula)
         self.assertIn('on_intel do', formula)
         self.assertTrue((self.output / 'homebrew/Casks/tcld.rb').is_file())
+        self.assertIn('auto_updates true', (self.output / 'homebrew/Casks/tcld.rb').read_text())
         checksums = (self.artifacts / 'SHA256SUMS').read_text()
         self.assertIn('install.py', checksums)
         self.assertIn('latest.json', checksums)
@@ -221,14 +224,14 @@ class AssemblyTests(unittest.TestCase):
             item = self.target(target, signed=False)
             item['version'] = '0.3.2'
             item['artifacts'] = {
-                name.replace('tcld-1.0.0-', 'tcld-0.3.2-'): sha
+                name.replace(f'tcld-{release.version()}-', 'tcld-0.3.2-'): sha
                 for name, sha in item['artifacts'].items()
             }
             metadata.append(item)
         release.homebrew(self.output, metadata, allow_unsigned=True)
         formula = (self.output / 'homebrew/Formula/tcld.rb').read_text()
-        self.assertIn('version "1.0.0"', formula)
-        self.assertIn('/v1.0.0/tcld-0.3.2-aarch64-apple-darwin.tar.gz', formula)
+        self.assertIn(f'version "{release.version()}"', formula)
+        self.assertIn(f'/v{release.version()}/tcld-0.3.2-aarch64-apple-darwin.tar.gz', formula)
         self.assertIn('assert_match "tcld 0.3.2"', formula)
         self.assertTrue((self.output / 'homebrew/Casks/tcld.rb').is_file())
         self.assertIn('unsigned and not notarized', (self.output / 'homebrew/Casks/tcld.rb').read_text())
@@ -245,7 +248,7 @@ class AssemblyTests(unittest.TestCase):
         self.assertIn('revision 1', formula)
         self.assertIn('.tar.gz?revision=1', formula)
         cask = (self.output / 'homebrew/Casks/tcld.rb').read_text()
-        self.assertIn('version "1.0.0,1"', cask)
+        self.assertIn(f'version "{release.version()},1"', cask)
         self.assertNotIn('not notarized', cask)
         self.assertNotIn('unsigned', cask)
         self.assertIn('In-app updates are unavailable', cask)
@@ -317,6 +320,27 @@ class AssemblyTests(unittest.TestCase):
         path.write_text(json.dumps(data))
         with patch.object(release, 'ROOT', source), self.assertRaisesRegex(ValueError, 'Version mismatch'):
             release.version()
+
+    def test_saved_notary_profile_is_accepted_without_exporting_apple_password(self):
+        values = {'TAURI_SIGNING_PRIVATE_KEY': 'private-test-key',
+                  'TCLD_UPDATER_PUBLIC_KEY': 'public-test-key',
+                  'APPLE_SIGNING_IDENTITY': 'Developer ID Application: Test',
+                  'TCLD_NOTARY_PROFILE': 'saved-profile'}
+        with patch.dict(os.environ, values, clear=True), patch.object(release.signing, 'configure'):
+            release.signing_environment()
+        self.assertNotIn('APPLE_PASSWORD', values)
+
+    def test_failed_notarization_stops_packaging(self):
+        with patch.object(release, 'run', return_value=json.dumps({'id': 'test-submission', 'status': 'Invalid'})):
+            with self.assertRaisesRegex(ValueError, 'not accepted'):
+                release.notarize_with_profile(self.output / 'test.zip', 'test-profile', self.output / 'notary.json')
+
+    def test_keychain_public_key_mismatch_is_rejected(self):
+        public = json.loads((release.ROOT / 'apps/tcld-tauri/tauri.conf.json').read_text())['plugins']['updater']['pubkey']
+        with patch.object(release.signing.sys, 'platform', 'darwin'), \
+             patch.object(release.signing, 'credentials', return_value={'public_key': 'wrong-key'}):
+            with self.assertRaisesRegex(ValueError, 'does not match'):
+                release.signing.configure({'TCLD_UPDATER_PUBLIC_KEY': public})
 
 
 if __name__ == '__main__':

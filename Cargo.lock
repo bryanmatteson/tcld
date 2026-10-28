@@ -4320,14 +4320,14 @@ dependencies = [
 
 [[package]]
 name = "tcl-sys"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "tcld"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "clap",
  "crossterm",
@@ -4352,7 +4352,7 @@ dependencies = [
 
 [[package]]
 name = "tcld-compile"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "sha2",
  "tcld-core",
@@ -4363,7 +4363,7 @@ dependencies = [
 
 [[package]]
 name = "tcld-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "num-bigint",
  "num-traits",
@@ -4372,7 +4372,7 @@ dependencies = [
 
 [[package]]
 name = "tcld-dbg-ext"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "arc-swap",
  "cc",
@@ -4384,7 +4384,7 @@ dependencies = [
 
 [[package]]
 name = "tcld-debug-state"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "arc-swap",
  "tcld-decompile",
@@ -4393,14 +4393,14 @@ dependencies = [
 
 [[package]]
 name = "tcld-debug-wire"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "tcld-debug-state",
 ]
 
 [[package]]
 name = "tcld-decompile"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "pretty",
  "tcld-core",
@@ -4410,7 +4410,7 @@ dependencies = [
 
 [[package]]
 name = "tcld-explore"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "similar",
  "tcld-core",
@@ -4420,7 +4420,7 @@ dependencies = [
 
 [[package]]
 name = "tcld-interp"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "tcl-sys",
  "tempfile",
@@ -4428,14 +4428,14 @@ dependencies = [
 
 [[package]]
 name = "tcld-ir"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "tcld-core",
 ]
 
 [[package]]
 name = "tcld-syntax"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "streaming-iterator",
  "tcld-core",
@@ -4445,7 +4445,7 @@ dependencies = [
 
 [[package]]
 name = "tcld-tauri"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4467,7 +4467,7 @@ dependencies = [
 
 [[package]]
 name = "tcld-tui"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -4479,7 +4479,7 @@ dependencies = [
 
 [[package]]
 name = "tcld-vm"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "cc",
  "corosensei",

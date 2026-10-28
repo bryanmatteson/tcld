@@ -17,6 +17,7 @@ import tarfile
 import tempfile
 import tomllib
 import urllib.request
+import signing
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = tomllib.loads((ROOT / 'scripts/distribution/config.toml').read_text())
@@ -256,13 +257,70 @@ def desktop_config(work, prefix, paths, target, signed):
         files = {'usr/lib/tcld-tauri/libtcl9.0.so': str(lib)}
         config['bundle']['linux'] = {'appimage': {'files': files}, 'deb': {'files': {'/usr/lib/tcld-tauri/libtcl9.0.so': str(lib)}}}
     if signed:
-        pubkey = os.environ.get('TCLD_UPDATER_PUBLIC_KEY', '').strip()
+        pubkey = os.environ.get('TCLD_UPDATER_PUBLIC_KEY', '').strip() or json.loads(
+            (ROOT / 'apps/tcld-tauri/tauri.conf.json').read_text()).get('plugins', {}).get('updater', {}).get('pubkey', '')
         if not pubkey:
             raise ValueError('TCLD_UPDATER_PUBLIC_KEY must contain the public key (not a path)')
         config['plugins'] = {'updater': {'pubkey': pubkey, 'endpoints': [f'https://github.com/{CONFIG["repository"]}/releases/latest/download/latest.json']}}
     path = work / 'tauri-distribution.json'
     write_json(path, config)
     return path
+
+
+def notarize_with_profile(path, profile, output):
+    result = json.loads(run(['xcrun', 'notarytool', 'submit', path, '--keychain-profile', profile,
+                             '--wait', '--output-format', 'json'], capture=True))
+    write_json(output, result)
+    if result.get('status') != 'Accepted':
+        run(['xcrun', 'notarytool', 'log', result['id'], '--keychain-profile', profile,
+             output.with_suffix('.log.json')])
+        raise ValueError(f'Notarization was not accepted: {result.get("status")} ({result["id"]})')
+    return result
+
+
+def finalize_macos(bundle_dir, cli, env):
+    """Notarize with saved credentials, then sign the final stapled updater payload."""
+    app = next((bundle_dir / 'macos').glob('*.app'))
+    profile = env.get('TCLD_NOTARY_PROFILE')
+    if profile:
+        # Bundlers may re-sign nested libraries. Bind manifests to the final
+        # bytes, then seal the app only after every resource is final.
+        for manifest in app.rglob('nub-manifest.json'):
+            data = json.loads(manifest.read_text())
+            data['sha256'] = digest(manifest.parent / data['library_filename'])
+            write_json(manifest, data)
+        run(['codesign', '--force', '--options', 'runtime', '--timestamp', '--sign',
+             env['APPLE_SIGNING_IDENTITY'], app])
+        with tempfile.TemporaryDirectory(prefix='tcld-notary-', dir=bundle_dir) as temporary:
+            root = Path(temporary)
+            payload = root / 'payload'
+            payload.mkdir()
+            run(['ditto', app, payload / app.name])
+            shutil.copytree(cli, payload / cli.name)
+            submission = root / 'payload.zip'
+            run(['ditto', '-c', '-k', '--keepParent', payload, submission])
+            notarize_with_profile(submission, profile, bundle_dir / 'notarization-app.json')
+        run(['xcrun', 'stapler', 'staple', app])
+        run(['xcrun', 'stapler', 'validate', app])
+        dmg = next((bundle_dir / 'dmg').glob('*.dmg'))
+        with tempfile.TemporaryDirectory(prefix='tcld-dmg-', dir=bundle_dir) as temporary:
+            layout = Path(temporary) / 'layout'
+            layout.mkdir()
+            run(['ditto', app, layout / app.name])
+            (layout / 'Applications').symlink_to('/Applications')
+            run(['hdiutil', 'create', '-volname', 'TCLD', '-srcfolder', layout, '-ov', '-format', 'UDZO', dmg])
+        run(['codesign', '--force', '--timestamp', '--sign', env['APPLE_SIGNING_IDENTITY'], dmg])
+        notarize_with_profile(dmg, profile, bundle_dir / 'notarization-dmg.json')
+        run(['xcrun', 'stapler', 'staple', dmg])
+        run(['xcrun', 'stapler', 'validate', dmg])
+        run(['spctl', '--assess', '--type', 'open', '--context', 'context:primary-signature', dmg])
+    update = app.with_name(app.name + '.tar.gz')
+    archive_tree(app, update)
+    signing_env = env.copy()
+    key = signing_env['TAURI_SIGNING_PRIVATE_KEY']
+    if '\n' not in key and len(key) < 240 and Path(key).is_file():
+        signing_env['TAURI_SIGNING_PRIVATE_KEY'] = Path(key).read_text()
+    run(['cargo', 'tauri', 'signer', 'sign', update], env=signing_env)
 
 
 def finalize_appimage(bundle_dir, env, signed):
@@ -401,6 +459,8 @@ def build_target(output, target, signed=False):
         for previous in bundle_dir.glob(pattern):
             previous.unlink()
     run(command, cwd=app_dir, env=env)
+    if signed and 'apple' in target:
+        finalize_macos(bundle_dir, bundle, env)
     if 'linux' in target:
         finalize_appimage(bundle_dir, env, signed)
     verify_and_collect(output, work, target, signed, env)
@@ -643,6 +703,8 @@ def homebrew(output, metadata, *, allow_unsigned=False):
         lines += ['  name "TCLD"', '  desc "Tcl bytecode analysis workbench"',
             f'  homepage "https://github.com/{CONFIG["repository"]}"',
             '  depends_on macos: :big_sur', '  app "TCLD.app"']
+        if all(item['signed'] for item in mac):
+            lines.append('  auto_updates true')
         if build_version != ver or any(not item['signed'] for item in mac):
             lines += ['  caveats <<~EOS',
                 f'    Release {ver} reuses build {build_version} without recompilation.',
@@ -661,6 +723,7 @@ def homebrew(output, metadata, *, allow_unsigned=False):
 
 
 def signing_environment(*, apple=True):
+    signing.configure(os.environ)
     keys = ['TAURI_SIGNING_PRIVATE_KEY', 'TCLD_UPDATER_PUBLIC_KEY']
     if apple:
         keys.append('APPLE_SIGNING_IDENTITY')
@@ -668,6 +731,8 @@ def signing_environment(*, apple=True):
         if not os.environ.get(key):
             raise ValueError(f'{key} is required for a release; see DISTRIBUTION.md')
     if not apple:
+        return
+    if os.environ.get('TCLD_NOTARY_PROFILE'):
         return
     apple_id = all(os.environ.get(key) for key in ['APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID'])
     apple_api = all(os.environ.get(key) for key in ['APPLE_API_ISSUER', 'APPLE_API_KEY', 'APPLE_API_KEY_PATH'])

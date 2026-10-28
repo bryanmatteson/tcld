@@ -59,3 +59,67 @@ async fn check_and_install(app: &tauri::AppHandle) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Exercise the real verifier/installer against a loopback HTTPS test server.
+/// This is explicit CLI diagnostics, never an alternate production update feed.
+pub fn distribution_probe(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let result = probe(&app).await;
+        let code = match result {
+            Ok(message) => {
+                println!("TCLD updater probe: {message}");
+                0
+            }
+            Err(error) => {
+                eprintln!("TCLD updater probe failed: {error}");
+                1
+            }
+        };
+        app.exit(code);
+    });
+}
+
+async fn probe(app: &tauri::AppHandle) -> Result<&'static str, String> {
+    let endpoint = std::env::var("TCLD_UPDATER_PROBE_ENDPOINT").map_err(|e| e.to_string())?;
+    let url = tauri::Url::parse(&endpoint).map_err(|e| e.to_string())?;
+    if url.scheme() != "https"
+        || !matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+    {
+        return Err("the updater probe requires loopback HTTPS".into());
+    }
+    let action = std::env::var("TCLD_UPDATER_PROBE_ACTION").unwrap_or_else(|_| "check".into());
+    if !matches!(action.as_str(), "check" | "download" | "install") {
+        return Err("invalid updater probe action".into());
+    }
+    let mut builder = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        .configure_client(|client| client.danger_accept_invalid_certs(true));
+    // An explicit package probe can reinstall its own version into a disposable
+    // app copy. Normal menu checks retain the default SemVer comparison.
+    if action != "check" {
+        builder = builder.version_comparator(|_, _| true);
+    }
+    let update = builder
+        .build()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(update) = update else {
+        return Ok("up to date");
+    };
+    if action == "check" {
+        return Ok("update available");
+    }
+    let bytes = update
+        .download(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    if action == "install" {
+        update.install(bytes).map_err(|e| e.to_string())?;
+        return Ok("installed");
+    }
+    Ok("download signature verified")
+}

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "TCLD",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "identifier": "dev.matteson.tcld",
   "build": {
     "beforeDevCommand": "npm run dev --prefix ../tcld-gui",
@@ -27,13 +27,23 @@
   },
   "bundle": {
     "active": true,
-    "icon": ["icons/icon.icns"],
+    "icon": [
+      "icons/icon.icns"
+    ],
     "resources": {
       "../tcld/tests/fixtures/license.terms": "licenses/TclPro-license.terms"
     },
     "macOS": {
       "bundleName": "TCLD",
       "minimumSystemVersion": "10.13"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERDMUM3NzFFM0Q5QTE5RTcKUldUbkdabzlIbmNjM01qZ1FQVG5rYkpqQVpKNnFIdGc4OHQ0elRPVDk3b2c3SFBKanQ5aDFkZjMK",
+      "endpoints": [
+        "https://github.com/bryanmatteson/tcld/releases/latest/download/latest.json"
+      ]
     }
   }
 }
