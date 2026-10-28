@@ -27,6 +27,9 @@ copyright notices and redistribution terms are retained in the corresponding
 source files. Tcl-specific locale tables and command integration in
 `crates/tcld-vm/src/regexp_command.rs` retain their original notices; Tcl's
 complete terms are reproduced in `crates/tcld-vm/src/regex/license.terms`.
+The oracle fixture `crates/tcld-vm/tests/fixtures/tcl9-reg.test` is an unmodified
+copy of Tcl 9.0.2's `tests/reg.test`, under those same terms with its original
+notice retained.
 The port replaces C pointers and interpreter-owned objects with Rust arenas,
 indices, and VM values, and omits Tcl's internal diagnostic switches.
 

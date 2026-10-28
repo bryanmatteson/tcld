@@ -105,7 +105,7 @@ fn assert_commands_match_tcl(commands: &[String]) {
     }
 }
 
-const REG_TEST: &str = include_str!("../../../third_party/tcl/src/tcl-core-9-0-2/tests/reg.test");
+const REG_TEST: &str = include_str!("fixtures/tcl9-reg.test");
 
 /// The `expect*` cases of reg.test, as Tcl reads them: kind, test id,
 /// flags, expression, then the target and expectations.
